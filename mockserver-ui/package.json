@@ -1,0 +1,75 @@
+{
+  "name": "mockserver-ui",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.22.2 <23.0.0",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "bench": "vitest bench --run",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test --config e2e/playwright.config.ts",
+    "test:e2e:anchor": "playwright test --config e2e/scroll-anchor.config.ts",
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
+    "demo": "bash scripts/launch-with-demo-data.sh",
+    "demo:data": "node scripts/populate-demo-data.mjs",
+    "capture": "bash scripts/launch-with-llm-capture.sh",
+    "screenshots": "node scripts/capture-dashboard-screenshots.mjs",
+    "screenshots:all": "bash scripts/capture-docs-screenshots.sh"
+  },
+  "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.0",
+    "@monaco-editor/react": "^4.7.0",
+    "@mui/icons-material": "^9.4.0",
+    "@mui/material": "^9.1.2",
+    "@mui/x-charts": "^9.15.0",
+    "@tanstack/react-virtual": "^3.14.13",
+    "@uiw/react-json-view": "^2.0.0-alpha.44",
+    "mermaid": "^12.1.0",
+    "monaco-editor": "^0.57.0",
+    "posthog-js": "^1.438.2",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.63.0",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "@vitest/coverage-v8": "^5.0.3",
+    "eslint": "^10.12.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.7",
+    "jsdom": "^30.1.2",
+    "playwright": "^1.61.1",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.71.1",
+    "vite": "^8.3.3",
+    "vitest": "^5.0.0"
+  },
+  "browserslist": [
+    ">0.2%",
+    "not dead",
+    "not op_mini all"
+  ],
+  "overrides": {
+    "@babel/core": "^7.29.6",
+    "dompurify": "^3.4.16",
+    "katex": "^0.18.2",
+    "lodash-es": "4.18.1"
+  }
+}

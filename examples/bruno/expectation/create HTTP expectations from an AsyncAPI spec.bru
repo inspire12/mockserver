@@ -1,0 +1,30 @@
+meta {
+  name: create HTTP expectations from an AsyncAPI spec
+  type: http
+  seq: 6
+}
+
+put {
+  url: {{baseUrl}}/mockserver/asyncapi/http
+  body: json
+  auth: inherit
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "spec": "asyncapi: 2.6.0\ninfo:\n  title: Test Service\n  version: 1.0.0\nchannels:\n  user/signedup:\n    publish:\n      message:\n        payload:\n          type: object\n          properties:\n            userId:\n              type: string",
+    "channelPathPrefix": "/events"
+  }
+}
+
+docs {
+  Generates HTTP expectations from an AsyncAPI 2.x/3.x spec (JSON/YAML, or a {spec, channelPathPrefix} wrapper) so each channel's example message can be served over plain HTTP without a live broker. One GET expectation is created per channel returning that channel's schema-aware example payload. This is distinct from PUT /mockserver/asyncapi, which loads a spec into the broker-publishing mock. Requires the mockserver-async module on the classpath (501 otherwise).
+  
+  AsyncAPI spec to import as HTTP expectations
+  
+  Full API reference: https://www.mock-server.com/mock_server/mockserver_clients.html
+}

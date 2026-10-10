@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# Buildkite adapter for the CI-agnostic release scripts.
+#
+# Translates Buildkite meta-data + pipeline inputs into the environment-
+# variable contract that scripts/release/* expects, then invokes one of:
+#   prepare | finalize | preflight | update-version-references | <component-name>
+#
+# After the script exits, syncs any values it wrote to
+# .tmp/release-outputs.env back into Buildkite meta-data so the next step
+# (potentially on a different agent) can read them.
+#
+# All Buildkite-specific code lives in this file. The release scripts know
+# nothing about Buildkite.
+
+set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $0 <prepare|finalize|preflight|update-version-references|<component>>" >&2
+  exit 2
+fi
+
+STAGE="$1"
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# ---- Preflight credential gate: dispatch BEFORE the release-stage plumbing --
+# The release credential liveness probe is a preflight GATE, not a release
+# stage: it translates no meta-data and writes no cross-step outputs, and —
+# being CI-agnostic — it REJECTS the --execute/--dry-run flag every publishing
+# stage takes (exit 64). So it must not go through the generic stage dispatch
+# below (which would append that flag and fail the gate for the wrong reason).
+# Hand it straight to its Buildkite step wrapper, which runs the probe with no
+# such flag, annotates a failure, and exits with the probe's own status. `exec`
+# so the wrapper's exit code becomes this runner's exit code.
+if [[ "$STAGE" == "check-credentials" ]]; then
+  exec "$REPO_ROOT/.buildkite/scripts/steps/check-release-credentials.sh"
+fi
+
+# ---- Preflight PERFORMANCE gate: dispatch BEFORE the release-stage plumbing --
+# Same reasoning as check-credentials above: the perf-preflight probe is a
+# CI-agnostic GATE, not a release stage. It translates no meta-data, writes no
+# cross-step outputs, and takes no --execute/--dry-run flag (the generic dispatch
+# below would append one). Hand it straight to its step wrapper, which deepens the
+# clone for the ancestry check, annotates a failure, and exits with the probe's own
+# status. `exec` so the wrapper's exit code becomes this runner's exit code.
+if [[ "$STAGE" == "check-perf" ]]; then
+  exec "$REPO_ROOT/.buildkite/scripts/steps/check-perf-preflight.sh"
+fi
+
+# ---- Translate Buildkite meta-data into env vars --------------------------
+get_meta() { buildkite-agent meta-data get "$1" 2>/dev/null || echo ""; }
+set_meta() { buildkite-agent meta-data set "$1" "$2"; }
+
+export RELEASE_VERSION="${RELEASE_VERSION:-$(get_meta release-version)}"
+export NEXT_VERSION="${NEXT_VERSION:-$(get_meta next-version)}"
+export RELEASE_TYPE="${RELEASE_TYPE:-$(get_meta release-type)}"
+export CREATE_VERSIONED_SITE="${CREATE_VERSIONED_SITE:-$(get_meta create-versioned-site)}"
+[[ -z "$RELEASE_TYPE" ]] && export RELEASE_TYPE="full"
+# Default to `auto`, not `no`: the release scripts derive the correct value
+# from RELEASE_VERSION vs OLD_VERSION. A hardcoded `no` here would force a wrong
+# value on a major/minor release (and silently overwrite the previous version's
+# archived docs site).
+[[ -z "$CREATE_VERSIONED_SITE" ]] && export CREATE_VERSIONED_SITE="auto"
+
+# Buildkite triggers real releases by default. The operator can flip the
+# "Dry Run?" toggle in the input step to validate the pipeline end-to-end
+# without publishing.
+DRY_RUN_META=$(get_meta dry-run)
+[[ "$DRY_RUN_META" == "true" ]] && export DRY_RUN="true"
+export DRY_RUN="${DRY_RUN:-false}"
+
+# Seed cross-step outputs from meta-data so the script sees them as env vars.
+WEBSITE_BUCKET_META=$(get_meta release.WEBSITE_BUCKET)
+DISTRIBUTION_ID_META=$(get_meta release.DISTRIBUTION_ID)
+[[ -n "$WEBSITE_BUCKET_META" ]] && export WEBSITE_BUCKET="$WEBSITE_BUCKET_META"
+[[ -n "$DISTRIBUTION_ID_META" ]] && export DISTRIBUTION_ID="$DISTRIBUTION_ID_META"
+
+# ---- Locate the script for this stage -------------------------------------
+case "$STAGE" in
+  prepare|finalize|preflight|update-version-references)
+    SCRIPT="$REPO_ROOT/scripts/release/$STAGE.sh"
+    ;;
+  *)
+    SCRIPT="$REPO_ROOT/scripts/release/components/$STAGE.sh"
+    ;;
+esac
+
+if [[ ! -x "$SCRIPT" ]]; then
+  echo "ERROR: no such release script: $SCRIPT" >&2
+  exit 2
+fi
+
+# ---- Clear any stale outputs from a prior step ----------------------------
+RELEASE_OUTPUTS_FILE="$REPO_ROOT/.tmp/release-outputs.env"
+rm -f "$RELEASE_OUTPUTS_FILE"
+
+# ---- Run the script -------------------------------------------------------
+# Pass the dry-run flag explicitly so scripts that ignore the env var (or
+# parse args first) still honour the operator's choice.
+SCRIPT_ARG="--execute"
+[[ "$DRY_RUN" == "true" ]] && SCRIPT_ARG="--dry-run"
+
+# A cancelled earlier job on this agent may have left staged credentials behind
+# (scripts/release/_lib.sh in_docker --secret-env); nothing else runs here now.
+find "$REPO_ROOT/.tmp" -maxdepth 1 -name 'secret-env.*' -exec rm -rf {} + 2>/dev/null || true
+
+set +e
+"$SCRIPT" "$SCRIPT_ARG"
+exit_code=$?
+set -e
+
+# ---- Sync outputs back to Buildkite meta-data -----------------------------
+if [[ -f "$RELEASE_OUTPUTS_FILE" ]]; then
+  echo "--- Syncing $(wc -l < "$RELEASE_OUTPUTS_FILE" | tr -d ' ') output(s) to Buildkite meta-data"
+  while IFS='=' read -r key value; do
+    [[ -z "$key" ]] && continue
+    echo "    release.$key"
+    set_meta "release.$key" "$value"
+  done < "$RELEASE_OUTPUTS_FILE"
+fi
+
+exit "$exit_code"

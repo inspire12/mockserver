@@ -1,0 +1,15 @@
+{"event":"messageStart","data":{"role":"assistant"}}
+{"event":"contentBlockDelta","data":{"contentBlockIndex":0,"delta":{"text":"Hell"}}}
+{"event":"contentBlockDelta","data":{"contentBlockIndex":0,"delta":{"text":"o"}}}
+{"event":"contentBlockDelta","data":{"contentBlockIndex":0,"delta":{"text":"!"}}}
+{"event":"contentBlockDelta","data":{"contentBlockIndex":0,"delta":{"text":" How"}}}
+{"event":"contentBlockDelta","data":{"contentBlockIndex":0,"delta":{"text":" can"}}}
+{"event":"contentBlockDelta","data":{"contentBlockIndex":0,"delta":{"text":" I"}}}
+{"event":"contentBlockDelta","data":{"contentBlockIndex":0,"delta":{"text":" help"}}}
+{"event":"contentBlockDelta","data":{"contentBlockIndex":0,"delta":{"text":" you"}}}
+{"event":"contentBlockDelta","data":{"contentBlockIndex":0,"delta":{"text":" toda"}}}
+{"event":"contentBlockDelta","data":{"contentBlockIndex":0,"delta":{"text":"y"}}}
+{"event":"contentBlockDelta","data":{"contentBlockIndex":0,"delta":{"text":"?"}}}
+{"event":"contentBlockStop","data":{"contentBlockIndex":0}}
+{"event":"messageStop","data":{"stopReason":"end_turn"}}
+{"event":"metadata","data":{"usage":{"inputTokens":0,"outputTokens":0,"totalTokens":0},"metrics":{"latencyMs":0}}}

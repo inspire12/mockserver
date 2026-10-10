@@ -1,0 +1,59 @@
+steps:
+  - label: ":s3: restore maven cache"
+    command: ".buildkite/scripts/cache-restore.sh maven"
+    timeout_in_minutes: 10
+    soft_fail: true
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - wait
+
+  - label: ":docker: update docker image"
+    command: "docker pull mockserver/mockserver:maven"
+    timeout_in_minutes: 10
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":maven: maven-plugin build"
+    command: ".buildkite/scripts/steps/maven-plugin-build.sh"
+    artifact_paths:
+      - "mockserver/mockserver-maven-plugin/**/TEST-*.xml"
+      - "mockserver/mockserver-netty/target/surefire-reports/TEST-org.mockserver.configuration.ConfigurationCallSiteGuardTest.xml"
+    timeout_in_minutes: 45
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - wait: ~
+    continue_on_failure: true
+
+  - label: ":junit: annotate test results"
+    plugins:
+      - junit-annotate#8a549e5220869601737287b4d6a9293703dc5a6f:  # v2.7.0
+          # Matches only what the build step uploaded: the plugin reports and the guard report.
+          artifacts: "mockserver/**/TEST-*.xml"
+          always-annotate: true
+          fail-build-on-error: false
+    timeout_in_minutes: 10
+
+  - label: ":s3: save maven cache"
+    command: ".buildkite/scripts/cache-save.sh maven"
+    timeout_in_minutes: 15
+    soft_fail: true
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2

@@ -1,8 +1,9 @@
 ---
 title: HTTPS & TLS
+description: Configure TLS for inbound and outbound connections, mTLS client authentication, dynamic certificate generation, and custom Certificate Authorities.
 layout: page
-pageOrder: 7
-section: 'General'
+pageOrder: 1
+section: 'Security'
 subsection: true
 sitemap:
   priority: 0.7
@@ -38,10 +39,16 @@ sitemap:
 <ul>
     <li>How dynamic certificate are created including, hostname (i.e. <a href="#button_configuration_ssl_certificate_domain_name">CN</a> & <a href="#button_configuration_ssl_subject_alternative_name_domains">SAN</a>) and ip address (i.e. <a href="#button_configuration_ssl_subject_alternative_name_ips">SAN</a>)</li>
     <li>The Certificate Authority <a href="#button_configuration_tls_certificate_authority_certificate">X.509 Certificate</a> and <a href="#button_configuration_tls_certificate_authority_private_key">Private Key</a> used to sign all generated X.509</li>
-    <li>Dynamic creation of a <a href="#button_configuration_dynamically_create_ca_certificate">unique (i.e. local) Certificate Authority X509 Certificate and Private Key</a> instead of using the fixed Certificate Authority X509 Certificate and Private Key in the <a target="_blank"href="https://github.com/mock-server/mockserver/blob/master/mockserver-core/src/main/resources/org/mockserver/socket/CertificateAuthorityCertificate.pem">git repo</a>.</li>
+    <li>Dynamic creation of a <a href="#button_configuration_dynamically_create_ca_certificate">unique (i.e. local) Certificate Authority X509 Certificate and Private Key</a> instead of using the fixed Certificate Authority X509 Certificate and Private Key in the <a target="_blank" href="https://github.com/mock-server/mockserver-monorepo/blob/master/mockserver/mockserver-core/src/main/resources/org/mockserver/socket/CertificateAuthorityCertificate.pem" rel="noopener noreferrer">git repo</a>.</li>
     <li>Require <a href="#button_configuration_require_mtls_for_all_tls_connections">mTLS (also called client authentication or two-way TLS)</a> for all TLS connections / HTTPS requests to MockServer</li>
     <li>Configure <a href="#button_configuration_trusted_tls_certs_group_for_proxied_reqs">trust store</a> and <a href="#button_configuration_forward_proxy_certificate_chain">client X.509</a> used during forwarded and proxied requests to endpoints requiring mTLS</li>
 </ul>
+
+<a id="tls_mitm_proxy" class="anchor" href="#tls_mitm_proxy">&nbsp;</a>
+
+<h3>TLS Termination (No Passthrough)</h3>
+
+<p><strong>Note:</strong> when proxying HTTPS traffic, MockServer performs man-in-the-middle (MITM) TLS termination. It decrypts incoming TLS connections, inspects the HTTP request content for expectation matching, and then re-encrypts traffic when forwarding to the upstream server. MockServer does <strong>not</strong> support TLS passthrough (where encrypted traffic is forwarded without decryption). This is by design — MockServer needs to inspect request content to match expectations, record requests for verification, and apply response actions.</p>
 
 <a id="verify_trust_chain" class="anchor" href="#verify_trust_chain">&nbsp;</a>
 
@@ -49,19 +56,21 @@ sitemap:
 
 <p>The MockServer CA X.509 must be considered a valid trust root to ensure MockServer's dynamically generate X.509 certificates are trusted by an HTTP Client.  This means the CA X.509 needs to be added into the JVM, HTTP Client or operating system as appropriate.</p>
 
-<p>The MockServer CA X.509 can be found (in PEM format) in the <a target="_blank"href="https://github.com/mock-server/mockserver/blob/master/mockserver-core/src/main/resources/org/mockserver/socket/CertificateAuthorityCertificate.pem">MockServer github repo</a> or can be loaded from the classpath location <span class="constant">/org/mockserver/socket/CertificateAuthorityCertificate.pem</span></p>
+<p><strong>Quick start:</strong> when run via the standalone JAR, Docker image, or <code class="inline_code">mockserver</code> CLI, MockServer writes the active CA certificate to <code class="inline_code">./mockserver-ca.pem</code> at startup (absolute path logged) and prints a copy-paste proxy setup block containing the environment variables to set. Embedded usage stays silent; the file and block are produced on the first <code class="inline_code">GET /mockserver/proxyConfiguration</code> call instead. The endpoint is always available (plain text or JSON), regardless of how MockServer was started. See <a href="/mock_server/ai_traffic_inspection.html#trust-ca">AI Traffic Inspection — Trust the MockServer CA Certificate</a> for a step-by-step guide.</p>
+
+<p>The MockServer CA X.509 can be found (in PEM format) in the <a target="_blank" href="https://github.com/mock-server/mockserver-monorepo/blob/master/mockserver/mockserver-core/src/main/resources/org/mockserver/socket/CertificateAuthorityCertificate.pem" rel="noopener noreferrer">MockServer github repo</a> or can be loaded from the classpath location <span class="constant">/org/mockserver/socket/CertificateAuthorityCertificate.pem</span></p>
 
 <h3>Operating System</h3>
 
 <p>It is possible to add the MockServer CA X.509 as a trusted root CA to your operating system, this will make most clients applications running on your OS (such as browsers) trust dynamically generated certificates from MockServer.</p>
 <p>This is only an acceptable risk if it is done for a short period and the configuration setting <a href="#button_configuration_dynamically_create_ca_certificate">dynamicallyCreateCertificateAuthorityCertificate</a> is enabled to generate a local unique CA X.509 and Private Key that is saved to your local disk in the folder configured using <a href="#button_configuration_directory_to_save_dynamic_ssl_certificates">directoryToSaveDynamicSSLCertificate</a>.</p>
-<p>If the configuration setting <a href="#button_configuration_dynamically_create_ca_certificate">dynamicallyCreateCertificateAuthorityCertificate</a> is not enabled, and your OS trusts the MockServer CA X.509, then this would leave your machine open to man-in-the-middle attacks because the corresponding Private Key is in the <a target="_blank"href="https://github.com/mock-server/mockserver/blob/master/mockserver-core/src/main/resources/org/mockserver/socket/CertificateAuthorityPrivateKey.pem">MockServer github repository</a>.  This would allow hackers to compromise all sensitive communicates such as to your bank or other sensitive sites.</p>
+<p>If the configuration setting <a href="#button_configuration_dynamically_create_ca_certificate">dynamicallyCreateCertificateAuthorityCertificate</a> is not enabled, and your OS trusts the MockServer CA X.509, then this would leave your machine open to man-in-the-middle attacks because the corresponding Private Key is in the <a target="_blank" href="https://github.com/mock-server/mockserver-monorepo/blob/master/mockserver/mockserver-core/src/main/resources/org/mockserver/socket/CertificateAuthorityPrivateKey.pem" rel="noopener noreferrer">MockServer github repository</a>.  This would allow hackers to compromise all sensitive communicates such as to your bank or other sensitive sites.</p>
 
 <h5>Web Browsers</h5>
 
-<p>Browsers (such as Chrome, Firefox or IE) may not always trust dynamically generated certificates from MockServer because of <a target="_blank" href="https://tools.ietf.org/html/rfc6962">Certificate Transparency</a> and <a target="_blank" href="https://tools.ietf.org/html/rfc7469">Public Key Pinning</a> both of which make it hard to dynamically generate certificates that are trusted.</p>
+<p>Browsers (such as Chrome, Firefox or IE) may not always trust dynamically generated certificates from MockServer because of <a target="_blank" href="https://tools.ietf.org/html/rfc6962" rel="noopener noreferrer">Certificate Transparency</a> and <a target="_blank" href="https://tools.ietf.org/html/rfc7469" rel="noopener noreferrer">Public Key Pinning</a> both of which make it hard to dynamically generate certificates that are trusted.</p>
 <p>Some sites will work but others (such as google sites) won't work due to certificate pinning.</p>
-<p>Browser that rely on <a target="_blank" href="https://tools.ietf.org/html/rfc6962">Certificate Transparency</a> will likely not trust dynamically generated certificates from MockServer</p>
+<p>Browser that rely on <a target="_blank" href="https://tools.ietf.org/html/rfc6962" rel="noopener noreferrer">Certificate Transparency</a> will likely not trust dynamically generated certificates from MockServer</p>
 
 <h3>Java via Classpath</h3>
 
@@ -162,13 +171,42 @@ public class ExampleTestClass {
     }
 }</code></pre>
 
+<h3>Java Custom TrustStore (Programmatic)</h3>
+
+<p>If you cannot modify the JVM's default SSLSocketFactory, you can programmatically create a custom TrustStore that trusts MockServer's dynamically generated certificates and use it with a specific HTTP client:</p>
+
+<pre class="prettyprint lang-java code"><code class="code">import org.mockserver.logging.MockServerLogger;
+import org.mockserver.socket.tls.KeyStoreFactory;
+
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.security.KeyStore;
+
+KeyStoreFactory keyStoreFactory = new KeyStoreFactory(new MockServerLogger());
+KeyStore trustStore = keyStoreFactory.loadOrCreateKeyStore();
+
+TrustManagerFactory trustManagerFactory =
+    TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+trustManagerFactory.init(trustStore);
+
+SSLContext sslContext = SSLContext.getInstance("TLS");
+sslContext.init(null, trustManagerFactory.getTrustManagers(), null);
+
+HttpsURLConnection connection =
+    (HttpsURLConnection) new URL("https://localhost:1080/some/path").openConnection();
+connection.setSSLSocketFactory(sslContext.getSocketFactory());</code></pre>
+
+<p>This approach is useful when you need to trust MockServer's certificates for a specific connection without affecting other HTTPS connections in the JVM.</p>
+
 <h3>Java Keytool</h3>
 
 <p>The Java <strong>keytool</strong> command can also be used to add the MockServer CA X.509 certificate to the list of trust CA Certificates for a JVM, as follows:</p>
 
 <pre class="prettyprint lang-java code"><code class="code">keytool -import -v -keystore /usr/lib/jvm/java-8-openjdk-amd64/jre/lib/security/cacerts -alias mockserver-ca -file CertificateAuthorityCertificate.pem -storepass changeit -trustcacerts -noprompt</code></pre>
 
-<p>An example bash script showing how this can be done can be found in the <a target="_blank"href="https://github.com/mock-server/mockserver/blob/master/scripts/install_ca_certificate.sh">MockServer github repo</a></p>
+<p>An example bash script showing how this can be done can be found in the <a target="_blank" href="https://github.com/mock-server/mockserver-monorepo/blob/master/scripts/install_ca_certificate.sh" rel="noopener noreferrer">MockServer github repo</a></p>
 
 <a id="hostname_validation" class="anchor" href="#hostname_validation">&nbsp;</a>
 
@@ -185,6 +223,748 @@ public class ExampleTestClass {
 
 <p><strong>Note:</strong> if a request is received with a Host header for a hostname not seen before the first request will fail validation because the TLS connection has already been established before the Host header can be read, any subsequent requests with that hostname will pass hostname validation.</p>
 
+<a id="mtls_examples" class="anchor" href="#mtls_examples">&nbsp;</a>
+
+<h2>mTLS Examples</h2>
+
+<p>The following examples show how to configure MockServer with mutual TLS (mTLS / client authentication) using self-generated certificates. A complete <a target="_blank" href="https://github.com/mock-server/mockserver-monorepo/tree/master/examples/docker-compose/docker_compose_with_mtls" rel="noopener noreferrer">Docker Compose example</a> is available in the MockServer repository.</p>
+
+<a id="mtls_generate_certificates" class="anchor" href="#mtls_generate_certificates">&nbsp;</a>
+
+<h3>Step 1: Generate Certificates</h3>
+
+<p>This example uses one CA to sign both server and client certificates. In production, server and client certificates may be issued by separate trusted CAs. The three certificate sets are:</p>
+<ul>
+    <li><strong>CA certificate and key</strong> &mdash; the root of trust; both MockServer and clients must trust this CA</li>
+    <li><strong>Server certificate and key</strong> &mdash; used by MockServer to identify itself to clients</li>
+    <li><strong>Client certificate and key</strong> &mdash; used by clients (curl, HTTP libraries) to authenticate to MockServer</li>
+</ul>
+
+<p>MockServer accepts private keys in both <strong>PKCS#8</strong> (<code class="inline_code">-----BEGIN PRIVATE KEY-----</code>) and <strong>PKCS#1 RSA</strong> (<code class="inline_code">-----BEGIN RSA PRIVATE KEY-----</code>) PEM format. The examples below use PKCS#8 for consistency. To convert a PKCS#1 key to PKCS#8:</p>
+<pre class="prettyprint lang-bash code"><code class="code">openssl pkcs8 -topk8 -inform PEM -in private_key_PKCS_1.pem -out private_key_PKCS_8.pem -nocrypt</code></pre>
+
+<h4>Using OpenSSL (Recommended)</h4>
+
+<pre class="prettyprint lang-bash code"><code class="code">#!/usr/bin/env bash
+set -euo pipefail
+
+DAYS=3650
+KEY_SIZE=2048
+
+# 1. Generate Certificate Authority (CA)
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:${KEY_SIZE} -out ca-key.pem
+openssl req -new -x509 -key ca-key.pem -out ca.pem -days ${DAYS} \
+    -subj "/C=UK/ST=England/L=London/O=MockServer/CN=MockServer CA"
+
+# 2. Generate server certificate signed by CA
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:${KEY_SIZE} -out server-key-pkcs8.pem
+openssl req -new -key server-key-pkcs8.pem -out server.csr \
+    -subj "/C=UK/ST=England/L=London/O=MockServer/CN=localhost"
+
+cat > server-ext.cnf &lt;&lt;EOF
+authorityKeyIdentifier=keyid,issuer
+basicConstraints=CA:FALSE
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=DNS:localhost,DNS:mockserver,DNS:host.docker.internal,IP:127.0.0.1,IP:0.0.0.0
+EOF
+
+openssl x509 -req -in server.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial \
+    -out server-cert.pem -days ${DAYS} -extfile server-ext.cnf
+
+# Create certificate chain (leaf + CA)
+cat server-cert.pem ca.pem > server-cert-chain.pem
+
+# 3. Generate client certificate signed by CA
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:${KEY_SIZE} -out client-key-pkcs8.pem
+openssl req -new -key client-key-pkcs8.pem -out client.csr \
+    -subj "/C=UK/ST=England/L=London/O=MockServer/CN=MockServer Client"
+
+cat > client-ext.cnf &lt;&lt;EOF
+authorityKeyIdentifier=keyid,issuer
+basicConstraints=CA:FALSE
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=clientAuth
+EOF
+
+openssl x509 -req -in client.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial \
+    -out client-cert.pem -days ${DAYS} -extfile client-ext.cnf
+
+cat client-cert.pem ca.pem > client-cert-chain.pem
+
+# Clean up CSR and temp files
+rm -f server.csr server-ext.cnf client.csr client-ext.cnf ca.srl</code></pre>
+
+<h4>Using CFSSL (Alternative)</h4>
+
+<p><a target="_blank" href="https://github.com/cloudflare/cfssl" rel="noopener noreferrer">CFSSL</a> is CloudFlare's PKI toolkit. Install with <code class="inline_code">brew install cfssl</code>.</p>
+
+<pre class="prettyprint lang-bash code"><code class="code">#!/usr/bin/env bash
+set -euo pipefail
+
+# 1. Generate CA
+cat > ca-csr.json &lt;&lt;EOF
+{
+  "key": { "algo": "rsa", "size": 2048 },
+  "names": [{ "C": "UK", "L": "London", "O": "MockServer", "CN": "MockServer CA" }]
+}
+EOF
+cfssl genkey -initca ca-csr.json | cfssljson -bare ca
+rm -f ca.csr
+
+# 2. Create signing config with explicit profiles and expiry
+cat > cfssl-config.json &lt;&lt;EOF
+{
+  "signing": {
+    "default": { "expiry": "87600h" },
+    "profiles": {
+      "server": {
+        "expiry": "87600h",
+        "usages": ["signing", "key encipherment", "server auth"]
+      },
+      "client": {
+        "expiry": "87600h",
+        "usages": ["signing", "key encipherment", "client auth"]
+      }
+    }
+  }
+}
+EOF
+
+# 3. Generate server certificate
+cat > server-csr.json &lt;&lt;EOF
+{
+  "CN": "localhost",
+  "hosts": ["localhost", "mockserver", "host.docker.internal", "127.0.0.1", "0.0.0.0"],
+  "key": { "algo": "rsa", "size": 2048 },
+  "names": [{ "C": "UK", "L": "London", "O": "MockServer" }]
+}
+EOF
+cfssl gencert -ca ca.pem -ca-key ca-key.pem -config cfssl-config.json -profile server \
+    server-csr.json | cfssljson -bare server
+rm -f server.csr
+openssl pkcs8 -topk8 -inform PEM -in server-key.pem -out server-key-pkcs8.pem -nocrypt
+mv server.pem server-cert.pem
+cat server-cert.pem ca.pem > server-cert-chain.pem
+
+# 4. Generate client certificate
+cat > client-csr.json &lt;&lt;EOF
+{
+  "CN": "MockServer Client",
+  "key": { "algo": "rsa", "size": 2048 },
+  "names": [{ "C": "UK", "L": "London", "O": "MockServer" }]
+}
+EOF
+cfssl gencert -ca ca.pem -ca-key ca-key.pem -config cfssl-config.json -profile client \
+    client-csr.json | cfssljson -bare client
+rm -f client.csr
+openssl pkcs8 -topk8 -inform PEM -in client-key.pem -out client-key-pkcs8.pem -nocrypt
+mv client.pem client-cert.pem
+cat client-cert.pem ca.pem > client-cert-chain.pem
+
+# Clean up
+rm -f ca-csr.json cfssl-config.json server-csr.json client-csr.json server-key.pem client-key.pem</code></pre>
+
+<p>Both approaches produce the same output files:</p>
+<table>
+    <tr><th>File</th><th>Purpose</th></tr>
+    <tr><td><code class="inline_code">ca-key.pem</code>, <code class="inline_code">ca.pem</code></td><td>CA private key and certificate (root of trust)</td></tr>
+    <tr><td><code class="inline_code">server-key-pkcs8.pem</code>, <code class="inline_code">server-cert.pem</code></td><td>Server private key (PKCS#8) and certificate</td></tr>
+    <tr><td><code class="inline_code">server-cert-chain.pem</code></td><td>Server certificate chain (leaf + CA)</td></tr>
+    <tr><td><code class="inline_code">client-key-pkcs8.pem</code>, <code class="inline_code">client-cert.pem</code></td><td>Client private key (PKCS#8) and certificate</td></tr>
+    <tr><td><code class="inline_code">client-cert-chain.pem</code></td><td>Client certificate chain (leaf + CA)</td></tr>
+</table>
+
+<a id="mtls_data_plane" class="anchor" href="#mtls_data_plane">&nbsp;</a>
+
+<h3>Step 2: Data-Plane mTLS (Client Authentication for All Requests)</h3>
+
+<p>Data-plane mTLS requires every HTTPS client to present a valid certificate. Non-TLS (HTTP) requests receive a <strong>426 Upgrade Required</strong> response. This is the most common mTLS setup.</p>
+
+<h4>Docker Compose Configuration</h4>
+
+<pre class="prettyprint lang-yaml code"><code class="code">version: "2.4"
+services:
+  mockserver:
+    image: mockserver/mockserver:latest
+    ports:
+      - "1080:1080"
+    environment:
+      MOCKSERVER_LOG_LEVEL: INFO
+      MOCKSERVER_SERVER_PORT: 1080
+      # Enable mTLS — require client certificates for all TLS connections
+      MOCKSERVER_TLS_MUTUAL_AUTHENTICATION_REQUIRED: "true"
+      # CA certificate used to verify client certificates
+      MOCKSERVER_TLS_MUTUAL_AUTHENTICATION_CERTIFICATE_CHAIN: /certs/ca.pem
+      # Custom CA for signing MockServer's own server certificate
+      MOCKSERVER_CERTIFICATE_AUTHORITY_PRIVATE_KEY: /certs/ca-key.pem
+      MOCKSERVER_CERTIFICATE_AUTHORITY_X509_CERTIFICATE: /certs/ca.pem
+      # Custom server certificate and key (signed by the CA above)
+      MOCKSERVER_TLS_PRIVATE_KEY_PATH: /certs/server-key-pkcs8.pem
+      MOCKSERVER_TLS_X509_CERTIFICATE_PATH: /certs/server-cert-chain.pem
+      # Validate TLS configuration at startup
+      MOCKSERVER_PROACTIVELY_INITIALISE_TLS: "true"
+      # Load expectations from file
+      MOCKSERVER_INITIALIZATION_JSON_PATH: /config/expectationInitialiser.json
+    volumes:
+      - ./certs:/certs:ro
+      - ./config:/config:ro</code></pre>
+
+<h4>Testing with curl</h4>
+
+<p>Successful mTLS request (client presents certificate):</p>
+<pre class="prettyprint lang-bash code"><code class="code">curl --cacert certs/ca.pem \
+     --cert certs/client-cert.pem \
+     --key certs/client-key-pkcs8.pem \
+     https://localhost:1080/hello</code></pre>
+
+<p>Failed request without client certificate (TLS handshake fails):</p>
+<pre class="prettyprint lang-bash code"><code class="code">curl --cacert certs/ca.pem https://localhost:1080/hello
+# Error varies by TLS backend, e.g.: alert bad certificate / certificate required / handshake failure</code></pre>
+
+<p>Failed request over HTTP (returns 426 Upgrade Required):</p>
+<pre class="prettyprint lang-bash code"><code class="code">curl http://localhost:1080/hello
+# 426 Upgrade Required</code></pre>
+
+<h4>Creating Expectations with curl over mTLS</h4>
+
+<p>When data-plane mTLS is enabled, creating expectations via the MockServer API also requires mTLS:</p>
+
+<pre class="prettyprint lang-bash code"><code class="code">curl --cacert certs/ca.pem \
+     --cert certs/client-cert.pem \
+     --key certs/client-key-pkcs8.pem \
+     -X PUT https://localhost:1080/mockserver/expectation \
+     -H "Content-Type: application/json" \
+     -d '[{
+       "httpRequest": { "method": "GET", "path": "/api/users" },
+       "httpResponse": {
+         "statusCode": 200,
+         "headers": { "Content-Type": ["application/json"] },
+         "body": "[{\"id\": 1, \"name\": \"Alice\"}]"
+       }
+     }]'</code></pre>
+
+<a id="mtls_control_plane" class="anchor" href="#mtls_control_plane">&nbsp;</a>
+
+<h3>Control-Plane mTLS (Securing the Management API Only)</h3>
+
+<p>Control-plane mTLS secures only the MockServer management API (expectations, verification, reset, etc.) while leaving the data plane accessible without client certificates. This is useful when you want to protect who can configure MockServer without requiring mTLS for all test traffic.</p>
+
+<h4>Docker Compose Configuration</h4>
+
+<pre class="prettyprint lang-yaml code"><code class="code">version: "2.4"
+services:
+  mockserver:
+    image: mockserver/mockserver:latest
+    ports:
+      - "1080:1080"
+    environment:
+      MOCKSERVER_LOG_LEVEL: INFO
+      MOCKSERVER_SERVER_PORT: 1080
+      # Control-plane mTLS — only management API requires client certificates
+      MOCKSERVER_CONTROL_PLANE_TLS_MUTUAL_AUTHENTICATION_REQUIRED: "true"
+      MOCKSERVER_CONTROL_PLANE_TLS_MUTUAL_AUTHENTICATION_CERTIFICATE_CHAIN: /certs/ca.pem
+      # Custom CA for signing MockServer's server certificate
+      MOCKSERVER_CERTIFICATE_AUTHORITY_PRIVATE_KEY: /certs/ca-key.pem
+      MOCKSERVER_CERTIFICATE_AUTHORITY_X509_CERTIFICATE: /certs/ca.pem
+      # Custom server certificate and key
+      MOCKSERVER_TLS_PRIVATE_KEY_PATH: /certs/server-key-pkcs8.pem
+      MOCKSERVER_TLS_X509_CERTIFICATE_PATH: /certs/server-cert-chain.pem
+      MOCKSERVER_PROACTIVELY_INITIALISE_TLS: "true"
+      MOCKSERVER_INITIALIZATION_JSON_PATH: /config/expectationInitialiser.json
+    volumes:
+      - ./certs:/certs:ro
+      - ./config:/config:ro</code></pre>
+
+<h4>Testing with curl</h4>
+
+<p>Data-plane requests work without client certificates:</p>
+<pre class="prettyprint lang-bash code"><code class="code"># This works — data plane does not require mTLS
+curl --cacert certs/ca.pem https://localhost:1080/hello</code></pre>
+
+<p>Management API requires client certificates:</p>
+<pre class="prettyprint lang-bash code"><code class="code"># This fails — control plane requires mTLS
+curl --cacert certs/ca.pem \
+     -X PUT https://localhost:1080/mockserver/expectation \
+     -H "Content-Type: application/json" \
+     -d '[{"httpRequest": {"path": "/test"}, "httpResponse": {"body": "ok"}}]'
+# 401 Unauthorized
+
+# This works — client certificate provided
+curl --cacert certs/ca.pem \
+     --cert certs/client-cert.pem \
+     --key certs/client-key-pkcs8.pem \
+     -X PUT https://localhost:1080/mockserver/expectation \
+     -H "Content-Type: application/json" \
+     -d '[{"httpRequest": {"path": "/test"}, "httpResponse": {"body": "ok"}}]'</code></pre>
+
+<p>MockServer accepts only client certificates signed by a CA in <code class="inline_code">controlPlaneTLSMutualAuthenticationCAChain</code>. <strong>Changed:</strong> earlier versions also accepted client certificates signed by MockServer's own CA certificate. If your control-plane client certificates are signed by MockServer's CA, add that CA to the chain; if it is the CA bundled with MockServer, whose private key is published, sign them with your own CA instead. With no chain set, MockServer accepts client certificates signed by its own CA certificate, unless that is the bundled CA, in which case it refuses to start: set the chain, or give MockServer its own CA with <code class="inline_code">mockserver.certificateAuthorityCertificate</code> and <code class="inline_code">mockserver.certificateAuthorityPrivateKey</code>.</p>
+
+<a id="java_client_trust" class="anchor" href="#java_client_trust">&nbsp;</a>
+
+<h3>Which Certificates the Java Client Trusts</h3>
+
+<p>When <code class="inline_code">MockServerClient</code> connects over TLS (<code class="inline_code">withSecure(true)</code>) it checks MockServer's certificate against the JVM's default trusted certificate authorities plus MockServer's own CA certificate (<code class="inline_code">mockserver.certificateAuthorityCertificate</code>). To connect to a MockServer that uses a different CA, set <code class="inline_code">mockserver.certificateAuthorityCertificate</code> to that CA's PEM file in the JVM running the client. With control-plane mTLS (below) the client trusts only the CAs in <code class="inline_code">controlPlaneTLSMutualAuthenticationCAChain</code>, so that chain must include the CA that signed MockServer's certificate.</p>
+
+<p><strong>Changed:</strong> earlier versions also trusted MockServer's CA certificate (<code class="inline_code">mockserver.certificateAuthorityCertificate</code>) when <code class="inline_code">controlPlaneTLSMutualAuthenticationCAChain</code> was set. If MockServer's certificate is signed by MockServer's CA (the default) and you use control-plane mTLS, add MockServer's CA certificate to the chain the client uses, or the client fails the TLS handshake.</p>
+
+<p>The client logs this at INFO the first time it sends a request. Server forwarding settings, such as <code class="inline_code">mockserver.forwardProxyTLSX509CertificatesTrustManagerType</code>, do not affect the client.</p>
+
+<p>The WebSocket connections the client opens for callbacks and breakpoints check MockServer's certificate in the same way and, with control-plane mTLS, present the same client certificate. Earlier versions accepted any certificate on these connections.</p>
+
+<a id="mtls_java_client" class="anchor" href="#mtls_java_client">&nbsp;</a>
+
+<h3>Java Client with mTLS</h3>
+
+<p>When using <code class="inline_code">MockServerClient</code> with control-plane mTLS, configure the client certificate paths:</p>
+
+<button id="button_client_mtls_connection" class="accordion">configure a client to connect with control-plane mTLS</button>
+<div class="panel">
+    <button class="accordion inner">Java</button>
+    <div class="panel">
+        <pre class="prettyprint lang-java code"><code class="code">import org.mockserver.client.MockServerClient;
+import org.mockserver.configuration.ConfigurationProperties;
+
+// Enable control-plane mTLS on the client side
+ConfigurationProperties.controlPlaneTLSMutualAuthenticationRequired(true);
+
+// Client certificate and key for authenticating to MockServer
+ConfigurationProperties.controlPlanePrivateKeyPath("/path/to/client-key-pkcs8.pem");
+ConfigurationProperties.controlPlaneX509CertificatePath("/path/to/client-cert-chain.pem");
+
+// the only CAs trusted for MockServer's server certificate: include the CA that signed it
+ConfigurationProperties.controlPlaneTLSMutualAuthenticationCAChain("/path/to/ca.pem");
+
+// Connect over HTTPS
+MockServerClient client = new MockServerClient("localhost", 1080)
+    .withSecure(true);</code></pre>
+    </div>
+    <button class="accordion inner">JavaScript</button>
+    <div class="panel">
+        <pre class="prettyprint lang-javascript code"><code class="code">var mockServerClient = require('mockserver-client').mockServerClient;
+
+// tls = true connects over HTTPS; the CA verifies MockServer's server
+// certificate; clientCert/clientKey are presented for mutual TLS
+var client = mockServerClient("localhost", 1080, undefined, true, "/path/to/ca.pem", {
+    clientCertPemFilePath: "/path/to/client-cert-chain.pem",
+    clientKeyPemFilePath: "/path/to/client-key-pkcs8.pem"
+});</code></pre>
+    </div>
+    <button class="accordion inner">Python</button>
+    <div class="panel">
+        <pre class="prettyprint lang-python code"><code class="code">from mockserver import MockServerClient
+
+client = MockServerClient(
+    "localhost",
+    1080,
+    secure=True,                                       # connect over HTTPS
+    ca_cert_path="/path/to/ca.pem",                    # verify MockServer's server certificate
+    client_cert_path="/path/to/client-cert-chain.pem", # present client certificate for mutual TLS
+    client_key_path="/path/to/client-key-pkcs8.pem",
+)</code></pre>
+    </div>
+    <button class="accordion inner">Go</button>
+    <div class="panel">
+        <pre class="prettyprint lang-go code"><code class="code">import mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+
+client := mockserver.New("localhost", 1080,
+    mockserver.WithTLS(),                              // connect over HTTPS
+    mockserver.WithCACertPEMPath("/path/to/ca.pem"),   // verify MockServer's server certificate
+    mockserver.WithClientCertPEM(                      // present client certificate for mutual TLS
+        "/path/to/client-cert-chain.pem",
+        "/path/to/client-key-pkcs8.pem",
+    ),
+)</code></pre>
+    </div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel">
+        <pre class="prettyprint lang-csharp code"><code class="code">using MockServer.Client;
+
+// WithCaCertificate / WithClientCertificate both imply Secure() (HTTPS)
+using var client = new MockServerClientBuilder("localhost", 1080)
+    .WithCaCertificate("/path/to/ca.pem")              // verify MockServer's server certificate
+    .WithClientCertificate(                            // present client certificate for mutual TLS
+        "/path/to/client-cert-chain.pem",
+        "/path/to/client-key-pkcs8.pem")
+    .Build();</code></pre>
+    </div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel">
+        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::ClientBuilder;
+
+let client = ClientBuilder::new("localhost", 1080)
+    .secure(true)                                          // connect over HTTPS
+    .ca_cert_pem_path("/path/to/ca.pem")                   // verify MockServer's server certificate
+    .client_cert_pem(                                      // present client certificate for mutual TLS
+        "/path/to/client-cert-chain.pem",
+        "/path/to/client-key-pkcs8.pem",
+    )
+    .build()
+    .unwrap();</code></pre>
+    </div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel">
+        <pre class="prettyprint lang-php code"><code class="code">use MockServer\MockServerClient;
+
+// the fourth constructor argument (secure = true) connects over HTTPS
+$client = (new MockServerClient('localhost', 1080, '', true))
+    -&gt;withCaCertificate('/path/to/ca.pem')                 // verify MockServer's server certificate
+    -&gt;withClientCertificate(                                // present client certificate for mutual TLS
+        '/path/to/client-cert-chain.pem',
+        '/path/to/client-key-pkcs8.pem'
+    );</code></pre>
+    </div>
+    <button class="accordion inner">REST API</button>
+    <div class="panel">
+        <pre class="prettyprint lang-bash code"><code class="code"># present the client certificate (--cert/--key) and trust the CA (--cacert)
+curl --cacert /path/to/ca.pem \
+     --cert /path/to/client-cert-chain.pem \
+     --key /path/to/client-key-pkcs8.pem \
+     -X PUT https://localhost:1080/mockserver/expectation \
+     -H "Content-Type: application/json" \
+     -d '[{"httpRequest": {"path": "/test"}, "httpResponse": {"body": "ok"}}]'</code></pre>
+    </div>
+</div>
+
+<p>The Ruby client can connect over HTTPS with CA verification (<code class="inline_code">MockServer::Client.new('localhost', 1080, secure: true, ca_cert_path: '/path/to/ca.pem')</code>), but does not currently support presenting a client certificate for control-plane mutual TLS &mdash; use the <code class="inline_code">curl</code> form above (or a reverse proxy) when Ruby must authenticate to an mTLS-protected control plane.</p>
+
+<a id="match_on_client_certificate" class="anchor" href="#match_on_client_certificate">&nbsp;</a>
+
+<h3>Matching Expectations on the Client Certificate</h3>
+
+<p>When a request is received over mutual TLS, an expectation can match on the client certificate the request presented &mdash; useful for returning different responses per client, or asserting that a specific client authenticated. Add a <code class="inline_code">clientCertificate</code> matcher to the request. It matches against the <strong>leaf certificate</strong> (the client's own certificate) using any combination of:</p>
+
+<ul>
+    <li><strong>subject</strong> &mdash; the certificate's Common Name (CN), full subject Distinguished Name, or any Subject Alternative Name (DNS / IP / email / URI)</li>
+    <li><strong>issuer</strong> &mdash; the issuing CA's Common Name (CN) or full issuer Distinguished Name</li>
+    <li><strong>fingerprintSha256</strong> &mdash; the certificate's SHA-256 fingerprint (colons, whitespace and letter case are ignored, so <code class="inline_code">AB:CD:&hellip;</code> and <code class="inline_code">abcd&hellip;</code> are equivalent)</li>
+</ul>
+
+<p>Each value supports the usual matching options &mdash; a plain string, a regular expression, or a negated (<code class="inline_code">"!&hellip;"</code>) value. A request that presents no client certificate never matches a <code class="inline_code">clientCertificate</code> criterion, and an expectation without a <code class="inline_code">clientCertificate</code> matcher behaves exactly as before (it matches regardless of any certificate). This is matching only &mdash; it does not enable or replace mTLS authentication (configured with <code class="inline_code">tlsMutualAuthenticationRequired</code>).</p>
+
+<button id="button_match_on_client_certificate" class="accordion">match on the presented client certificate</button>
+<div class="panel">
+    <button class="accordion inner">Java</button>
+    <div class="panel">
+        <pre class="prettyprint lang-java code"><code class="code">new MockServerClient("localhost", 1080)
+    .when(
+        request()
+            .withPath("/orders")
+            .withClientCertificate(
+                new ClientCertificate()
+                    .withSubject("my-service.example.com")
+                    .withIssuer(".*Acme Internal CA.*")
+                    .withFingerprintSha256("AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89")
+            )
+    )
+    .respond(
+        response()
+            .withStatusCode(200)
+            .withBody("authenticated client matched")
+    );</code></pre>
+    </div>
+    <button class="accordion inner">JavaScript</button>
+    <div class="panel">
+        <pre class="prettyprint lang-javascript code"><code class="code">var mockServerClient = require('mockserver-client').mockServerClient;
+mockServerClient("localhost", 1080).mockAnyResponse({
+    "httpRequest": {
+        "path": "/orders",
+        "clientCertificate": {
+            "subject": "my-service.example.com",
+            "issuer": ".*Acme Internal CA.*",
+            "fingerprintSha256": "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89"
+        }
+    },
+    "httpResponse": {
+        "statusCode": 200,
+        "body": "authenticated client matched"
+    }
+}).then(
+    function () {
+        console.log("expectation created");
+    },
+    function (error) {
+        console.log(error);
+    }
+);</code></pre>
+    </div>
+    <button class="accordion inner">Python</button>
+    <div class="panel">
+        <pre class="prettyprint lang-python code"><code class="code">import json
+import urllib.request
+
+# the clientCertificate matcher has no typed setter in the Python client;
+# submit the raw expectation JSON via the REST API
+payload = [{
+    "httpRequest": {
+        "path": "/orders",
+        "clientCertificate": {
+            "subject": "my-service.example.com",
+            "issuer": ".*Acme Internal CA.*",
+            "fingerprintSha256": "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89"
+        }
+    },
+    "httpResponse": {
+        "statusCode": 200,
+        "body": "authenticated client matched"
+    }
+}]
+
+req = urllib.request.Request(
+    "http://localhost:1080/mockserver/expectation",
+    data=json.dumps(payload).encode("utf-8"),
+    headers={"Content-Type": "application/json"},
+    method="PUT",
+)
+urllib.request.urlopen(req)</code></pre>
+    </div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel">
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'net/http'
+require 'json'
+
+# the clientCertificate matcher has no typed setter in the Ruby client;
+# submit the raw expectation JSON via the REST API
+payload = [{
+  'httpRequest' =&gt; {
+    'path' =&gt; '/orders',
+    'clientCertificate' =&gt; {
+      'subject' =&gt; 'my-service.example.com',
+      'issuer' =&gt; '.*Acme Internal CA.*',
+      'fingerprintSha256' =&gt; 'AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89'
+    }
+  },
+  'httpResponse' =&gt; {
+    'statusCode' =&gt; 200,
+    'body' =&gt; 'authenticated client matched'
+  }
+}]
+
+uri = URI('http://localhost:1080/mockserver/expectation')
+request = Net::HTTP::Put.new(uri, 'Content-Type' =&gt; 'application/json')
+request.body = JSON.generate(payload)
+Net::HTTP.new(uri.host, uri.port).request(request)</code></pre>
+    </div>
+    <button class="accordion inner">Go</button>
+    <div class="panel">
+        <pre class="prettyprint lang-go code"><code class="code">package main
+
+import (
+    "bytes"
+    "net/http"
+)
+
+func main() {
+    // the clientCertificate matcher has no typed setter in the Go client;
+    // submit the raw expectation JSON via the REST API
+    body := []byte(`[{
+    "httpRequest": {
+        "path": "/orders",
+        "clientCertificate": {
+            "subject": "my-service.example.com",
+            "issuer": ".*Acme Internal CA.*",
+            "fingerprintSha256": "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89"
+        }
+    },
+    "httpResponse": {
+        "statusCode": 200,
+        "body": "authenticated client matched"
+    }
+}]`)
+    req, _ := http.NewRequest("PUT",
+        "http://localhost:1080/mockserver/expectation",
+        bytes.NewReader(body))
+    req.Header.Set("Content-Type", "application/json")
+    http.DefaultClient.Do(req)
+}</code></pre>
+    </div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel">
+        <pre class="prettyprint lang-csharp code"><code class="code">using MockServer.Client;
+using MockServer.Client.Models;
+
+using var client = new MockServerClient("localhost", 1080);
+client.When(
+    new HttpRequest
+    {
+        Path = "/orders",
+        ClientCertificate = new ClientCertificate
+        {
+            Subject = "my-service.example.com",
+            Issuer = ".*Acme Internal CA.*",
+            FingerprintSha256 = "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89"
+        }
+    }
+).Respond(
+    HttpResponse.Response()
+        .WithStatusCode(200)
+        .WithBody("authenticated client matched")
+);</code></pre>
+    </div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel">
+        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse};
+use serde_json::json;
+
+let client = ClientBuilder::new("localhost", 1080).build().unwrap();
+
+// clientCertificate has no dedicated builder method; set it via the
+// forward-compatible `extra` catch-all, which is flattened into httpRequest
+let mut request = HttpRequest::new().path("/orders");
+request.extra.insert(
+    "clientCertificate".to_string(),
+    json!({
+        "subject": "my-service.example.com",
+        "issuer": ".*Acme Internal CA.*",
+        "fingerprintSha256": "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89"
+    }),
+);
+
+client
+    .when(request)
+    .respond(HttpResponse::new().status_code(200).body("authenticated client matched"))
+    .unwrap();</code></pre>
+    </div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel">
+        <pre class="prettyprint lang-php code"><code class="code">// the clientCertificate matcher has no typed setter in the PHP client;
+// submit the raw expectation JSON via the REST API
+$ch = curl_init('http://localhost:1080/mockserver/expectation');
+curl_setopt_array($ch, [
+    CURLOPT_CUSTOMREQUEST =&gt; 'PUT',
+    CURLOPT_HTTPHEADER =&gt; ['Content-Type: application/json'],
+    CURLOPT_POSTFIELDS =&gt; json_encode([[
+        'httpRequest' =&gt; [
+            'path' =&gt; '/orders',
+            'clientCertificate' =&gt; [
+                'subject' =&gt; 'my-service.example.com',
+                'issuer' =&gt; '.*Acme Internal CA.*',
+                'fingerprintSha256' =&gt; 'AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89',
+            ],
+        ],
+        'httpResponse' =&gt; [
+            'statusCode' =&gt; 200,
+            'body' =&gt; 'authenticated client matched',
+        ],
+    ]]),
+    CURLOPT_RETURNTRANSFER =&gt; true,
+]);
+curl_exec($ch);</code></pre>
+    </div>
+    <button class="accordion inner">REST API</button>
+    <div class="panel">
+        <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/expectation" -d '{
+  "httpRequest" : {
+    "path" : "/orders",
+    "clientCertificate" : {
+      "subject" : "my-service.example.com",
+      "issuer" : ".*Acme Internal CA.*",
+      "fingerprintSha256" : "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89"
+    }
+  },
+  "httpResponse" : {
+    "statusCode" : 200,
+    "body" : "authenticated client matched"
+  }
+}'</code></pre>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/expectation/put_expectation" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+</div>
+
+<a id="bouncycastle_fips" class="anchor" href="#bouncycastle_fips">&nbsp;</a>
+
+<h2>BouncyCastle FIPS Support</h2>
+
+<p>MockServer supports <strong>BouncyCastle FIPS</strong> (<code class="inline_code">bc-fips</code>) as a drop-in alternative to the standard BouncyCastle provider (<code class="inline_code">bcprov-jdk18on</code>). This is useful in environments that require FIPS 140-2 compliant cryptographic modules.</p>
+
+<p>MockServer automatically detects which BouncyCastle provider is available at runtime &mdash; no configuration changes are needed. To use FIPS mode:</p>
+
+<ol>
+    <li><strong>Exclude</strong> the standard BouncyCastle dependency (<code class="inline_code">bcprov-jdk18on</code>) from your classpath</li>
+    <li><strong>Add</strong> the BouncyCastle FIPS dependency (<code class="inline_code">bc-fips</code>) instead</li>
+    <li><strong>Ensure</strong> the FIPS provider is registered with the JVM (e.g. via <code class="inline_code">java.security</code> configuration or programmatically)</li>
+</ol>
+
+<p>Example Maven dependency replacement:</p>
+
+<pre class="prettyprint lang-xml code"><code class="code">&lt;dependency&gt;
+    &lt;groupId&gt;org.bouncycastle&lt;/groupId&gt;
+    &lt;artifactId&gt;bc-fips&lt;/artifactId&gt;
+    &lt;!-- use the latest FIPS-certified bc-fips release --&gt;
+    &lt;version&gt;...&lt;/version&gt;
+&lt;/dependency&gt;</code></pre>
+
+<p>MockServer will use whichever provider it finds on the classpath. If both are present, the standard (non-FIPS) provider is used. If neither is available, MockServer falls back to the JVM's default cryptographic provider.</p>
+
+<a id="tls_troubleshooting" class="anchor" href="#tls_troubleshooting">&nbsp;</a>
+
+<h2>TLS Troubleshooting</h2>
+
+<p>The following are common TLS-related issues and their solutions:</p>
+
+<h3>SSL Context Initialization Failure</h3>
+
+<p>If you see an error like <code class="inline_code">javax.net.ssl.SSLException: java.lang.RuntimeException: Unexpected error: java.security.InvalidAlgorithmParameterException: the trustAnchors parameter must be non-empty</code>, this means the JVM's trust store is empty or misconfigured. This is common in minimal Docker images or Linux systems where the CA certificates package is not installed.</p>
+
+<p><strong>Solution:</strong></p>
+<pre class="prettyprint code"><code class="code"># Debian/Ubuntu
+apt-get install -y ca-certificates-java
+update-ca-certificates -f
+
+# Alpine
+apk add --no-cache ca-certificates java-cacerts</code></pre>
+
+<h3>Certificate Not Trusted</h3>
+
+<p>If your HTTP client rejects MockServer's certificate, ensure the MockServer CA certificate is trusted. See <a href="#verify_trust_chain">Ensure MockServer Certificates Are Trusted</a> above for multiple approaches (OS trust store, JVM keytool, programmatic SSLContext).</p>
+
+<p>MockServer logs a client's failed TLS handshake as a warning, over HTTPS and over HTTP/3, with the client's address, the reason the handshake failed and its probable cause, for example <span class="inline_code">the client does not trust MockServer's Certificate Authority</span>. It warns once for each client address; later failed handshakes from the same address are logged at <span class="inline_code">DEBUG</span>, so a client that keeps retrying does not fill the log. To see every failure, set <a href="/mock_server/configuration_properties.html#button_configuration_log_level">logLevel</a> to <span class="inline_code">DEBUG</span>.</p>
+
+<h3>First Request Fails with New Hostname</h3>
+
+<p>When MockServer receives a request with a Host header for a hostname it has not seen before, the first request may fail TLS hostname validation. This is because the TLS handshake completes before MockServer can read the Host header and regenerate its certificate. Subsequent requests with that hostname will succeed. To avoid this, pre-configure the expected hostnames using the <a href="#button_configuration_ssl_subject_alternative_name_domains">sslSubjectAlternativeNameDomains</a> configuration property.</p>
+
+<h3>Connection Reset or Broken Pipe</h3>
+
+<p>If you see "Connection reset" or "Broken pipe" errors during TLS connections, common causes include:</p>
+<ul>
+    <li><strong>Expired test certificates:</strong> MockServer's dynamically generated Certificate Authority is valid for 10 years, and the server (leaf) certificate it issues is valid for 397 days by default (short enough to satisfy Apple platforms, which reject TLS server certificates valid for more than 825 days). MockServer automatically regenerates the server certificate well before it expires, so a long-running server never serves an expired certificate. To restore the previous long-lived certificate set <a href="/mock_server/configuration_properties.html#button_configuration_ssl_certificate_leaf_validity_in_days">sslCertificateLeafValidityInDays</a> to a larger value such as <span class="inline_code">3650</span>. If you supply your own custom CA certificates for testing, ensure they have not expired.</li>
+    <li><strong>Protocol mismatch:</strong> Ensure the client and MockServer agree on a TLS protocol version. MockServer supports TLSv1, TLSv1.1, and TLSv1.2 by default (see <a href="/mock_server/configuration_properties.html#button_configuration_tls_protocols">tlsProtocols</a>). To restrict to modern protocols only, set <span class="inline_code">tlsAllowInsecureProtocols</span> to <span class="inline_code">false</span>, which strips TLSv1 and TLSv1.1 from the effective list. Use the <span class="inline_code">tlsProtocols</span> configuration property to adjust supported protocols.</li>
+    <li><strong>Corporate TLS inspection proxies:</strong> If your network uses a TLS inspection proxy, you may need to add the proxy's CA certificate to the JVM trust store, or configure the <span class="inline_code">JAVA_OPTS</span> with <span class="inline_code">-Djavax.net.ssl.trustStore</span> pointing to a trust store that includes both the proxy CA and MockServer CA certificates.</li>
+</ul>
+
+<h3>Certificate Chain Is Not Valid (mTLS)</h3>
+
+<p>If you see <code class="inline_code">java.security.KeyStoreException: Certificate chain is not valid</code>, the server certificate is not signed by the configured Certificate Authority. This commonly happens when:</p>
+<ul>
+    <li><strong>Server cert and CA don't match:</strong> The certificate in <code class="inline_code">MOCKSERVER_TLS_X509_CERTIFICATE_PATH</code> was not signed by the CA in <code class="inline_code">MOCKSERVER_CERTIFICATE_AUTHORITY_X509_CERTIFICATE</code>. Regenerate the server certificate using the same CA.</li>
+    <li><strong>Missing certificate chain:</strong> The certificate file must contain the full chain (leaf certificate followed by CA certificate). Create it with: <code class="inline_code">cat server-cert.pem ca.pem > server-cert-chain.pem</code></li>
+    <li><strong>Wrong key format:</strong> The private key must be in PKCS#8 format (begins with <code class="inline_code">-----BEGIN PRIVATE KEY-----</code>). PKCS#1 keys (beginning with <code class="inline_code">-----BEGIN RSA PRIVATE KEY-----</code>) must be converted:
+    <pre class="prettyprint lang-bash code"><code class="code">openssl pkcs8 -topk8 -inform PEM -in key-pkcs1.pem -out key-pkcs8.pem -nocrypt</code></pre></li>
+</ul>
+
+<h3>426 Upgrade Required (mTLS)</h3>
+
+<p>When <code class="inline_code">tlsMutualAuthenticationRequired</code> is enabled, MockServer requires all connections to use TLS. If a plain HTTP request is received, MockServer returns <strong>426 Upgrade Required</strong> to indicate that the client must use HTTPS with a client certificate. Change your request URL from <code class="inline_code">http://</code> to <code class="inline_code">https://</code> and provide a client certificate.</p>
+
+<h3>Bad Certificate / Handshake Failure (mTLS)</h3>
+
+<p>If curl reports <code class="inline_code">sslv3 alert bad certificate</code> or <code class="inline_code">SSL_ERROR_HANDSHAKE_FAILURE_ALERT</code>, the client certificate was rejected by MockServer. Check that:</p>
+<ul>
+    <li>The client certificate was signed by the same CA configured in <code class="inline_code">MOCKSERVER_TLS_MUTUAL_AUTHENTICATION_CERTIFICATE_CHAIN</code></li>
+    <li>The client certificate has not expired</li>
+    <li>You are passing both <code class="inline_code">--cert</code> and <code class="inline_code">--key</code> to curl</li>
+</ul>
+
 <a id="configuration" class="anchor" href="#configuration">&nbsp;</a>
 
 {% include_subpage _includes/tls_configuration.html %}
+<h2>See Also</h2>
+
+<ul>
+    <li><a href="/mock_server/control_plane_authorisation.html#control_plane_mtls_authentication"><strong>Control Plane mTLS Authentication</strong></a> &mdash; require mutual TLS client certificates on control-plane (expectation and verification) requests</li>
+    <li><a href="/mock_server/control_plane_authorisation.html#control_plane_jwt_authentication"><strong>Control Plane JWT Authentication</strong></a> &mdash; protect the control plane with bearer JWTs as an alternative or complement to mTLS</li>
+    <li><a href="/mock_server/mocking_oauth2.html"><strong>Mocking OAuth2 Flows</strong></a> &mdash; mock OAuth2/OpenID Connect token endpoints and JWKS discovery over TLS for integration testing</li>
+    <li><a href="/mock_server/CORS_support.html"><strong>CORS Support</strong></a> &mdash; configure cross-origin request handling for browser-based clients</li>
+    <li><a href="/mock_server/configuration_properties.html#tls_configuration"><strong>TLS Configuration Properties</strong></a> &mdash; all TLS, mTLS, and certificate configuration properties</li>
+</ul>

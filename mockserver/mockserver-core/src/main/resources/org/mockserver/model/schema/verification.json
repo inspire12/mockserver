@@ -1,0 +1,65 @@
+{
+  "title": "verification",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "expectationId": {
+      "$ref": "#/definitions/expectationId"
+    },
+    "httpRequest": {
+      "$ref": "#/definitions/requestDefinition"
+    },
+    "httpResponse": {
+      "$ref": "#/definitions/httpResponse"
+    },
+    "times": {
+      "$ref": "#/definitions/verificationTimes"
+    },
+    "maximumNumberOfRequestToReturnInVerificationFailure": {
+      "type": "integer"
+    },
+    "timeout": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "disposition": {
+      "enum": [
+        "MOCKED",
+        "FORWARDED"
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "required": [
+        "expectationId"
+      ]
+    },
+    {
+      "required": [
+        "httpRequest"
+      ]
+    },
+    {
+      "required": [
+        "httpResponse"
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "expectationId"
+            ]
+          },
+          {
+            "required": [
+              "httpRequest"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "definitions": {
+  }
+}

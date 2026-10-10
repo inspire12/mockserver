@@ -1,0 +1,124 @@
+steps:
+  - label: ":lint-roller: opencode config"
+    command: ".buildkite/scripts/steps/infra-validate-config.sh"
+    timeout_in_minutes: 5
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":robot_face: AI eval gate"
+    command: ".buildkite/scripts/steps/validate-ai-evals.sh"
+    timeout_in_minutes: 5
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":bash: validate shell scripts"
+    command: ".buildkite/scripts/steps/infra-validate-scripts.sh"
+    timeout_in_minutes: 5
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":package: release scripts install unzip before mvn"
+    command: ".buildkite/scripts/steps/check-release-maven-prelude.sh"
+    timeout_in_minutes: 5
+    agents:
+      queue: "trigger"
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":docker: validate Dockerfile sync"
+    command: ".buildkite/scripts/steps/docker-validate-sync.sh"
+    timeout_in_minutes: 5
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":helm: validate Helm charts"
+    command: ".buildkite/scripts/steps/helm-validate.sh"
+    timeout_in_minutes: 5
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":mailbox: validate API collections"
+    command: ".buildkite/scripts/steps/collections-validate.sh"
+    timeout_in_minutes: 5
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  # Complements the step above rather than duplicating it: that one proves the committed collections
+  # match what the generator produces, this one proves the examples inside them are actually accepted
+  # by a running MockServer. The first can be green while every user who imports the collection gets a
+  # 400 — which is exactly what happened for /mockserver/baseline/compare and /mockserver/pact/import.
+  - label: ":mailbox: validate API collection examples against a live server"
+    command: ".buildkite/scripts/steps/collections-live-validate.sh"
+    timeout_in_minutes: 10
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  # Baseline-freshness assertion for the daily perf-regression control. It lives HERE,
+  # in mockserver-infra, ON PURPOSE: a check that lives inside the system it monitors
+  # (the perf pipeline) dies with it, so it sits in a DIFFERENT pipeline. It keys off
+  # PRODUCER LIVENESS via the Buildkite API — that the daily mockserver-performance-test
+  # schedule is still firing and its last completed run (scheduled, or a newer measured
+  # manual [perf-run] build) passed — NOT raw S3 object age (which cannot tell a dead
+  # producer apart from a legitimately quiet master, because the producer is
+  # commit-gated not to write on a quiet day). See the script
+  # header for the full rationale. Cheap `trigger` queue: one Secrets Manager read + a
+  # few time-bounded, paged Buildkite API calls + jq, no build, and the trigger queue
+  # already holds the API token. Both steps run on infra-path builds AND on the daily
+  # Buildkite schedule (terraform/buildkite-pipelines/pipelines.tf). Fails closed: every
+  # verdict class in the script header exits non-zero; the fixture step proves each one
+  # against a fake API, so a broken query reds here rather than as a false alarm later.
+  - label: ":stopwatch: perf baseline freshness fixture checks"
+    command: ".buildkite/scripts/test/perf-baseline-freshness-test.sh"
+    timeout_in_minutes: 5
+    agents:
+      queue: "trigger"
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":stopwatch: assert perf baseline is fresh"
+    command: ".buildkite/scripts/steps/perf-baseline-freshness.sh"
+    timeout_in_minutes: 5
+    agents:
+      queue: "trigger"
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2

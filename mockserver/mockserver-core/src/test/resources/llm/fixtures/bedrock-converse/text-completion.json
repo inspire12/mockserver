@@ -1,0 +1,19 @@
+{
+  "output" : {
+    "message" : {
+      "role" : "assistant",
+      "content" : [ {
+        "text" : "Hello! How can I help you today?"
+      } ]
+    }
+  },
+  "stopReason" : "end_turn",
+  "usage" : {
+    "inputTokens" : 0,
+    "outputTokens" : 0,
+    "totalTokens" : 0
+  },
+  "metrics" : {
+    "latencyMs" : 0
+  }
+}

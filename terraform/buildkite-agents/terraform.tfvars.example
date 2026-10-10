@@ -1,11 +1,37 @@
 # Copy this to terraform.tfvars and fill in values.
 # NEVER commit terraform.tfvars — it is gitignored.
 
-# Get your agent token from: https://buildkite.com/organizations/mockserver/agents
-# buildkite_agent_token = "your-token-here"
+# IMPORTANT: Do NOT put the Buildkite agent token in this file.
+# Source it at apply time via an environment variable:
+#
+#   export TF_VAR_buildkite_agent_token=$(aws ssm get-parameter \
+#     --name /buildkite/buildkite/agent-token \
+#     --with-decryption --query Parameter.Value --output text \
+#     --profile mockserver-build)
+#
+# The run.sh wrapper does this automatically.
+# buildkite_agent_token = "NEVER_PUT_TOKEN_HERE"
 
 region               = "eu-west-2"
-instance_types       = "c5.2xlarge"
+# All 8 vCPU / 32 GiB. The default-queue build container is limited to 12g and
+# holds a 6g-Xmx Maven reactor + the rolldown-native `vite build` in one cgroup,
+# so 16 GiB types (c5.2xlarge, m5.xlarge) OOM-killed ~half of master's builds —
+# keep every entry a 32 GiB variant. On-demand uses the FIRST type; Spot ignores
+# the order, so leave slow types (m5, m5a) out rather than last. See variables.tf
+# "instance_types".
+instance_types       = "m7i.2xlarge,m6a.2xlarge,m6i.2xlarge,m7a.2xlarge"
 min_size             = 0
-max_size             = 2
-on_demand_percentage = 0
+max_size             = 10
+on_demand_percentage = 20
+release_max_size     = 2
+trigger_instance_types = "t3.small,t3a.small,t3.micro"
+trigger_max_size       = 4
+
+# perf-xl queue: one fixed on-demand type, scale-to-zero. min MUST stay 0.
+perf_xl_instance_types = "c6i.32xlarge"
+perf_xl_min_size       = 0
+perf_xl_max_size       = 1
+
+# Email address for infrastructure alerts (SNS notifications)
+# Leave empty ("") to skip email subscription
+alert_email = "your-email@example.com"

@@ -1,0 +1,298 @@
+{
+  "title": "expectation",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "priority": {
+      "type": "integer"
+    },
+    "percentage": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "chaos": {
+      "$ref": "#/definitions/httpChaosProfile"
+    },
+    "rateLimit": {
+      "$ref": "#/definitions/rateLimit"
+    },
+    "httpRequest": {
+      "$ref": "#/definitions/requestDefinition"
+    },
+    "httpResponse": {
+      "$ref": "#/definitions/httpResponse"
+    },
+    "httpResponseTemplate": {
+      "$ref": "#/definitions/httpTemplate"
+    },
+    "httpResponseClassCallback": {
+      "$ref": "#/definitions/httpClassCallback"
+    },
+    "httpResponseObjectCallback": {
+      "$ref": "#/definitions/httpObjectCallback"
+    },
+    "httpForward": {
+      "$ref": "#/definitions/httpForward"
+    },
+    "httpForwardTemplate": {
+      "$ref": "#/definitions/httpTemplate"
+    },
+    "httpForwardClassCallback": {
+      "$ref": "#/definitions/httpClassCallback"
+    },
+    "httpForwardObjectCallback": {
+      "$ref": "#/definitions/httpObjectCallback"
+    },
+    "httpOverrideForwardedRequest": {
+      "$ref": "#/definitions/httpOverrideForwardedRequest"
+    },
+    "httpForwardValidateAction": {
+      "$ref": "#/definitions/httpForwardValidateAction"
+    },
+    "httpForwardWithFallback": {
+      "$ref": "#/definitions/httpForwardWithFallback"
+    },
+    "httpError": {
+      "$ref": "#/definitions/httpError"
+    },
+    "httpSseResponse": {
+      "$ref": "#/definitions/httpSseResponse"
+    },
+    "httpLlmResponse": {
+      "$ref": "#/definitions/httpLlmResponse"
+    },
+    "httpWebSocketResponse": {
+      "$ref": "#/definitions/httpWebSocketResponse"
+    },
+    "grpcStreamResponse": {
+      "$ref": "#/definitions/grpcStreamResponse"
+    },
+    "grpcBidiResponse": {
+      "$ref": "#/definitions/grpcBidiResponse"
+    },
+    "binaryResponse": {
+      "$ref": "#/definitions/binaryResponse"
+    },
+    "dnsResponse": {
+      "$ref": "#/definitions/dnsResponse"
+    },
+    "beforeActions": {
+      "oneOf": [
+        { "$ref": "#/definitions/afterAction" },
+        { "type": "array", "items": { "$ref": "#/definitions/afterAction" }, "minItems": 1 }
+      ]
+    },
+    "afterActions": {
+      "oneOf": [
+        { "$ref": "#/definitions/afterAction" },
+        { "type": "array", "items": { "$ref": "#/definitions/afterAction" }, "minItems": 1 }
+      ]
+    },
+    "capture": {
+      "oneOf": [
+        { "$ref": "#/definitions/captureRule" },
+        { "type": "array", "items": { "$ref": "#/definitions/captureRule" }, "minItems": 1 }
+      ]
+    },
+    "namespace": {
+      "description": "optional namespace (tenant) this expectation belongs to; when set, the expectation only matches requests carrying the configured matchNamespaceHeader with this value, plus it remains isolated from other namespaces",
+      "type": "string"
+    },
+    "scenarioName": {
+      "type": "string"
+    },
+    "scenarioState": {
+      "type": "string"
+    },
+    "newScenarioState": {
+      "type": "string"
+    },
+    "httpResponses": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/httpResponse"
+      },
+      "minItems": 1
+    },
+    "responseMode": {
+      "enum": [
+        "SEQUENTIAL",
+        "RANDOM",
+        "WEIGHTED",
+        "SWITCH"
+      ]
+    },
+    "responseWeights": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "switchAfter": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "crossProtocolScenarios": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "trigger": {
+            "enum": [
+              "DNS_QUERY",
+              "WEBSOCKET_CONNECT",
+              "GRPC_REQUEST",
+              "HTTP_REQUEST"
+            ]
+          },
+          "matchPattern": {
+            "type": "string"
+          },
+          "scenarioName": {
+            "type": "string"
+          },
+          "targetState": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "trigger",
+          "scenarioName",
+          "targetState"
+        ]
+      }
+    },
+    "times": {
+      "$ref": "#/definitions/times"
+    },
+    "timeToLive": {
+      "$ref": "#/definitions/timeToLive"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/expectationStep"
+      },
+      "minItems": 1
+    },
+    "timestamp": {
+      "description": "added to allow request and response log output to be used to create expectations",
+      "type": "string"
+    }
+  },
+  "anyOf": [
+    {
+      "required": [
+        "httpResponse"
+      ]
+    },
+    {
+      "required": [
+        "httpResponseTemplate"
+      ]
+    },
+    {
+      "required": [
+        "httpResponseObjectCallback"
+      ]
+    },
+    {
+      "required": [
+        "httpResponseClassCallback"
+      ]
+    },
+    {
+      "required": [
+        "httpForward"
+      ]
+    },
+    {
+      "required": [
+        "httpForwardTemplate"
+      ]
+    },
+    {
+      "required": [
+        "httpForwardObjectCallback"
+      ]
+    },
+    {
+      "required": [
+        "httpForwardClassCallback"
+      ]
+    },
+    {
+      "required": [
+        "httpOverrideForwardedRequest"
+      ]
+    },
+    {
+      "required": [
+        "httpForwardValidateAction"
+      ]
+    },
+    {
+      "required": [
+        "httpForwardWithFallback"
+      ]
+    },
+    {
+      "required": [
+        "httpError"
+      ]
+    },
+    {
+      "required": [
+        "httpSseResponse"
+      ]
+    },
+    {
+      "required": [
+        "httpLlmResponse"
+      ]
+    },
+    {
+      "required": [
+        "httpWebSocketResponse"
+      ]
+    },
+    {
+      "required": [
+        "grpcStreamResponse"
+      ]
+    },
+    {
+      "required": [
+        "grpcBidiResponse"
+      ]
+    },
+    {
+      "required": [
+        "binaryResponse"
+      ]
+    },
+    {
+      "required": [
+        "dnsResponse"
+      ]
+    },
+    {
+      "required": [
+        "httpResponses"
+      ]
+    },
+    {
+      "required": [
+        "steps"
+      ]
+    }
+  ],
+  "definitions": {
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "httpRequest": {
+    "path": "/events/keep-open"
+  },
+  "httpSseResponse": {
+    "statusCode": 200,
+    "headers": {
+      "Cache-Control": [
+        "no-cache"
+      ]
+    },
+    "events": [
+      {
+        "event": "message",
+        "data": "one",
+        "id": "1"
+      }
+    ],
+    "templateType": "MUSTACHE",
+    "closeConnection": false,
+    "primary": true
+  }
+}

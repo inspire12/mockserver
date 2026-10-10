@@ -1,0 +1,2 @@
+Picked up JAVA_TOOL_OPTIONS: -XX:+UseZGC -XX:+ExitOnOutOfMemoryError -Xmx32m
+Terminating due to java.lang.OutOfMemoryError: Java heap space

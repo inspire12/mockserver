@@ -1,0 +1,244 @@
+---
+title: Debugging HTTP Traffic with AI Assistants
+description: AI assistants can use MockServer MCP tools to set up a forwarding proxy, capture traffic, retrieve request-response pairs, and diagnose mismatches.
+shortTitle: Debugging with AI
+layout: page
+pageOrder: 3
+section: 'AI & MCP'
+subsection: true
+sitemap:
+  priority: 0.8
+  changefreq: 'monthly'
+  lastmod: 2026-05-22T00:00:00+00:00
+keywords: "ai http debugging, debug api with ai, mockserver mcp debugging"
+---
+
+<p>When an API call fails, ask your AI assistant to capture the real traffic and tell you why — it sets up the proxy, retrieves the request/response, and pinpoints the mismatched header or status itself.</p>
+
+<p style="width: 80%; margin: 1em auto;"><img src="../images/mockserver_ai_debugging.png" alt="AI-assisted debugging flow: the AI assistant proxies the request, records the exchange, retrieves the request/response pair, diagnoses the mismatch, and explains the fix." style="max-width:100%;"></p>
+
+<h2>Overview</h2>
+
+<p>The debugging workflow follows four steps:</p>
+
+<ol>
+    <li><a href="#step1">Set up a forwarding proxy</a> to capture traffic</li>
+    <li><a href="#step2">Send traffic through MockServer</a></li>
+    <li><a href="#step3">Retrieve recorded request-response pairs</a> for analysis</li>
+    <li><a href="#step4">Diagnose mismatches</a> when requests don't match expectations</li>
+</ol>
+
+<p>Throughout this workflow, your AI assistant — such as <a href="/mock_server/ai_mcp_setup.html">Claude Code or OpenCode</a>, or any other MCP-capable coding agent — uses MockServer's MCP tools to interact with the server. You describe the problem in natural language and the assistant handles the API calls.</p>
+
+<a id="step1" class="anchor" href="#step1">&nbsp;</a>
+
+<h2>Step 1: Set Up a Forwarding Proxy</h2>
+
+<p>Ask your AI assistant to configure MockServer as a forwarding proxy. This records all traffic while passing requests through to the real destination.</p>
+
+<p><strong>Example prompt:</strong></p>
+
+<blockquote>
+<p><em>"Set up MockServer to proxy all requests to /api/* to api.example.com on port 443 over HTTPS"</em></p>
+</blockquote>
+
+<p>The AI assistant will use the <a href="/mock_server/ai_mcp_tools.html#create_forward_expectation"><code class="code inline">create_forward_expectation</code></a> tool:</p>
+
+<pre class="prettyprint code"><code class="code">{
+  "name": "create_forward_expectation",
+  "arguments": {
+    "path": "/api/.*",
+    "host": "api.example.com",
+    "port": 443,
+    "scheme": "HTTPS"
+  }
+}</code></pre>
+
+<p>Now any request sent to <code class="code inline">http://localhost:1080/api/...</code> will be forwarded to <code class="code inline">https://api.example.com/api/...</code> and both the request and response will be recorded.</p>
+
+<a id="step2" class="anchor" href="#step2">&nbsp;</a>
+
+<h2>Step 2: Send Traffic Through MockServer</h2>
+
+<p>Configure your application or test to send requests through MockServer instead of directly to the destination. This typically means changing the base URL in your application configuration:</p>
+
+<pre class="prettyprint code"><code class="code"># Before (direct)
+API_BASE_URL=https://api.example.com
+
+# After (through MockServer)
+API_BASE_URL=http://localhost:1080</code></pre>
+
+<p>For AI applications, point the LLM client's base URL at MockServer so every model call is recorded. The examples below use LangChain and LangGraph, but the same approach works for any agent framework, LLM SDK, or HTTP client that lets you override the base URL. They assume a forwarding proxy is already in place for the provider (Step 1) — for example forwarding <code class="code inline">/v1/.*</code> to <code class="code inline">api.openai.com</code> or <code class="code inline">api.anthropic.com</code>.</p>
+
+<h3>LangChain</h3>
+
+<p>LangChain chat model clients accept a base URL override — set it to MockServer:</p>
+
+<pre class="prettyprint code"><code class="code">from langchain_openai import ChatOpenAI
+
+# Route the model client through MockServer instead of calling the provider directly
+llm = ChatOpenAI(
+    model="gpt-4o",
+    base_url="http://localhost:1080/v1",
+    api_key="sk-...",
+)</code></pre>
+
+<p>The same applies to other providers — for example <code class="code inline">ChatAnthropic(model="claude-sonnet-4-20250514", base_url="http://localhost:1080")</code>.</p>
+
+<h3>LangGraph</h3>
+
+<p>A LangGraph graph makes its HTTP calls through the LangChain model objects bound to its nodes, so the same base URL override applies. Configure the model before building the graph:</p>
+
+<pre class="prettyprint code"><code class="code">from langchain_anthropic import ChatAnthropic
+from langgraph.prebuilt import create_react_agent
+
+model = ChatAnthropic(
+    model="claude-sonnet-4-20250514",
+    base_url="http://localhost:1080",
+)
+
+# Every model call made by the agent's nodes is now recorded by MockServer
+agent = create_react_agent(model, tools=tools)</code></pre>
+
+<p>If your AI agent or SDK does not allow the base URL to be changed, use MockServer as an HTTPS proxy instead — see <a href="/mock_server/ai_traffic_inspection.html">AI Traffic Inspection</a>.</p>
+
+<p>Then run your application or test scenario as normal. MockServer will forward all requests and record the traffic.</p>
+
+<a id="step3" class="anchor" href="#step3">&nbsp;</a>
+
+<h2>Step 3: Retrieve Recorded Traffic</h2>
+
+<p>Ask your AI assistant to retrieve the recorded request-response pairs for analysis.</p>
+
+<p><strong>Example prompt:</strong></p>
+
+<blockquote>
+<p><em>"Show me all requests and responses to /api/payments"</em></p>
+</blockquote>
+
+<p>The assistant will use the <a href="/mock_server/ai_mcp_tools.html#retrieve_request_responses"><code class="code inline">retrieve_request_responses</code></a> tool to fetch the recorded data, then present it in a readable format with analysis of status codes, response times, headers, and body content.</p>
+
+<a id="step4" class="anchor" href="#step4">&nbsp;</a>
+
+<h2>Step 4: Diagnose Mismatches</h2>
+
+<p>When a request doesn't match an expectation you've configured, the <a href="/mock_server/ai_mcp_tools.html#debug_request_mismatch"><code class="code inline">debug_request_mismatch</code></a> tool provides detailed information about why the match failed.</p>
+
+<p><strong>Example prompt:</strong></p>
+
+<blockquote>
+<p><em>"Why didn't my POST to /api/users match the mock I set up?"</em></p>
+</blockquote>
+
+<p>The assistant will use the tool to compare your request against active expectations and report the specific fields that didn't match — such as a missing header, incorrect content type, or a path mismatch.</p>
+
+<h2>Example AI Prompts for Common Debugging Scenarios</h2>
+
+<p>Here are practical prompts you can use with your AI assistant for common debugging tasks:</p>
+
+<h3>"Why is my API call returning 500?"</h3>
+
+<p>The assistant will:</p>
+<ol>
+    <li>Use <code class="code inline">retrieve_request_responses</code> to find the failing request and its response</li>
+    <li>Analyse the response body for error details</li>
+    <li>Check whether the request matched a mock or was forwarded to a real server</li>
+    <li>Suggest fixes based on the error details</li>
+</ol>
+
+<h3>"Show me all requests to /api/payments in the last 5 minutes"</h3>
+
+<p>The assistant will:</p>
+<ol>
+    <li>Use <code class="code inline">retrieve_recorded_requests</code> filtered by the path</li>
+    <li>Present the requests in chronological order with method, headers, and body</li>
+    <li>Highlight any unusual patterns (e.g., repeated requests, missing headers)</li>
+</ol>
+
+<h3>"Why didn't my request match the mock I set up?"</h3>
+
+<p>The assistant will:</p>
+<ol>
+    <li>Read the <code class="code inline">mockserver://expectations</code> resource to see active expectations</li>
+    <li>Use <code class="code inline">debug_request_mismatch</code> with the request details</li>
+    <li>Report exactly which fields mismatched (e.g., "expected content-type application/json but received text/plain")</li>
+    <li>Suggest corrections to either the expectation or the request</li>
+</ol>
+
+<h3>"Set up a proxy to capture traffic between my service and the payment API"</h3>
+
+<p>The assistant will:</p>
+<ol>
+    <li>Use <code class="code inline">create_forward_expectation</code> to set up forwarding</li>
+    <li>Confirm the proxy is active</li>
+    <li>Explain how to point your service at MockServer</li>
+    <li>Offer to retrieve and analyse the captured traffic after you run your test</li>
+</ol>
+
+<h3>"Trace the full lifecycle of a specific request"</h3>
+
+<p>The assistant will:</p>
+<ol>
+    <li>Use the dedicated <code class="code inline">retrieve_logs</code> tool to find recent log entries and identify the correlation ID for the request (or <code class="code inline">raw_retrieve</code> with type <code class="code inline">LOGS</code> for the full retrieve format)</li>
+    <li>Use <code class="code inline">retrieve_logs</code> with the <code class="code inline">correlationId</code> parameter to get all log entries for that specific request</li>
+    <li>Present the full lifecycle: request received → expectation matching attempts → match result → response returned</li>
+    <li>Highlight which expectations were compared and why each didn't match</li>
+</ol>
+
+<p>This is particularly useful for intermittent failures where you need to understand exactly what happened for a specific request.</p>
+
+<h3>"Why are my test requests getting 404s?"</h3>
+
+<p>After a failed test run where requests returned 404 (no matching expectation), the assistant can diagnose all mismatches at once:</p>
+
+<p>The assistant will:</p>
+<ol>
+    <li>Use <code class="code inline">explain_unmatched_requests</code> to retrieve all recent requests that matched no expectation</li>
+    <li>For each unmatched request, show the ranked closest expectations with field-level diffs</li>
+    <li>Provide actionable remediation hints such as "use method POST not GET", "add trailing slash", or "add missing header Authorization"</li>
+    <li>Suggest specific fixes to either the expectations or the test code</li>
+</ol>
+
+<p>This is the fastest way to diagnose mismatches after a test failure. Unlike <code class="code inline">debug_request_mismatch</code> (which requires you to reconstruct the failing request), <code class="code inline">explain_unmatched_requests</code> works from MockServer's own traffic log, so there is nothing to reconstruct.</p>
+
+<p>The tool is also available as a REST endpoint (<code class="code inline">PUT /mockserver/explainUnmatched</code>) and as an MCP resource (<code class="code inline">mockserver://unmatched</code>).</p>
+
+<h2>Observe Then Mock: From Live Traffic to Active Expectations</h2>
+
+<p>Once you have recorded live traffic through a forwarding proxy (steps 1-3 above), you can convert that recorded traffic into active mock expectations in a single step using <a href="/mock_server/ai_mcp_tools.html#create_expectations_from_recorded_traffic"><code class="code inline">create_expectations_from_recorded_traffic</code></a>. This "observe then mock" workflow lets you point MockServer at a real API once, record the responses, and then switch to mocked responses for repeatable offline testing.</p>
+
+<p><strong>Example prompt:</strong></p>
+
+<blockquote>
+<p><em>"Convert all the traffic you just recorded into mock expectations so I can run tests offline"</em></p>
+</blockquote>
+
+<p>The assistant will:</p>
+<ol>
+    <li>Use <code class="code inline">create_expectations_from_recorded_traffic</code> with <code>preview=true</code> to show you the expectations that would be created</li>
+    <li>After your confirmation, call it again with <code>preview=false</code> to activate them</li>
+    <li>Optionally filter by method or path if you only want to mock a subset of the traffic</li>
+</ol>
+
+<h2>Tips for Effective AI-Assisted Debugging</h2>
+
+<ul>
+    <li><strong>Be specific about paths and methods.</strong> Instead of "check my API calls", say "show me POST requests to /api/orders". This helps the assistant construct precise queries.</li>
+    <li><strong>Start with <code class="code inline">reset</code>.</strong> Before a debugging session, ask the assistant to reset MockServer so you have a clean slate without noise from previous tests.</li>
+    <li><strong>Use forwarding proxies for live debugging.</strong> Rather than creating mock responses, set up forwarding to capture real traffic. This lets you see actual server responses.</li>
+    <li><strong>Ask follow-up questions.</strong> After the assistant shows you recorded traffic, ask questions like "why does request #3 have a different response?" or "what's different about the headers on the failed request?"</li>
+    <li><strong>Combine with verification.</strong> After fixing an issue, ask the assistant to set up a <code class="code inline">verify_request</code> check so you can confirm the fix works: "Verify that POST /api/orders is called exactly once with a valid Authorization header."</li>
+</ul>
+
+<h2>Related Pages</h2>
+
+<ul>
+    <li><a href="/mock_server/ai_mcp_setup.html"><strong>MCP Setup</strong></a> — how to connect your AI assistant to MockServer</li>
+    <li><a href="/mock_server/ai_mcp_tools.html"><strong>MCP Tools Reference</strong></a> — full documentation of all MCP tools</li>
+    <li><a href="/mock_server/ai_traffic_inspection.html"><strong>AI Traffic Inspection</strong></a> — use MockServer as an HTTPS proxy to inspect the raw LLM API and MCP calls your AI agent makes (prompts, tokens, tool calls, streamed responses)</li>
+    <li><a href="/mock_server/ai_verification.html"><strong>Contract Verification</strong></a> — verify recorded traffic and run contract/resiliency tests against an OpenAPI spec</li>
+    <li><a href="/mock_server/debugging_issues.html"><strong>Logging &amp; Debugging</strong></a> — traditional (non-AI) debugging approaches</li>
+    <li><a href="/mock_server/troubleshooting_matching.html"><strong>Troubleshooting Matching</strong></a> — step-by-step checklist, common pitfalls, and the debug mismatch endpoint</li>
+</ul>
+
+{% include_subpage _includes/ai_see_also.html %}

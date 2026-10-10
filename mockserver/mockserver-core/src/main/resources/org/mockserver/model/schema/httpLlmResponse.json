@@ -1,0 +1,325 @@
+{
+  "title": "LLM response to return",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "delay": {
+      "$ref": "#/definitions/delay"
+    },
+    "provider": {
+      "type": "string",
+      "enum": [
+        "ANTHROPIC",
+        "OPENAI",
+        "OPENAI_RESPONSES",
+        "GEMINI",
+        "BEDROCK",
+        "AZURE_OPENAI",
+        "OLLAMA",
+        "COHERE",
+        "VOYAGE",
+        "MISTRAL",
+        "XAI",
+        "DEEPSEEK",
+        "GROQ",
+        "OPENROUTER",
+        "ORCAROUTER"
+      ]
+    },
+    "model": {
+      "type": "string"
+    },
+    "completion": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "toolCalls": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "arguments": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "stopReason": {
+          "type": "string"
+        },
+        "usage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "inputTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "outputTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cachedInputTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cacheCreationTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reasoningTokens": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "streaming": {
+          "type": "boolean"
+        },
+        "outputSchema": {
+          "type": "string"
+        },
+        "enforceOutputSchema": {
+          "type": "boolean"
+        },
+        "toolChoice": {
+          "type": "string"
+        },
+        "reasoningText": {
+          "type": "string"
+        },
+        "reasoningSignature": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "streamingPhysics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "timeToFirstToken": {
+              "$ref": "#/definitions/delay"
+            },
+            "tokensPerSecond": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000
+            },
+            "jitter": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "seed": {
+              "type": "integer"
+            },
+            "subwordStreaming": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        }
+      }
+    },
+    "embedding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dimensions": {
+          "type": "integer"
+        },
+        "deterministicFromInput": {
+          "type": "boolean"
+        },
+        "seed": {
+          "type": "integer"
+        }
+      }
+    },
+    "rerank": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "topN": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deterministicFromInput": {
+          "type": "boolean"
+        },
+        "seed": {
+          "type": "integer"
+        }
+      }
+    },
+    "moderation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "flaggedCategories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "model": {
+          "type": "string"
+        }
+      }
+    },
+    "contentFilter": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hate": {
+          "type": "string"
+        },
+        "sexual": {
+          "type": "string"
+        },
+        "violence": {
+          "type": "string"
+        },
+        "selfHarm": {
+          "type": "string"
+        }
+      }
+    },
+    "conversationPredicates": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "turnIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "latestMessageContains": {
+          "type": "string"
+        },
+        "latestMessageMatches": {
+          "type": "string"
+        },
+        "latestMessageRole": {
+          "type": "string",
+          "enum": [
+            "USER",
+            "ASSISTANT",
+            "TOOL",
+            "SYSTEM"
+          ]
+        },
+        "containsToolResultFor": {
+          "type": "string"
+        },
+        "semanticMatchAgainst": {
+          "type": "string"
+        },
+        "normalization": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "collapseWhitespace": {
+              "type": "boolean"
+            },
+            "lowercase": {
+              "type": "boolean"
+            },
+            "sortJsonKeys": {
+              "type": "boolean"
+            },
+            "dropBuiltInVolatileFields": {
+              "type": "boolean"
+            },
+            "dropVolatileFields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "chaos": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "errorStatus": {
+          "type": "integer"
+        },
+        "retryAfter": {
+          "type": "string"
+        },
+        "errorProbability": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "truncateMode": {
+          "type": "string",
+          "enum": [
+            "NONE",
+            "MID_STREAM"
+          ]
+        },
+        "truncateAtFraction": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "malformedSse": {
+          "type": "boolean"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "quotaName": {
+          "type": "string"
+        },
+        "quotaLimit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "quotaWindowMillis": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "quotaErrorStatus": {
+          "type": "integer"
+        },
+        "tokenQuotaLimit": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tokenQuotaWindowMillis": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "contentFilterBlockProbability": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "errorKind": {
+          "type": "string"
+        }
+      }
+    },
+    "primary": {
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+  }
+}

@@ -1,8 +1,9 @@
 ---
 title: Clearing & Resetting
+description: Clear or reset MockServer state selectively by type (expectations, logs, or all) or by request matcher, with curl, Java, and JavaScript examples.
 layout: page
 pageOrder: 4
-section: 'General'
+section: 'Data & State'
 subsection: true
 sitemap:
   priority: 0.7
@@ -26,7 +27,49 @@ sitemap:
     <li>use an <strong>expectation id</strong> to clear matching items</li>
 </ul>
 
-<p>When <a href="/mock_server/debugging_issues.html#logging-levels">logLevel</a> is set to <span class="string_literal">DEBUG</span> using <strong>clear</strong> does not delete logs from the event log, instead they are marked as deleted to ensure <a href="/mock_server/verification.html">verification</a> continues to work correctly.  This allows the <a href="/mock_server/mockserver_ui.html">UI</a> to continue to display logs that would have otherwise been deleted to improve the ability to debug issues.</p>
+<p><strong>What each <span class="inline_code">type</span> affects:</strong> the <span class="inline_code">type</span> parameter is important for memory management. <span class="string_literal">expectations</span> clears <em>only</em> the configured expectations &mdash; it does <strong>not</strong> clear the recorded request / event log. On a long-running instance the request log grows with every request, so clearing expectations alone will not free that memory. To free memory held by accumulated log entries, use <span class="string_literal">log</span> or <span class="string_literal">all</span>, or perform a full <a href="#button_client_reset">reset</a> with <span class="inline_code">PUT /mockserver/reset</span>.</p>
+
+<table class="table-standard">
+    <thead>
+        <tr>
+            <th>Operation</th>
+            <th>Expectations</th>
+            <th>Request / event log</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><span class="inline_code">clear?type=expectations</span></td>
+            <td>cleared</td>
+            <td>kept</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">clear?type=log</span></td>
+            <td>kept</td>
+            <td>cleared</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">clear?type=all</span> (the default when <span class="inline_code">type</span> is omitted)</td>
+            <td>cleared</td>
+            <td>cleared</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">PUT /mockserver/reset</span></td>
+            <td>cleared</td>
+            <td>cleared</td>
+        </tr>
+    </tbody>
+</table>
+
+<p><strong>Note:</strong> a request matcher or expectation id narrows clearing to matching items; <span class="inline_code">reset</span> always clears everything and ignores any matcher.</p>
+
+<p><strong>How clearing works:</strong> when <a href="/mock_server/debugging_issues.html#logging-levels">logLevel</a> is <span class="string_literal">INFO</span> or lower (the default), cleared log entries are <em>soft-deleted</em> rather than physically removed. This means:</p>
+<ul>
+    <li><strong>Verification works correctly</strong> &mdash; the <a href="/mock_server/verification.html">verify</a> endpoint ignores cleared entries, so verifying a request after clearing will behave as if the logs were fully removed</li>
+    <li><strong>Retrieve works correctly</strong> &mdash; the retrieve endpoint for requests, recorded expectations, and log messages filters out cleared entries</li>
+    <li><strong>UI may still show cleared entries</strong> &mdash; the <a href="/mock_server/mockserver_ui.html">UI</a> can display soft-deleted entries (marked as deleted) to help debug issues</li>
+</ul>
+<p>If you want cleared log entries to be physically removed from memory, set the log level to <span class="string_literal">WARN</span> or higher.</p>
 
 <button id="button_client_clear_all_logs" class="accordion">clear all recorded requests and logs</button>
 <div class="panel">
@@ -50,12 +93,54 @@ mockServerClient("localhost", 1080)
       console.log(error);
     }
   );</code></pre>
-        <p>See <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank">REST API</a> for full JSON specification</p>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+    <button class="accordion inner">Python</button>
+    <div class="panel">
+        <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
+
+client = MockServerClient("localhost", 1080)
+client.clear(clear_type="LOG")</code></pre>
+    </div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel">
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+
+client = MockServer::Client.new('localhost', 1080)
+client.clear(type: 'LOG')</code></pre>
+    </div>
+    <button class="accordion inner">Go</button>
+    <div class="panel">
+        <pre class="prettyprint lang-go code"><code class="code">import mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+
+client := mockserver.New("localhost", 1080)
+client.Clear(nil, mockserver.ClearLog)</code></pre>
+    </div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel">
+        <pre class="prettyprint lang-csharp code"><code class="code">using MockServer.Client;
+
+using var client = new MockServerClient("localhost", 1080);
+client.Clear(type: "LOG");</code></pre>
+    </div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel">
+        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, ClearType};
+
+let client = ClientBuilder::new("localhost", 1080).build().unwrap();
+client.clear(None, Some(ClearType::Log)).unwrap();</code></pre>
+    </div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel">
+        <pre class="prettyprint lang-php code"><code class="code">use MockServer\MockServerClient;
+
+$client = new MockServerClient('localhost', 1080);
+$client-&gt;clear(null, 'LOG');</code></pre>
     </div>
     <button class="accordion inner">REST API</button>
     <div class="panel">
         <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/clear?type=log"</code></pre>
-        <p>See <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank">REST API</a> for full JSON specification</p>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
     </div>
 </div>
 <button id="button_client_clear" class="accordion">clear everything that matches request properties matcher</button>
@@ -82,14 +167,74 @@ mockServerClient("localhost", 1080)
       console.log(error);
     }
   );</code></pre>
-        <p>See <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank">REST API</a> for full JSON specification</p>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+    <button class="accordion inner">Python</button>
+    <div class="panel">
+        <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
+from mockserver.models import HttpRequest
+
+client = MockServerClient("localhost", 1080)
+client.clear(
+    HttpRequest.request("/some/path")
+)</code></pre>
+    </div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel">
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+
+client = MockServer::Client.new('localhost', 1080)
+client.clear(
+    MockServer::HttpRequest.new(path: '/some/path')
+)</code></pre>
+    </div>
+    <button class="accordion inner">Go</button>
+    <div class="panel">
+        <pre class="prettyprint lang-go code"><code class="code">import mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+
+client := mockserver.New("localhost", 1080)
+client.Clear(
+    mockserver.Request().Path("/some/path"),
+    mockserver.ClearAll,
+)</code></pre>
+    </div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel">
+        <pre class="prettyprint lang-csharp code"><code class="code">using MockServer.Client;
+using MockServer.Client.Models;
+
+using var client = new MockServerClient("localhost", 1080);
+client.Clear(
+    HttpRequest.Request().WithPath("/some/path")
+);</code></pre>
+    </div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel">
+        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest};
+
+let client = ClientBuilder::new("localhost", 1080).build().unwrap();
+client.clear(
+    Some(&HttpRequest::new().path("/some/path")),
+    None,
+).unwrap();</code></pre>
+    </div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel">
+        <pre class="prettyprint lang-php code"><code class="code">use MockServer\MockServerClient;
+use MockServer\HttpRequest;
+
+$client = new MockServerClient('localhost', 1080);
+$client-&gt;clear(
+    HttpRequest::request()
+        -&gt;path('/some/path')
+);</code></pre>
     </div>
     <button class="accordion inner">REST API</button>
     <div class="panel">
         <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/clear" -d '{
     "path": "/some/path"
 }'</code></pre>
-        <p>See <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank">REST API</a> for full JSON specification</p>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
     </div>
 </div>
 <button id="button_client_openapi_clear" class="accordion">clear everything that matches openapi request matcher</button>
@@ -98,7 +243,7 @@ mockServerClient("localhost", 1080)
     <div class="panel">
             <pre class="prettyprint lang-java code"><code class="code">new MockServerClient("localhost", 1080).clear(
     openAPI(
-        "https://raw.githubusercontent.com/mock-server/mockserver/master/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+        "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
         "showPetById"
     )
 );</code></pre>
@@ -108,7 +253,7 @@ mockServerClient("localhost", 1080)
         <pre class="prettyprint lang-javascript code"><code class="code">var mockServerClient = require('mockserver-client').mockServerClient;
 mockServerClient("localhost", 1080)
     .clear({
-        "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver/master/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+        "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
         "operationId": "showPetById"
     })
     .then(
@@ -119,15 +264,118 @@ mockServerClient("localhost", 1080)
             console.log(error);
         }
     );</code></pre>
-        <p>See <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank">REST API</a> for full JSON specification</p>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+    <button class="accordion inner">Python</button>
+    <div class="panel">
+        <p>The typed <code class="inline code">clear</code> method takes a request matcher; to clear by an OpenAPI matcher send the JSON body to the control-plane endpoint directly.</p>
+        <pre class="prettyprint lang-python code"><code class="code">import json
+import urllib.request
+
+body = json.dumps({
+    "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+    "operationId": "showPetById"
+})
+req = urllib.request.Request(
+    "http://localhost:1080/mockserver/clear",
+    data=body.encode("utf-8"),
+    method="PUT",
+    headers={"Content-Type": "application/json"},
+)
+urllib.request.urlopen(req)</code></pre>
+    </div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel">
+        <p>The typed <code class="inline code">clear</code> method takes a request matcher; to clear by an OpenAPI matcher send the JSON body to the control-plane endpoint directly.</p>
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'net/http'
+require 'json'
+
+uri = URI('http://localhost:1080/mockserver/clear')
+body = JSON.generate({
+    'specUrlOrPayload' => 'https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json',
+    'operationId' => 'showPetById'
+})
+request = Net::HTTP::Put.new(uri, 'Content-Type' => 'application/json')
+request.body = body
+Net::HTTP.start(uri.host, uri.port) { |http| http.request(request) }</code></pre>
+    </div>
+    <button class="accordion inner">Go</button>
+    <div class="panel">
+        <p>The typed <code class="inline code">Clear</code> method takes a request matcher; to clear by an OpenAPI matcher send the JSON body to the control-plane endpoint directly.</p>
+        <pre class="prettyprint lang-go code"><code class="code">import (
+    "net/http"
+    "strings"
+)
+
+body := `{
+    "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+    "operationId": "showPetById"
+}`
+req, _ := http.NewRequest("PUT",
+    "http://localhost:1080/mockserver/clear",
+    strings.NewReader(body))
+req.Header.Set("Content-Type", "application/json")
+http.DefaultClient.Do(req)</code></pre>
+    </div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel">
+        <p>The typed <code class="inline code">Clear</code> method takes a request matcher; to clear by an OpenAPI matcher send the JSON body to the control-plane endpoint directly.</p>
+        <pre class="prettyprint lang-csharp code"><code class="code">using System.Net.Http;
+using System.Text;
+
+using var httpClient = new HttpClient();
+var json = @"{
+    ""specUrlOrPayload"": ""https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json"",
+    ""operationId"": ""showPetById""
+}";
+await httpClient.PutAsync(
+    "http://localhost:1080/mockserver/clear",
+    new StringContent(json, Encoding.UTF8, "application/json")
+);</code></pre>
+    </div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel">
+        <p>The typed <code class="inline code">clear</code> method takes a request matcher; to clear by an OpenAPI matcher send the JSON body to the control-plane endpoint directly.</p>
+        <pre class="prettyprint lang-rust code"><code class="code">use reqwest::blocking::Client;
+
+let client = Client::new();
+let body = r#"{
+    "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+    "operationId": "showPetById"
+}"#;
+client.put("http://localhost:1080/mockserver/clear")
+    .header("Content-Type", "application/json")
+    .body(body.to_string())
+    .send()
+    .unwrap();</code></pre>
+    </div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel">
+        <p>The typed <code class="inline code">clear</code> method takes a request matcher; to clear by an OpenAPI matcher send the JSON body to the control-plane endpoint directly.</p>
+        <pre class="prettyprint lang-php code"><code class="code">$json = &lt;&lt;&lt;'JSON'
+{
+    "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+    "operationId": "showPetById"
+}
+JSON;
+
+$ch = curl_init('http://localhost:1080/mockserver/clear');
+curl_setopt_array($ch, [
+    CURLOPT_CUSTOMREQUEST  =&gt; 'PUT',
+    CURLOPT_POSTFIELDS     =&gt; $json,
+    CURLOPT_HTTPHEADER     =&gt; ['Content-Type: application/json; charset=utf-8'],
+    CURLOPT_RETURNTRANSFER =&gt; true,
+]);
+curl_exec($ch);
+curl_close($ch);</code></pre>
     </div>
     <button class="accordion inner">REST API</button>
     <div class="panel">
         <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/clear" -d '{
-        "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver/master/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+        "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
         "operationId": "showPetById"
     }'</code></pre>
-        <p>See <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank">REST API</a> for full JSON specification</p>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
     </div>
 </div>
 <button id="button_client_expectation_id_clear" class="accordion">clear everything that matches expectation id</button>
@@ -150,14 +398,56 @@ mockServerClient("localhost", 1080)
             console.log(error);
         }
     );</code></pre>
-        <p>See <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank">REST API</a> for full JSON specification</p>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+    <button class="accordion inner">Python</button>
+    <div class="panel">
+        <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
+
+client = MockServerClient("localhost", 1080)
+client.clear_by_id("31e4ca35-66c6-4645-afeb-6e66c4ca0559")</code></pre>
+    </div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel">
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+
+client = MockServer::Client.new('localhost', 1080)
+client.clear_by_id('31e4ca35-66c6-4645-afeb-6e66c4ca0559')</code></pre>
+    </div>
+    <button class="accordion inner">Go</button>
+    <div class="panel">
+        <pre class="prettyprint lang-go code"><code class="code">import mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+
+client := mockserver.New("localhost", 1080)
+client.ClearByID("31e4ca35-66c6-4645-afeb-6e66c4ca0559", mockserver.ClearAll)</code></pre>
+    </div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel">
+        <pre class="prettyprint lang-csharp code"><code class="code">using MockServer.Client;
+
+using var client = new MockServerClient("localhost", 1080);
+client.ClearById("31e4ca35-66c6-4645-afeb-6e66c4ca0559");</code></pre>
+    </div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel">
+        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::ClientBuilder;
+
+let client = ClientBuilder::new("localhost", 1080).build().unwrap();
+client.clear_by_id("31e4ca35-66c6-4645-afeb-6e66c4ca0559", None).unwrap();</code></pre>
+    </div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel">
+        <pre class="prettyprint lang-php code"><code class="code">use MockServer\MockServerClient;
+
+$client = new MockServerClient('localhost', 1080);
+$client-&gt;clearById('31e4ca35-66c6-4645-afeb-6e66c4ca0559');</code></pre>
     </div>
     <button class="accordion inner">REST API</button>
     <div class="panel">
         <pre class="prettyprint code"><code class="code">curl -X PUT "http://localhost:1080/mockserver/clear" -d '{
     "id": "31e4ca35-66c6-4645-afeb-6e66c4ca0559"
 }'</code></pre>
-        <p>See <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank">REST API</a> for full JSON specification</p>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
     </div>
 </div>
 <button id="button_client_clear_logs_by_req" class="accordion">clear recorded requests and logs that matches request properties matcher</button>
@@ -185,14 +475,78 @@ mockServerClient("localhost", 1080)
       console.log(error);
     }
   );</code></pre>
-        <p>See <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank">REST API</a> for full JSON specification</p>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+    <button class="accordion inner">Python</button>
+    <div class="panel">
+        <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
+from mockserver.models import HttpRequest
+
+client = MockServerClient("localhost", 1080)
+client.clear(
+    HttpRequest.request("/some/path"),
+    clear_type="LOG"
+)</code></pre>
+    </div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel">
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+
+client = MockServer::Client.new('localhost', 1080)
+client.clear(
+    MockServer::HttpRequest.new(path: '/some/path'),
+    type: 'LOG'
+)</code></pre>
+    </div>
+    <button class="accordion inner">Go</button>
+    <div class="panel">
+        <pre class="prettyprint lang-go code"><code class="code">import mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+
+client := mockserver.New("localhost", 1080)
+client.Clear(
+    mockserver.Request().Path("/some/path"),
+    mockserver.ClearLog,
+)</code></pre>
+    </div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel">
+        <pre class="prettyprint lang-csharp code"><code class="code">using MockServer.Client;
+using MockServer.Client.Models;
+
+using var client = new MockServerClient("localhost", 1080);
+client.Clear(
+    HttpRequest.Request().WithPath("/some/path"),
+    "LOG"
+);</code></pre>
+    </div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel">
+        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, ClearType};
+
+let client = ClientBuilder::new("localhost", 1080).build().unwrap();
+client.clear(
+    Some(&HttpRequest::new().path("/some/path")),
+    Some(ClearType::Log),
+).unwrap();</code></pre>
+    </div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel">
+        <pre class="prettyprint lang-php code"><code class="code">use MockServer\MockServerClient;
+use MockServer\HttpRequest;
+
+$client = new MockServerClient('localhost', 1080);
+$client-&gt;clear(
+    HttpRequest::request()
+        -&gt;path('/some/path'),
+    'LOG'
+);</code></pre>
     </div>
     <button class="accordion inner">REST API</button>
     <div class="panel">
         <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/clear?type=log" -d '{
     "path": "/some/path"
 }'</code></pre>
-        <p>See <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank">REST API</a> for full JSON specification</p>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
     </div>
 </div>
 <button id="button_client_clear_logs_by_openapi_req" class="accordion">clear recorded requests and logs that matches openapi request matcher</button>
@@ -201,7 +555,7 @@ mockServerClient("localhost", 1080)
     <div class="panel">
             <pre class="prettyprint lang-java code"><code class="code">new MockServerClient("localhost", 1080).clear(
     openAPI(
-        "https://raw.githubusercontent.com/mock-server/mockserver/master/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+        "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
         "showPetById"
     ),
     ClearType.LOG
@@ -212,7 +566,7 @@ mockServerClient("localhost", 1080)
         <pre class="prettyprint lang-javascript code"><code class="code">var mockServerClient = require('mockserver-client').mockServerClient;
 mockServerClient("localhost", 1080)
     .clear({
-        "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver/master/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+        "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
         "operationId": "showPetById"
     }, 'LOG')
     .then(
@@ -223,15 +577,118 @@ mockServerClient("localhost", 1080)
             console.log(error);
         }
     );</code></pre>
-        <p>See <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank">REST API</a> for full JSON specification</p>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+    <button class="accordion inner">Python</button>
+    <div class="panel">
+        <p>The typed <code class="inline code">clear</code> method takes a request matcher; to clear by an OpenAPI matcher send the JSON body to the control-plane endpoint directly.</p>
+        <pre class="prettyprint lang-python code"><code class="code">import json
+import urllib.request
+
+body = json.dumps({
+    "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+    "operationId": "showPetById"
+})
+req = urllib.request.Request(
+    "http://localhost:1080/mockserver/clear?type=log",
+    data=body.encode("utf-8"),
+    method="PUT",
+    headers={"Content-Type": "application/json"},
+)
+urllib.request.urlopen(req)</code></pre>
+    </div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel">
+        <p>The typed <code class="inline code">clear</code> method takes a request matcher; to clear by an OpenAPI matcher send the JSON body to the control-plane endpoint directly.</p>
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'net/http'
+require 'json'
+
+uri = URI('http://localhost:1080/mockserver/clear?type=log')
+body = JSON.generate({
+    'specUrlOrPayload' => 'https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json',
+    'operationId' => 'showPetById'
+})
+request = Net::HTTP::Put.new(uri, 'Content-Type' => 'application/json')
+request.body = body
+Net::HTTP.start(uri.host, uri.port) { |http| http.request(request) }</code></pre>
+    </div>
+    <button class="accordion inner">Go</button>
+    <div class="panel">
+        <p>The typed <code class="inline code">Clear</code> method takes a request matcher; to clear by an OpenAPI matcher send the JSON body to the control-plane endpoint directly.</p>
+        <pre class="prettyprint lang-go code"><code class="code">import (
+    "net/http"
+    "strings"
+)
+
+body := `{
+    "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+    "operationId": "showPetById"
+}`
+req, _ := http.NewRequest("PUT",
+    "http://localhost:1080/mockserver/clear?type=log",
+    strings.NewReader(body))
+req.Header.Set("Content-Type", "application/json")
+http.DefaultClient.Do(req)</code></pre>
+    </div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel">
+        <p>The typed <code class="inline code">Clear</code> method takes a request matcher; to clear by an OpenAPI matcher send the JSON body to the control-plane endpoint directly.</p>
+        <pre class="prettyprint lang-csharp code"><code class="code">using System.Net.Http;
+using System.Text;
+
+using var httpClient = new HttpClient();
+var json = @"{
+    ""specUrlOrPayload"": ""https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json"",
+    ""operationId"": ""showPetById""
+}";
+await httpClient.PutAsync(
+    "http://localhost:1080/mockserver/clear?type=log",
+    new StringContent(json, Encoding.UTF8, "application/json")
+);</code></pre>
+    </div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel">
+        <p>The typed <code class="inline code">clear</code> method takes a request matcher; to clear by an OpenAPI matcher send the JSON body to the control-plane endpoint directly.</p>
+        <pre class="prettyprint lang-rust code"><code class="code">use reqwest::blocking::Client;
+
+let client = Client::new();
+let body = r#"{
+    "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+    "operationId": "showPetById"
+}"#;
+client.put("http://localhost:1080/mockserver/clear?type=log")
+    .header("Content-Type", "application/json")
+    .body(body.to_string())
+    .send()
+    .unwrap();</code></pre>
+    </div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel">
+        <p>The typed <code class="inline code">clear</code> method takes a request matcher; to clear by an OpenAPI matcher send the JSON body to the control-plane endpoint directly.</p>
+        <pre class="prettyprint lang-php code"><code class="code">$json = &lt;&lt;&lt;'JSON'
+{
+    "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+    "operationId": "showPetById"
+}
+JSON;
+
+$ch = curl_init('http://localhost:1080/mockserver/clear?type=log');
+curl_setopt_array($ch, [
+    CURLOPT_CUSTOMREQUEST  =&gt; 'PUT',
+    CURLOPT_POSTFIELDS     =&gt; $json,
+    CURLOPT_HTTPHEADER     =&gt; ['Content-Type: application/json; charset=utf-8'],
+    CURLOPT_RETURNTRANSFER =&gt; true,
+]);
+curl_exec($ch);
+curl_close($ch);</code></pre>
     </div>
     <button class="accordion inner">REST API</button>
     <div class="panel">
         <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/clear?type=log" -d '{
-        "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver/master/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
+        "specUrlOrPayload": "https://raw.githubusercontent.com/mock-server/mockserver-monorepo/master/mockserver/mockserver-integration-testing/src/main/resources/org/mockserver/openapi/openapi_petstore_example.json",
         "operationId": "showPetById"
     }'</code></pre>
-        <p>See <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank">REST API</a> for full JSON specification</p>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
     </div>
 </div>
 <button id="button_client_clear_expectations_by_req" class="accordion">clear expectations that matches request matcher</button>
@@ -259,14 +716,78 @@ mockServerClient("localhost", 1080)
       console.log(error);
     }
   );</code></pre>
-        <p>See <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank">REST API</a> for full JSON specification</p>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+    <button class="accordion inner">Python</button>
+    <div class="panel">
+        <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
+from mockserver.models import HttpRequest
+
+client = MockServerClient("localhost", 1080)
+client.clear(
+    HttpRequest.request("/some/path"),
+    clear_type="EXPECTATIONS"
+)</code></pre>
+    </div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel">
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+
+client = MockServer::Client.new('localhost', 1080)
+client.clear(
+    MockServer::HttpRequest.new(path: '/some/path'),
+    type: 'EXPECTATIONS'
+)</code></pre>
+    </div>
+    <button class="accordion inner">Go</button>
+    <div class="panel">
+        <pre class="prettyprint lang-go code"><code class="code">import mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+
+client := mockserver.New("localhost", 1080)
+client.Clear(
+    mockserver.Request().Path("/some/path"),
+    mockserver.ClearExpectations,
+)</code></pre>
+    </div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel">
+        <pre class="prettyprint lang-csharp code"><code class="code">using MockServer.Client;
+using MockServer.Client.Models;
+
+using var client = new MockServerClient("localhost", 1080);
+client.Clear(
+    HttpRequest.Request().WithPath("/some/path"),
+    "EXPECTATIONS"
+);</code></pre>
+    </div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel">
+        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, ClearType};
+
+let client = ClientBuilder::new("localhost", 1080).build().unwrap();
+client.clear(
+    Some(&HttpRequest::new().path("/some/path")),
+    Some(ClearType::Expectations),
+).unwrap();</code></pre>
+    </div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel">
+        <pre class="prettyprint lang-php code"><code class="code">use MockServer\MockServerClient;
+use MockServer\HttpRequest;
+
+$client = new MockServerClient('localhost', 1080);
+$client-&gt;clear(
+    HttpRequest::request()
+        -&gt;path('/some/path'),
+    'EXPECTATIONS'
+);</code></pre>
     </div>
     <button class="accordion inner">REST API</button>
     <div class="panel">
         <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/clear?type=expectations" -d '{
     "path": "/some/path"
 }'</code></pre>
-        <p>See <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank">REST API</a> for full JSON specification</p>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_clear" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
     </div>
 </div>
 
@@ -291,11 +812,53 @@ mockServerClient("localhost", 1080)
       console.log(error);
     }
   );</code></pre>
-        <p>See <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_reset" target="_blank">REST API</a> for full JSON specification</p>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_reset" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+    <button class="accordion inner">Python</button>
+    <div class="panel">
+        <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
+
+client = MockServerClient("localhost", 1080)
+client.reset()</code></pre>
+    </div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel">
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+
+client = MockServer::Client.new('localhost', 1080)
+client.reset</code></pre>
+    </div>
+    <button class="accordion inner">Go</button>
+    <div class="panel">
+        <pre class="prettyprint lang-go code"><code class="code">import mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+
+client := mockserver.New("localhost", 1080)
+client.Reset()</code></pre>
+    </div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel">
+        <pre class="prettyprint lang-csharp code"><code class="code">using MockServer.Client;
+
+using var client = new MockServerClient("localhost", 1080);
+client.Reset();</code></pre>
+    </div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel">
+        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::ClientBuilder;
+
+let client = ClientBuilder::new("localhost", 1080).build().unwrap();
+client.reset().unwrap();</code></pre>
+    </div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel">
+        <pre class="prettyprint lang-php code"><code class="code">use MockServer\MockServerClient;
+
+$client = new MockServerClient('localhost', 1080);
+$client-&gt;reset();</code></pre>
     </div>
     <button class="accordion inner">REST API</button>
     <div class="panel">
-        <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/reset</code></pre>
-        <p>See <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_reset" target="_blank">REST API</a> for full JSON specification</p>
+        <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/reset"</code></pre>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/control/put_reset" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
     </div>
 </div>

@@ -1,13 +1,14 @@
 ---
 title: API Security
+description: Secure the MockServer control plane with mTLS client certificate authentication, JWT bearer tokens, or both, plus network and CORS hardening tips.
 layout: page
-pageOrder: 8
-section: 'General'
+pageOrder: 2
+section: 'Security'
 subsection: true
 sitemap:
   priority: 0.7
   changefreq: 'monthly'
-  lastmod: 2019-11-10T08:00:00+01:00
+  lastmod: 2026-05-30T08:00:00+00:00
 ---
 
 <p>Multiple techniques can be used to lock down MockServer deployments, as follows:</p>
@@ -19,9 +20,10 @@ sitemap:
     <li>authenticate all <a href="/mock_server/HTTPS_TLS.html">TCP connections using mTLS</a></li>
     <li>authenticate all REST API i.e. control plane requests using mTLS</li>
     <li>authenticate all REST API i.e. control plane requests using JWT</li>
+    <li>set security-focused configuration property values &mdash; see <a href="#configuration_hardening">Configuration Hardening</a> below</li>
 </ul>
 
-<p><strong>Important:</strong> MockServer does not currently support HTTP proxy authentication (Proxy-Authenticate / Proxy-Authorization headers). The authentication mechanisms described on this page secure the <strong>control plane</strong> (expectation management, verification, retrieval, etc.), not the data plane when MockServer is used as an HTTP proxy. If you need to test proxy authentication, you must use a different proxy server that supports it.</p>
+<p><strong>Proxy Authentication:</strong> When MockServer is used as an HTTP proxy, it supports <strong>HTTP Basic proxy authentication</strong> (RFC 7235) on the data plane via three configuration properties: <code>proxyAuthenticationUsername</code>, <code>proxyAuthenticationPassword</code>, and <code>proxyAuthenticationRealm</code>. When these are configured, MockServer responds with <code>407 Proxy Authentication Required</code> and a <code>Proxy-Authenticate: Basic realm="&hellip;"</code> header to any CONNECT or forwarded request that does not include valid <code>Proxy-Authorization</code> credentials. The authentication mechanisms described below secure the <strong>control plane</strong> (expectation management, verification, retrieval, etc.), which is separate from this data-plane proxy authentication.</p>
 
 <p><strong>Common confusion:</strong> The <code>MockServerClient.withProxyConfiguration()</code> method configures how the <em>client</em> connects to MockServer through an upstream proxy—it does not add authentication to MockServer itself. See the <a href="/mock_server/mockserver_clients.html">client documentation</a> for details.</p>
 
@@ -32,11 +34,19 @@ sitemap:
 <p>Authentication can be enabled for all control plane requests (i.e. <strong>create expectations</strong>, <strong>clear</strong>, <strong>reset</strong>, <strong>verify</strong>, <strong>retrieve</strong>, <strong>stop</strong>, etc) using either <a href="#control_plane_mtls_authentication">mTLS</a>, <a href="#control_plane_jwt_authentication">JWT</a> or both.</p>
 <p>If both <a href="#control_plane_mtls_authentication">mTLS</a> and <a href="#control_plane_jwt_authentication">JWT</a> are enabled <a href="#control_plane_mtls_authentication">mTLS</a> will be validated first.</p>
 
+<p><strong>Control plane authentication settings are read live, not frozen at startup.</strong> The CA chain, JWK source, issuer and audience used to authenticate control plane requests are re-read from the current configuration on every request, so enabling, disabling or re-pointing control plane authentication on a <strong>running</strong> MockServer takes effect immediately &mdash; whether you change it with a system property, a <code>Configuration</code> setter, or <code>PUT /mockserver/configuration</code>.</p>
+
+<p>This is what makes it possible to lock down an instance that is already running. It also means the trust anchor you set at startup is <strong>not</strong> permanent: anything that can change MockServer's configuration can change who is trusted. Two things follow. First, if you run MockServer embedded, set the CA chain on the <code>Configuration</code> instance you start the server with rather than through the global static properties, so unrelated code in the same JVM (including other tests) cannot move it. Second, if the control plane is reachable by anyone you would not trust to change its own trust anchor, keep control plane authentication enabled &mdash; <code>PUT /mockserver/configuration</code> is itself a control plane request and is refused when authentication is enabled and not satisfied.</p>
+
 <a id="control_plane_mtls_authentication" class="anchor" href="#control_plane_mtls_authentication">&nbsp;</a>
 
 <h3>Control Plane mTLS Authentication</h3>
 
 <p>When mTLS authentication is enabled all control plane requests need to be received over a mTLS connection where the client's X509 certificates can be validated using the <a href="#button_configuration_control_plane_mtls_authentication_ca_chain">controlPlaneTLSMutualAuthenticationCAChain</a></p>
+
+<p>MockServer accepts only client certificates signed by a CA in that chain. If the chain is not set, it accepts client certificates signed by its own CA certificate (<code>mockserver.certificateAuthorityCertificate</code>, or the CA it creates when <code>mockserver.dynamicallyCreateCertificateAuthorityCertificate</code> is enabled), unless that is the CA bundled with MockServer, which must not be trusted for control plane client certificates. MockServer therefore refuses to start with control plane mTLS enabled, no chain and the bundled CA, and answers <code>400</code> to a <code>PUT /mockserver/configuration</code> that would lead to that set-up; the message says how to fix it: set <code>controlPlaneTLSMutualAuthenticationCAChain</code>, or give MockServer its own CA with <code>mockserver.certificateAuthorityCertificate</code> and <code>mockserver.certificateAuthorityPrivateKey</code>.</p>
+
+<p><strong>Changed:</strong> earlier versions also accepted client certificates signed by MockServer's own CA certificate when <code>controlPlaneTLSMutualAuthenticationCAChain</code> was set. If your control plane client certificates are signed by MockServer's CA, add that CA to the chain. If MockServer's CA is the bundled default, sign your client certificates with your own CA instead; MockServer logs a warning if the chain includes the bundled CA. Earlier versions also started with control plane mTLS enabled, no chain and the bundled CA; that set-up is now refused, as described above.</p>
 
 {% include_subpage _includes/control_plane_authentication_mtls_configuration.html %}
 
@@ -47,3 +57,179 @@ sitemap:
 <p>When JWT authentication is enabled all control plane requests need and JWT via a <strong>authorization</strong> header which is validated using the <a href="#button_configuration_control_plane_jwt_authentication_jwk_source">controlPlaneJWTAuthenticationJWKSource</a></p>
 
 {% include_subpage _includes/control_plane_authentication_jwt_configuration.html %}
+
+<a id="control_plane_oidc_authentication" class="anchor" href="#control_plane_oidc_authentication">&nbsp;</a>
+
+<h3>Control Plane OIDC Authentication</h3>
+
+<p>When OIDC authentication is enabled all control plane requests need a Bearer access token via an <strong>authorization</strong> header issued by an external OpenID Connect identity provider. The token signature is verified against the provider's JWK set (configured directly via <a href="#button_configuration_control_plane_oidc_jwks_uri">controlPlaneOidcJwksUri</a> or discovered from <a href="#button_configuration_control_plane_oidc_issuer">controlPlaneOidcIssuer</a>), and its issuer, <a href="#button_configuration_control_plane_oidc_audience">audience</a>, expiry and <a href="#button_configuration_control_plane_oidc_required_scopes">required scopes</a> are checked. The verified subject is recorded as the principal in the control plane audit log.</p>
+
+{% include_subpage _includes/control_plane_authentication_oidc_configuration.html %}
+
+<a id="control_plane_authorization" class="anchor" href="#control_plane_authorization">&nbsp;</a>
+
+<h2>Control Plane Authorization</h2>
+
+<p>Once a principal has been <a href="#control_plane_authentication">authenticated</a>, you can layer a coarse <strong>role-based authorization</strong> check on top. Authorization maps the verified principal's OIDC scopes or groups to one of three hierarchical roles and enforces them on every control-plane operation.</p>
+
+<p><strong>Prerequisite:</strong> Authorization requires a verified principal, so <a href="#control_plane_oidc_authentication">OIDC authentication</a> must be configured. Without authentication there is no principal and authorization has nothing to enforce.</p>
+
+<p><strong>Important limitations:</strong></p>
+<ul>
+    <li>The health/lifecycle probes <code>/mockserver/status</code> and <code>/mockserver/ready</code> are <strong>neither authenticated nor authorized</strong> — they are always reachable so health-check infrastructure never needs credentials. (<code>/mockserver/bind</code> and <code>/mockserver/stop</code> <em>are</em> authenticated when control-plane authentication is enabled.)</li>
+    <li>The <a href="/mock_server/mockserver_ui.html">dashboard</a> (<code>/mockserver/dashboard</code>) and its live UI WebSocket require the <strong>same control-plane authentication</strong> as every other control-plane endpoint when it is enabled — otherwise anyone with network reach could read all captured traffic. The dashboard is a read, so a <code>read</code>-only role may view it. When no control-plane authentication is configured (the default) the dashboard stays open. Because a browser cannot attach a bearer token to a WebSocket, a token/OIDC-authenticated dashboard must be served through an authenticating reverse proxy (or use mutual TLS).</li>
+    <li>MockServer's own <a href="/mock_server/ai_mcp_setup.html">MCP control plane</a> (<code>/mockserver/mcp</code>) is authenticated (the bearer token is validated), but per-tool authorization is <strong>not yet enforced</strong>. Treat any authenticated MCP session as <code>mutate</code>-capable.</li>
+    <li>The Prometheus scrape endpoint <code>/mockserver/metrics</code> is <strong>intentionally NOT behind control-plane authentication</strong> — Prometheus and OpenTelemetry scrapers cannot present a control-plane certificate or bearer token while scraping, so gating it would break metrics collection. See <a href="#metrics_scrape_endpoint">Securing the metrics scrape endpoint</a> below for what it can expose and how to lock it down. (Note the JSON metrics snapshot <code>PUT /mockserver/retrieve?type=METRICS</code> <em>is</em> behind the control-plane auth gate — only the Prometheus scrape endpoint is open.)</li>
+</ul>
+
+<a id="control_plane_authorization_roles" class="anchor" href="#control_plane_authorization_roles">&nbsp;</a>
+
+<h3>Roles</h3>
+
+<p>The three roles form a strict hierarchy. A principal granted a higher role satisfies every requirement at or below it:</p>
+
+<table>
+    <thead>
+        <tr><th>Role</th><th>Permits</th><th>Examples</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><strong>read</strong></td><td>Read-only control-plane operations</td><td><code>retrieve</code>, <code>verify</code>, <code>verifySequence</code>, <code>explainUnmatched</code>, <code>debugMismatch</code></td></tr>
+        <tr><td><strong>mutate</strong></td><td>Everything <code>read</code> permits, plus all mutating operations</td><td><code>expectation</code>, <code>clear</code>, <code>reset</code>, <code>configuration</code>, <code>chaosExperiment</code>, LLM endpoints</td></tr>
+        <tr><td><strong>admin</strong></td><td>Everything <code>mutate</code> permits (reserved for future fine-grained admin operations)</td><td>Currently identical to <code>mutate</code></td></tr>
+    </tbody>
+</table>
+
+<a id="control_plane_authorization_configuration" class="anchor" href="#control_plane_authorization_configuration">&nbsp;</a>
+
+<h3>Configuration</h3>
+
+<p>Enable authorization with <code>controlPlaneAuthorizationEnabled</code> (default <code>false</code>) and map scope/group values to roles with <code>controlPlaneScopeMapping</code>:</p>
+
+<table>
+    <thead>
+        <tr><th>Property</th><th>Environment Variable</th><th>Default</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><code>mockserver.controlPlaneAuthorizationEnabled</code></td>
+            <td><code>MOCKSERVER_CONTROL_PLANE_AUTHORIZATION_ENABLED</code></td>
+            <td><code>false</code></td>
+            <td>Enable coarse role-based authorization of all control-plane requests. Requires a verified principal (OIDC authentication must be configured).</td>
+        </tr>
+        <tr>
+            <td><code>mockserver.controlPlaneScopeMapping</code></td>
+            <td><code>MOCKSERVER_CONTROL_PLANE_SCOPE_MAPPING</code></td>
+            <td><em>empty</em></td>
+            <td>Comma-separated <code>scope=role</code> pairs mapping a principal's OIDC scope or group value to a role (<code>read</code>, <code>mutate</code>, or <code>admin</code>). Example: <code>platform-admins=admin,qa-team=mutate,viewers=read</code></td>
+        </tr>
+    </tbody>
+</table>
+
+<p><strong>Example — system property configuration:</strong></p>
+
+<pre class="prettyprint code"><code class="code">-Dmockserver.controlPlaneAuthorizationEnabled=true
+-Dmockserver.controlPlaneScopeMapping=platform-admins=admin,qa-team=mutate,viewers=read</code></pre>
+
+<p><strong>Example — Java programmatic configuration:</strong></p>
+
+<pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.controlPlaneAuthorizationEnabled(true);
+ConfigurationProperties.controlPlaneScopeMapping(Map.of(
+    "platform-admins", ControlPlaneRole.ADMIN,
+    "qa-team",         ControlPlaneRole.MUTATE,
+    "viewers",         ControlPlaneRole.READ
+));</code></pre>
+
+<a id="control_plane_authorization_behaviour" class="anchor" href="#control_plane_authorization_behaviour">&nbsp;</a>
+
+<h3>Behaviour</h3>
+
+<ul>
+    <li><strong>Fail-closed:</strong> a principal whose scopes do not map to any role in <code>controlPlaneScopeMapping</code> is denied every mutation (and every read unless a <code>read</code>-or-higher role is mapped). An unmapped or blank role value grants nothing.</li>
+    <li><strong>Denied mutations return HTTP 403.</strong> The response body is a generic <code>Forbidden for control plane</code> message. The detailed reason (granted role vs. required role) is logged server-side only so authorization policy is not disclosed to the client.</li>
+    <li><strong>Denials are recorded in the audit log</strong> with <code>outcome=FORBIDDEN</code>. Successful authorized requests are recorded with <code>outcome=AUTHORIZED</code>.</li>
+    <li><strong>A principal may hold multiple scopes.</strong> The highest-ranked role from all matched scopes wins (e.g. a token with both <code>viewers</code> and <code>qa-team</code> scopes is granted <code>mutate</code> from the example mapping above).</li>
+</ul>
+
+<a id="configuration_hardening" class="anchor" href="#configuration_hardening">&nbsp;</a>
+
+<h2>Configuration Hardening</h2>
+
+<p>For the most security-focused deployment, set the configuration properties below to the values shown. Each can be set as a Java system property (<code class="inline_code">-Dmockserver.&lt;name&gt;=&lt;value&gt;</code>), an environment variable (<code class="inline_code">MOCKSERVER_&lt;NAME&gt;</code>), or in a properties file &mdash; see <a href="/mock_server/configuration_properties.html">Configuration Properties</a> for the exact syntax and full description of each.</p>
+
+<a id="hardening_network" class="anchor" href="#hardening_network">&nbsp;</a>
+
+<h3>Network exposure</h3>
+<ul>
+    <li><code class="inline_code">mockserver.localBoundIP=127.0.0.1</code> &mdash; bind the listener to the loopback interface so MockServer is reachable only from the local host. When running inside a container, set this to <code class="inline_code">0.0.0.0</code> and restrict access at the container, network, or orchestration layer instead.</li>
+    <li><code class="inline_code">mockserver.attemptToProxyIfNoMatchingExpectation=false</code> &mdash; return <code class="inline_code">404 Not Found</code> for any request that matches no expectation, so MockServer serves only the traffic you have explicitly defined and does not forward unmatched requests upstream.</li>
+</ul>
+
+<a id="metrics_scrape_endpoint" class="anchor" href="#metrics_scrape_endpoint">&nbsp;</a>
+
+<h3>Securing the metrics scrape endpoint</h3>
+<p>The Prometheus scrape endpoint <code class="inline_code">GET /mockserver/metrics</code> is served <strong>without control-plane authentication by design</strong>: Prometheus and OpenTelemetry scrapers cannot attach a control-plane client certificate or bearer token to a scrape, so requiring one would prevent metrics from being collected at all. (In contrast, the JSON metrics snapshot <code class="inline_code">PUT /mockserver/retrieve?type=METRICS</code> goes through <code class="inline_code">HttpState.handle</code> and <em>is</em> gated by control-plane authentication like every other <code class="inline_code">retrieve</code> operation.)</p>
+<p>Because the endpoint is open, be aware of what its labels can reveal to anyone with network reach:</p>
+<ul>
+    <li><strong>Upstream/proxy destinations</strong> &mdash; the forward and proxy observability series carry an <code class="inline_code">upstream_host</code> label (host only, never the full URL or path), exposing which backends MockServer forwards to. At most 500 distinct hosts get their own label; any further hosts are grouped under <code class="inline_code">_other</code>.</li>
+    <li><strong>LLM cost and token metadata</strong> &mdash; when <a href="/mock_server/llm_response_mocking.html">LLM mocking</a> is used, <code class="inline_code">mock_server_llm_input_tokens</code>, <code class="inline_code">mock_server_llm_output_tokens</code>, and <code class="inline_code">mock_server_llm_cost_usd</code> are labelled by <code class="inline_code">provider</code> and <code class="inline_code">model</code>.</li>
+</ul>
+<p>To secure it, choose whichever fits your deployment (they combine):</p>
+<ul>
+    <li><strong>Disable it entirely</strong> &mdash; <code class="inline_code">mockserver.metricsEnabled=false</code> (the default) fully disables the endpoint: <code class="inline_code">/mockserver/metrics</code> returns <code class="inline_code">404 Not Found</code> and no metrics are exposed. Leave it off unless you are actively scraping.</li>
+    <li><strong>Restrict access at the network layer</strong> &mdash; don't expose the MockServer port publicly. Bind to loopback (<code class="inline_code">mockserver.localBoundIP=127.0.0.1</code>), keep it on an internal network, or restrict it with a firewall rule or Kubernetes <code class="inline_code">NetworkPolicy</code> that permits only your Prometheus scraper.</li>
+    <li><strong>Prefer push-based export</strong> &mdash; both <a href="/mock_server/configuration_properties.html#button_configuration_otel">OpenTelemetry OTLP metrics export</a> (<code class="inline_code">mockserver.otelMetricsEnabled</code>) and <a href="/mock_server/configuration_properties.html#button_configuration_prometheus_remote_write">Prometheus Remote-Write</a> (<code class="inline_code">mockserver.prometheusRemoteWriteEnabled</code>) <strong>push</strong> the same metrics to your backend and expose <em>no</em> scrape endpoint at all. With metrics pushed and <code class="inline_code">metricsEnabled=false</code>, there is nothing to lock down on the MockServer side.</li>
+</ul>
+
+<a id="hardening_forwarding" class="anchor" href="#hardening_forwarding">&nbsp;</a>
+
+<h3>Forwarding &amp; proxying</h3>
+<ul>
+    <li><code class="inline_code">mockserver.forwardProxyBlockPrivateNetworks=true</code> &mdash; reject forward and proxy targets that resolve to loopback, link-local, RFC&nbsp;1918 private, carrier-grade NAT (<code class="inline_code">100.64.0.0/10</code>), or cloud-metadata addresses (e.g. <code class="inline_code">169.254.169.254</code>), keeping forwarded requests off internal networks (SSRF protection).</li>
+    <li><code class="inline_code">mockserver.forwardProxyTLSX509CertificatesTrustManagerType=JVM</code> &mdash; validate upstream HTTPS certificates against the JDK trust store, exactly as a standard Java HTTPS client would. To trust a specific private CA, use <code class="inline_code">=CUSTOM</code> together with <code class="inline_code">mockserver.forwardProxyTLSCustomTrustX509Certificates</code> pointing at your CA bundle.</li>
+</ul>
+
+<a id="hardening_tls" class="anchor" href="#hardening_tls">&nbsp;</a>
+
+<h3>TLS protocols</h3>
+<ul>
+    <li><code class="inline_code">mockserver.tlsAllowInsecureProtocols=false</code> &mdash; negotiate TLSv1.2 and above only, excluding the deprecated TLSv1 and TLSv1.1 protocols. Add <code class="inline_code">TLSv1.3</code> to <code class="inline_code">mockserver.tlsProtocols</code> to require the most modern protocol.</li>
+</ul>
+
+<a id="hardening_templates" class="anchor" href="#hardening_templates">&nbsp;</a>
+
+<h3>Response template execution</h3>
+<p>If you use <a href="/mock_server/response_templates.html">response templates</a>, note that templates cannot reach Java classes by default, so this hardening is already in place and nothing needs configuring (templates you do not use carry no risk):</p>
+<ul>
+    <li><code class="inline_code">mockserver.velocityDisallowClassLoading</code> defaults to <code class="inline_code">true</code> &mdash; Velocity templates run with a secure uberspector so they cannot load arbitrary Java classes. Setting it to <code class="inline_code">false</code> re-opens that, which on an exposed control plane is a remote-code-execution path.</li>
+    <li><code class="inline_code">mockserver.javascriptAllowedClasses</code> defaults to empty, meaning JavaScript templates resolve NO Java class via <code class="inline_code">Java.type(...)</code>. Only list classes a template genuinely needs, and avoid the <code class="inline_code">*</code> wildcard (fully unrestricted) on any instance untrusted callers can reach.</li>
+</ul>
+
+<a id="hardening_parsing" class="anchor" href="#hardening_parsing">&nbsp;</a>
+
+<h3>Request parsing limits</h3>
+<p>The request line and headers are bounded by default (64&nbsp;KiB and 256&nbsp;KiB), so a single client cannot exhaust memory with an oversized request. If every client you expect sends ordinary requests, tighten the bounds further:</p>
+<ul>
+    <li><code class="inline_code">mockserver.maxInitialLineLength=8192</code> &mdash; cap the request line (method + URI + version) at 8&nbsp;KiB.</li>
+    <li><code class="inline_code">mockserver.maxHeaderSize=16384</code> &mdash; cap the combined request headers at 16&nbsp;KiB, over HTTP/1.1, HTTP/2 and HTTP/3 (where the URL counts as a header). The same cap applies to the response headers MockServer reads from an upstream server when it forwards or proxies.</li>
+    <li><code class="inline_code">mockserver.maxChunkSize=16384</code> &mdash; cap a single chunked-transfer-encoding chunk at 16&nbsp;KiB.</li>
+</ul>
+<p>The body-size limits <code class="inline_code">mockserver.maxRequestBodySize</code> and <code class="inline_code">mockserver.maxResponseBodySize</code> provide complementary bounds on payload size.</p>
+
+<a id="hardening_control_plane_cors" class="anchor" href="#hardening_control_plane_cors">&nbsp;</a>
+
+<h3>Control plane &amp; CORS</h3>
+<ul>
+    <li>Require authentication on every control-plane request &mdash; enable <a href="#control_plane_authentication">mTLS and/or JWT</a> as described above.</li>
+    <li><code class="inline_code">mockserver.corsAllowOrigin</code> &mdash; set this to the specific origin(s) you trust rather than allowing any origin, and keep <code class="inline_code">mockserver.corsAllowCredentials=false</code> unless credentialed cross-origin requests are genuinely required. See <a href="/mock_server/CORS_support.html">CORS</a>.</li>
+</ul>
+
+<h2>See Also</h2>
+
+<ul>
+    <li><a href="/mock_server/HTTPS_TLS.html#mtls_control_plane"><strong>HTTPS &amp; TLS: mTLS for the Control Plane</strong></a> &mdash; generate and trust the client certificates used for control-plane mutual TLS</li>
+    <li><a href="/mock_server/mocking_oauth2.html"><strong>Mocking OAuth2 Flows</strong></a> &mdash; mock the OAuth2/OpenID Connect token and JWKS endpoints that issue the JWTs used for authentication</li>
+    <li><a href="/mock_server/CORS_support.html"><strong>CORS Support</strong></a> &mdash; harden cross-origin access to the control plane (see also the CORS hardening note above)</li>
+    <li><a href="/mock_server/configuration_properties.html#control_plane_authentication_configuration"><strong>Control Plane Authentication Configuration</strong></a> &mdash; all mTLS and JWT control-plane authentication configuration properties</li>
+    <li><a href="/mock_server/configuration_properties.html#tls_configuration"><strong>TLS Configuration Properties</strong></a> &mdash; certificate and key configuration used by control-plane mTLS</li>
+    <li><a href="#control_plane_authorization"><strong>Control Plane Authorization</strong></a> &mdash; role-based authorization layered on top of OIDC authentication</li>
+</ul>

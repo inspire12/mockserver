@@ -1,0 +1,243 @@
+package org.mockserver.proxyconfiguration;
+
+import org.mockserver.configuration.Configuration;
+import org.mockserver.configuration.ConfigurationProperties;
+import org.mockserver.model.HttpRequest;
+
+import javax.annotation.Nullable;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
+
+import static org.apache.commons.lang3.StringUtils.isBlank;
+
+/**
+ * Validates that the destination host of a forward or proxy action is not a
+ * loopback, link-local, RFC 1918 private, RFC 4193 unique-local, RFC 6598
+ * carrier-grade NAT, wildcard or cloud metadata address. This
+ * blocks server-side request forgery (SSRF) where an attacker registers an
+ * expectation that forwards through MockServer to internal infrastructure.
+ * <p>
+ * Validation is opt-in via {@code mockserver.forwardProxyBlockPrivateNetworks}
+ * (default false) because MockServer is most commonly used to mock services
+ * running on localhost, Docker bridge networks, or Kubernetes service IPs.
+ */
+public final class InetAddressValidator {
+
+    // RFC 5735 / 6890 IPv4 metadata addresses used by AWS, GCP, Azure, Oracle Cloud
+    private static final String AWS_GCP_AZURE_IPV4_METADATA = "169.254.169.254";
+    // RFC 6052 IPv4-mapped IPv6 for the same address
+    private static final String AWS_IPV6_METADATA = "fd00:ec2::254";
+
+    private static final ThreadLocal<HostLookup> LOOKUP_ON_THIS_THREAD = new ThreadLocal<>();
+
+    private InetAddressValidator() {
+    }
+
+    /**
+     * How a host name is looked up for the check.
+     */
+    @FunctionalInterface
+    interface HostLookup {
+        InetAddress lookup(String host) throws UnknownHostException;
+    }
+
+    /**
+     * Replaces the lookup on the calling thread only, so a test can give a name different answers on successive
+     * lookups; {@code null} restores {@link InetAddress#getByName}.
+     */
+    static void lookupOnThisThread(@Nullable HostLookup lookup) {
+        if (lookup == null) {
+            LOOKUP_ON_THIS_THREAD.remove();
+        } else {
+            LOOKUP_ON_THIS_THREAD.set(lookup);
+        }
+    }
+
+    private static InetAddress lookup(String host) throws UnknownHostException {
+        HostLookup lookup = LOOKUP_ON_THIS_THREAD.get();
+        String name = stripBrackets(host);
+        return lookup != null ? lookup.lookup(name) : InetAddress.getByName(name);
+    }
+
+    /**
+     * Validate a forward target. No-op if the feature is disabled. Throws
+     * IllegalArgumentException when the host is unresolvable or resolves to a
+     * blocked address range.
+     *
+     * @param configuration MockServer configuration (may be null to fall back to global properties)
+     * @param host          target host (may be a name or literal address)
+     */
+    public static void validateForwardTarget(Configuration configuration, String host) {
+        if (!isEnabled(configuration)) {
+            return;
+        }
+        if (isBlank(host)) {
+            return;
+        }
+        InetAddress address;
+        try {
+            address = lookup(host);
+        } catch (UnknownHostException e) {
+            throw new ForwardTargetBlockedException("Forward target host \"" + host + "\" could not be resolved", e);
+        }
+        rejectIfBlocked(host, address);
+    }
+
+    /**
+     * Validate an <strong>already-resolved</strong> forward/relay target. Runs the
+     * identical block checks as {@link #validateForwardTarget(Configuration, String)}
+     * but on a concrete {@link InetAddress} rather than re-resolving a host string.
+     * This lets a caller validate and then connect to the <em>same</em> resolved
+     * address, closing the DNS-rebinding / TOCTOU window where a hostname could
+     * resolve to a benign address for the check and an internal address for the
+     * connect. No-op when the feature is disabled.
+     *
+     * @param configuration MockServer configuration (may be null to fall back to global properties)
+     * @param address       the concrete resolved target address (null is treated as nothing to check)
+     */
+    public static void validateForwardTarget(Configuration configuration, InetAddress address) {
+        if (!isEnabled(configuration)) {
+            return;
+        }
+        if (address == null) {
+            return;
+        }
+        rejectIfBlocked(address.getHostAddress(), address);
+    }
+
+    /**
+     * Validate a socket target and return the address to connect to. When the check is on a name not yet resolved
+     * is resolved once, here, and the result returned, so the address checked is the address connected to: connect
+     * to it without looking the name up again. The returned address still carries the name, for SNI and the
+     * certificate check. When the check is off the target is returned as it was given.
+     *
+     * @param configuration MockServer configuration (may be null to fall back to global properties)
+     * @param target        the target (null is treated as nothing to check)
+     * @return the address to connect to
+     */
+    public static InetSocketAddress validateForwardTarget(Configuration configuration, InetSocketAddress target) {
+        if (target == null || !isEnabled(configuration)) {
+            return target;
+        }
+        if (!target.isUnresolved()) {
+            rejectIfBlocked(target.getHostString(), target.getAddress());
+            return target;
+        }
+        String host = target.getHostString();
+        InetAddress address;
+        try {
+            address = InetAddress.getByAddress(host, lookup(host).getAddress());
+        } catch (UnknownHostException e) {
+            throw new ForwardTargetBlockedException("Forward target host \"" + host + "\" could not be resolved", e);
+        }
+        rejectIfBlocked(host, address);
+        return new InetSocketAddress(address, target.getPort());
+    }
+
+    /**
+     * Validate the destination of a forwarded HTTP request: {@code remoteAddress} when given, otherwise the request's
+     * socket address or Host header, which is what the forward client connects to; and also the Host header when the
+     * request goes through {@code forwardHttpProxy}, which is sent it as the URI. Each name is checked by a lookup
+     * where MockServer runs, even when an upstream proxy resolves it again to connect. A request that names no
+     * destination is not refused here: sending it fails as it would without the check.
+     *
+     * @param configuration    MockServer configuration (may be null to fall back to global properties)
+     * @param request          the request as it will be sent
+     * @param remoteAddress    the address it will be sent to, or null for its socket address or Host header
+     * @param throughHttpProxy whether it will be sent through {@code forwardHttpProxy}
+     */
+    public static void validateForwardTarget(Configuration configuration, HttpRequest request, @Nullable InetSocketAddress remoteAddress, boolean throughHttpProxy) {
+        if (!isEnabled(configuration) || request == null) {
+            return;
+        }
+        if (remoteAddress != null) {
+            validateForwardTarget(configuration, remoteAddress.getHostString());
+        } else {
+            validateForwardTarget(configuration, hostOf(request));
+        }
+        if (throughHttpProxy) {
+            String hostHeader = request.getFirstHeader("Host");
+            String[] hostAndPort = isBlank(hostHeader) ? new String[0] : HttpRequest.splitHostPort(hostHeader);
+            if (hostAndPort.length > 0) {
+                validateForwardTarget(configuration, hostAndPort[0]);
+            }
+        }
+    }
+
+    private static String hostOf(HttpRequest request) {
+        try {
+            return request.unresolvedSocketAddressFromHostHeader().getHostString();
+        } catch (RuntimeException noDestination) {
+            return null;
+        }
+    }
+
+    /**
+     * @param configuration MockServer configuration (may be null to fall back to global properties)
+     * @return whether forwardProxyBlockPrivateNetworks is on
+     */
+    public static boolean isEnabled(@Nullable Configuration configuration) {
+        return configuration != null
+            ? Boolean.TRUE.equals(configuration.forwardProxyBlockPrivateNetworks())
+            : ConfigurationProperties.forwardProxyBlockPrivateNetworks();
+    }
+
+    private static void rejectIfBlocked(String requestedHost, InetAddress address) {
+        String ip = address.getHostAddress();
+        if (AWS_GCP_AZURE_IPV4_METADATA.equals(ip) || AWS_IPV6_METADATA.equalsIgnoreCase(ip)) {
+            throw new ForwardTargetBlockedException(
+                "Forward to cloud metadata endpoint blocked: " + requestedHost
+                    + " (set mockserver.forwardProxyBlockPrivateNetworks=false to allow)");
+        }
+        if (address.isLoopbackAddress()) {
+            throw new ForwardTargetBlockedException(
+                "Forward to loopback address blocked: " + requestedHost
+                    + " (set mockserver.forwardProxyBlockPrivateNetworks=false to allow)");
+        }
+        if (address.isLinkLocalAddress()) {
+            throw new ForwardTargetBlockedException(
+                "Forward to link-local address blocked: " + requestedHost
+                    + " (set mockserver.forwardProxyBlockPrivateNetworks=false to allow)");
+        }
+        if (address.isSiteLocalAddress() || isIpv6UniqueLocal(address)) {
+            // Java's isSiteLocalAddress only covers RFC 1918 IPv4 and deprecated fec0::/10 IPv6.
+            // Cover the RFC 4193 unique-local IPv6 range (fc00::/7) explicitly so Docker / Kubernetes
+            // / Tailscale ULA addresses can't bypass the SSRF policy on IPv6-enabled hosts.
+            throw new ForwardTargetBlockedException(
+                "Forward to private network blocked: " + requestedHost
+                    + " (set mockserver.forwardProxyBlockPrivateNetworks=false to allow)");
+        }
+        if (isCarrierGradeNat(address)) {
+            throw new ForwardTargetBlockedException(
+                "Forward to carrier-grade NAT address blocked: " + requestedHost
+                    + " (set mockserver.forwardProxyBlockPrivateNetworks=false to allow)");
+        }
+        if (address.isAnyLocalAddress()) {
+            throw new ForwardTargetBlockedException(
+                "Forward to wildcard address blocked: " + requestedHost
+                    + " (set mockserver.forwardProxyBlockPrivateNetworks=false to allow)");
+        }
+    }
+
+    /**
+     * RFC 6598 shared address space, {@code 100.64.0.0/10}, used by carrier-grade NAT and by overlay networks such as
+     * Tailscale. An IPv4-mapped IPv6 address is already an {@link java.net.Inet4Address} here: the JDK converts it.
+     */
+    private static boolean isCarrierGradeNat(InetAddress address) {
+        byte[] bytes = address.getAddress();
+        return bytes.length == 4 && (bytes[0] & 0xFF) == 100 && (bytes[1] & 0xC0) == 64;
+    }
+
+    private static boolean isIpv6UniqueLocal(InetAddress address) {
+        byte[] bytes = address.getAddress();
+        return bytes.length == 16 && (bytes[0] & 0xFE) == 0xFC;
+    }
+
+    private static String stripBrackets(String host) {
+        if (host.length() >= 2 && host.charAt(0) == '[' && host.charAt(host.length() - 1) == ']') {
+            return host.substring(1, host.length() - 1);
+        }
+        return host;
+    }
+}

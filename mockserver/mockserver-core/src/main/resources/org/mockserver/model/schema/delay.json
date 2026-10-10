@@ -1,0 +1,75 @@
+{
+  "title": "response delay",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "timeUnit": {
+      "enum": [
+        "DAYS",
+        "HOURS",
+        "MINUTES",
+        "SECONDS",
+        "MILLISECONDS",
+        "MICROSECONDS",
+        "NANOSECONDS"
+      ]
+    },
+    "value": {
+      "type": "integer"
+    },
+    "template": {
+      "type": "string",
+      "description": "opt-in template rendered against the request whose output is parsed as a millisecond delay (e.g. respond more slowly for larger payloads); falls back to value/timeUnit on a non-numeric or blank result"
+    },
+    "templateType": {
+      "type": "string",
+      "description": "template engine used to evaluate the delay template; only VELOCITY and MUSTACHE are supported",
+      "enum": [
+        "VELOCITY",
+        "MUSTACHE"
+      ]
+    },
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "distribution for variable delays: UNIFORM requires min and max, LOG_NORMAL requires median and p99, GAUSSIAN requires mean and stdDev",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "UNIFORM",
+            "LOG_NORMAL",
+            "GAUSSIAN"
+          ]
+        },
+        "min": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "median": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "p99": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mean": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stdDev": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

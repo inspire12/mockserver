@@ -1,0 +1,10 @@
+200
+{
+  "id" : "<id>",
+  "embeddings" : {
+    "int8" : [ "<vector:1536>", "<vector:1536>" ],
+    "float" : [ "<vector:1536>", "<vector:1536>" ]
+  },
+  "response_type" : "embeddings_by_type",
+  "texts" : [ "hello world", "this is a test" ]
+}

@@ -1,0 +1,108 @@
+package org.mockserver.validator.xmlschema;
+
+import org.mockserver.file.FileReader;
+import org.mockserver.formatting.StringFormatter;
+import org.mockserver.log.model.LogEntry;
+import org.mockserver.logging.MockServerLogger;
+import org.mockserver.model.ObjectWithReflectiveEqualsHashCodeToString;
+import org.mockserver.validator.Validator;
+import org.slf4j.event.Level;
+import org.xml.sax.SAXException;
+import org.xml.sax.SAXNotRecognizedException;
+import org.xml.sax.SAXNotSupportedException;
+
+import javax.xml.XMLConstants;
+import javax.xml.transform.stream.StreamSource;
+import javax.xml.validation.Schema;
+import javax.xml.validation.SchemaFactory;
+import java.io.ByteArrayInputStream;
+import java.io.StringReader;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+
+/**
+ * @author jamesdbloom
+ */
+public class XmlSchemaValidator extends ObjectWithReflectiveEqualsHashCodeToString implements Validator<String> {
+
+    private static SchemaFactory schemaFactory;
+    private final MockServerLogger mockServerLogger;
+    private final Schema schema;
+
+    public XmlSchemaValidator(MockServerLogger mockServerLogger, String schema) {
+        this(mockServerLogger, schema, null);
+    }
+
+    public XmlSchemaValidator(MockServerLogger mockServerLogger, String schema, String sourceUri) {
+        this.mockServerLogger = mockServerLogger;
+        try {
+            synchronized (XmlSchemaValidator.class) {
+                if (schemaFactory == null) {
+                    schemaFactory = buildSchemaFactory();
+                }
+                if (schema.trim().endsWith(">") || isBlank(schema)) {
+                    this.schema = schemaFactory.newSchema(new StreamSource(new StringReader(schema), sourceUri));
+                } else if (schema.trim().endsWith(".xsd")) {
+                    String systemId = resolveSchemaUri(schema);
+                    this.schema = schemaFactory.newSchema(new StreamSource(FileReader.openReaderToFileFromClassPathOrPath(schema), systemId));
+                } else {
+                    throw new IllegalArgumentException("Schema must either be a path reference to a *.xsd file or an xml string");
+                }
+            }
+        } catch (Exception e) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.ERROR)
+                    .setMessageFormat("exception parsing schema{}")
+                    .setArguments(schema)
+                    .setThrowable(e)
+            );
+            throw new RuntimeException(StringFormatter.formatLogMessage("exception parsing schema{}", schema), e);
+        }
+    }
+
+    private static String resolveSchemaUri(String schemaPath) {
+        java.net.URL resource = XmlSchemaValidator.class.getClassLoader().getResource(schemaPath);
+        if (resource != null) {
+            return resource.toExternalForm();
+        }
+        java.io.File file = new java.io.File(schemaPath);
+        if (file.exists()) {
+            return file.toURI().toString();
+        }
+        return schemaPath;
+    }
+
+    private SchemaFactory buildSchemaFactory() throws SAXNotRecognizedException, SAXNotSupportedException {
+        SchemaFactory schemaFactory = SchemaFactory.newInstance(XMLConstants.W3C_XML_SCHEMA_NS_URI);
+        schemaFactory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        schemaFactory.setProperty(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+        schemaFactory.setProperty(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "file");
+        return schemaFactory;
+    }
+
+    @Override
+    public String isValid(String xml) {
+        String errorMessage = "";
+        try {
+            try {
+                javax.xml.validation.Validator validator = schema.newValidator();
+                validator.setProperty(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+                validator.setProperty(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
+                validator.validate(new StreamSource(new ByteArrayInputStream(xml.getBytes(UTF_8))));
+            } catch (SAXException e) {
+                errorMessage = e.getMessage();
+            }
+        } catch (Exception e) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.ERROR)
+                    .setMessageFormat("exception validating JSON")
+                    .setThrowable(e)
+            );
+            return e.getClass().getSimpleName() + " - " + e.getMessage();
+        }
+        return errorMessage;
+    }
+}

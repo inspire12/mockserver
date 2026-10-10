@@ -1,0 +1,254 @@
+{{- if and .Values.webhook.enabled (not .Values.webhook.certManager.enabled) }}
+# Self-signed TLS bootstrap for the admission webhook — split into two Jobs
+# to avoid a deadlock under `helm install --wait` (and GitOps tools like
+# ArgoCD/Flux that imply --wait).
+#
+# Phase 1 (pre-install/pre-upgrade, hook-weight -5):
+#   Generates a self-signed CA + server certificate and creates the TLS Secret.
+#   Runs BEFORE Helm applies non-hook resources, so the Deployment can mount
+#   the Secret and become Ready.
+#
+# Phase 2 (post-install/post-upgrade, hook-weight 0):
+#   Reads the CA from the existing Secret and patches it into the
+#   MutatingWebhookConfiguration's caBundle. Runs AFTER non-hook resources
+#   (including the MWC) exist.
+#
+# Fresh `helm install`:         pre-install Job → Secret created
+#                                → Deployment starts, mounts Secret, becomes Ready
+#                                → post-install Job → MWC caBundle patched
+#
+# `helm install --wait`:        same ordering — no deadlock because the Secret
+#                                exists before Helm waits for Deployment readiness.
+#
+# cert-manager path (webhook.certManager.enabled=true) is unaffected; these
+# Jobs are not rendered.
+
+# ============================================================
+# Phase 1: RBAC + Job — create TLS Secret (pre-install/pre-upgrade)
+# ============================================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ template "release.name" . }}-webhook-tls-create
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "chart.name" . }}-webhook
+    release: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ template "release.name" . }}-webhook-tls-create
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "chart.name" . }}-webhook
+    release: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["{{ template "release.name" . }}-webhook-tls"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ template "release.name" . }}-webhook-tls-create
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "chart.name" . }}-webhook
+    release: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ template "release.name" . }}-webhook-tls-create
+subjects:
+  - kind: ServiceAccount
+    name: {{ template "release.name" . }}-webhook-tls-create
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ template "release.name" . }}-webhook-tls-create
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "chart.name" . }}-webhook
+    release: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: {{ template "chart.name" . }}-webhook-tls-create
+    spec:
+      serviceAccountName: {{ template "release.name" . }}-webhook-tls-create
+      restartPolicy: OnFailure
+      containers:
+        - name: tls-create
+          image: {{ .Values.webhook.tls.setupImage | default "registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.4.4" }}
+          # kube-webhook-certgen generates a self-signed CA + serving cert and
+          # writes them into the TLS Secret under keys ca / tls.crt / tls.key
+          # (the Deployment mounts tls.crt + tls.key at /etc/webhook/tls). It is
+          # idempotent: if the Secret already holds a valid cert it is reused, so
+          # `helm upgrade` does not needlessly rotate the webhook's serving cert.
+          # SANs must include the in-cluster Service DNS the API server dials.
+          args:
+            - create
+            - --host={{ template "release.name" . }}-webhook,{{ template "release.name" . }}-webhook.{{ .Release.Namespace }},{{ template "release.name" . }}-webhook.{{ .Release.Namespace }}.svc,{{ template "release.name" . }}-webhook.{{ .Release.Namespace }}.svc.cluster.local
+            - --namespace={{ .Release.Namespace }}
+            - --secret-name={{ template "release.name" . }}-webhook-tls
+            - --cert-name=tls.crt
+            - --key-name=tls.key
+
+# ============================================================
+# Phase 2: RBAC + Job — patch MWC caBundle (post-install/post-upgrade)
+# ============================================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ template "release.name" . }}-webhook-tls-patch
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "chart.name" . }}-webhook
+    release: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+# Namespace-scoped: read the TLS Secret
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ template "release.name" . }}-webhook-tls-patch
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "chart.name" . }}-webhook
+    release: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["{{ template "release.name" . }}-webhook-tls"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ template "release.name" . }}-webhook-tls-patch
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "chart.name" . }}-webhook
+    release: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ template "release.name" . }}-webhook-tls-patch
+subjects:
+  - kind: ServiceAccount
+    name: {{ template "release.name" . }}-webhook-tls-patch
+    namespace: {{ .Release.Namespace }}
+---
+# Cluster-scoped: patch the MutatingWebhookConfiguration caBundle
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ template "release.name" . }}-webhook-tls-patch
+  labels:
+    app: {{ template "chart.name" . }}-webhook
+    release: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations"]
+    resourceNames: ["{{ template "release.name" . }}-sidecar-injector"]
+    # kube-webhook-certgen reads then Updates the webhook config to inject the
+    # caBundle, so "update" is required in addition to "get"/"patch".
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ template "release.name" . }}-webhook-tls-patch
+  labels:
+    app: {{ template "chart.name" . }}-webhook
+    release: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ template "release.name" . }}-webhook-tls-patch
+subjects:
+  - kind: ServiceAccount
+    name: {{ template "release.name" . }}-webhook-tls-patch
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ template "release.name" . }}-webhook-tls-patch
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "chart.name" . }}-webhook
+    release: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: {{ template "chart.name" . }}-webhook-tls-patch
+    spec:
+      serviceAccountName: {{ template "release.name" . }}-webhook-tls-patch
+      restartPolicy: OnFailure
+      containers:
+        - name: tls-patch
+          image: {{ .Values.webhook.tls.setupImage | default "registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.4.4" }}
+          # Reads the CA from the Secret created by the pre-install Job and patches
+          # it into the MutatingWebhookConfiguration's caBundle. --patch-validating
+          # is false because this chart only ships a MutatingWebhookConfiguration.
+          args:
+            - patch
+            - --webhook-name={{ template "release.name" . }}-sidecar-injector
+            - --namespace={{ .Release.Namespace }}
+            - --secret-name={{ template "release.name" . }}-webhook-tls
+            - --patch-mutating=true
+            - --patch-validating=false
+{{- end }}

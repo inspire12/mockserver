@@ -1,0 +1,12 @@
+200
+{
+  "id" : "<id>",
+  "embeddings" : [ "<vector:512>" ],
+  "response_type" : "embeddings_floats",
+  "inputs" : [ {
+    "content" : [ {
+      "type" : "text",
+      "text" : "Quarterly ARR growth chart"
+    } ]
+  } ]
+}

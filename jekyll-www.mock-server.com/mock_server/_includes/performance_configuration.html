@@ -1,6 +1,451 @@
 <a id="performance_configuration" class="anchor" href="#performance_configuration">&nbsp;</a>
 
+<a id="memory_tuning" class="anchor" href="#memory_tuning">&nbsp;</a>
+
+<h2>Memory Tuning Guide</h2>
+
+<p>MockServer stores expectations and log entries in memory using ring buffers. The two most important settings that affect memory usage are <a href="/mock_server/configuration_properties.html#button_configuration_max_expectations">maxExpectations</a> and <a href="/mock_server/configuration_properties.html#button_configuration_request_log_size">maxLogEntries</a>. Each HTTP request processed by MockServer generates 2-3 log entries (the request itself, the expectation match result, and the response). Because <span class="inline_code">maxLogEntries</span> caps the entry <em>count</em> and cannot see how large each entry is, a workload with large bodies is bounded instead by <a href="/mock_server/configuration_properties.html#button_configuration_max_event_log_size_in_bytes">maxEventLogSizeInBytes</a> &mdash; a byte budget that is on by default, and the defaults (this budget plus a separate cap on entries still waiting to be logged) keep the whole log at or below about a quarter of the heap ceiling, so a few large bodies cannot exhaust the heap through a count-only cap. At <span class="inline_code">WARN</span> and quieter the default keeps about a third as much as a seventh of the heap would, so that under heavy load kept entries do not slow the garbage collector; raise <span class="inline_code">maxEventLogSizeInBytes</span> if you need more request history for <span class="inline_code">verify</span> or the dashboard.</p>
+
+<p>Both settings have automatic defaults derived from the JVM heap size (the <span class="inline_code">-Xmx</span> maximum, as the JVM reports it, whichever garbage collector you use), so the default is the same for every MockServer instance in a JVM regardless of how much memory is already in use. On larger heaps the default <span class="inline_code">maxLogEntries</span> scales up to 250,000 entries, so more request history is retained before the oldest entries are overwritten; the byte budget (<a href="/mock_server/configuration_properties.html#button_configuration_max_event_log_size_in_bytes">maxEventLogSizeInBytes</a>) still bounds total memory. The table below provides recommended values if you want to override the defaults for different heap sizes:</p>
+
+<table>
+    <tr>
+        <th>JVM Heap Size</th>
+        <th>maxExpectations</th>
+        <th>maxLogEntries</th>
+        <th>Approx HTTP Requests Retained</th>
+    </tr>
+    <tr>
+        <td>256 MB</td>
+        <td>1,000</td>
+        <td>5,000</td>
+        <td>~1,500 - 2,500</td>
+    </tr>
+    <tr>
+        <td>512 MB</td>
+        <td>2,000</td>
+        <td>15,000</td>
+        <td>~5,000 - 7,500</td>
+    </tr>
+    <tr>
+        <td>1 GB</td>
+        <td>5,000</td>
+        <td>40,000</td>
+        <td>~13,000 - 20,000</td>
+    </tr>
+</table>
+
+<p>These are conservative estimates assuming typical request/response sizes of 1-5 KB. Large request or response bodies will consume more memory per entry.</p>
+
+<p><strong>Tips for reducing memory usage:</strong></p>
+<ul>
+    <li>Reduce <a href="/mock_server/configuration_properties.html#button_configuration_request_log_size">maxLogEntries</a> to limit the number of stored request/response log entries</li>
+    <li>Reduce <a href="/mock_server/configuration_properties.html#button_configuration_max_expectations">maxExpectations</a> if expectations contain large response bodies</li>
+    <li>Increase JVM heap size (<span class="inline_code">-Xmx</span>) to give the garbage collector more headroom</li>
+    <li>Use <a href="/mock_server/configuration_properties.html#button_configuration_log_memory_statistics">outputMemoryUsageCsv</a> to monitor actual heap usage and tune values accordingly</li>
+</ul>
+
+<p>Docker example with memory-constrained settings:</p>
+<pre class="code" style="padding: 2px;"><code class="code">docker run -d --rm -p 1080:1080 \
+  --env MOCKSERVER_MAX_EXPECTATIONS=1000 \
+  --env MOCKSERVER_MAX_LOG_ENTRIES=5000 \
+  mockserver/mockserver</code></pre>
+
+<button id="button_configuration_connection_delay_millis" class="accordion title"><strong>Connection Delay</strong></button>
+<div class="panel title">
+    <p>Introduces a delay (in milliseconds) before protocol detection on new TCP connections. This can be used to simulate slow connection establishment, such as when testing client timeout handling or connection pooling behaviour under latency.</p>
+    <p>Type: <span class="keyword">long</span> Default: <span class="this_value">0</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.connectionDelayMillis(long millis)</code></pre>
+    <pre class="prettyprint lang-java code"><code class="code">Configuration.connectionDelay(Delay delay)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.connectionDelayMillis=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_CONNECTION_DELAY_MILLIS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.connectionDelayMillis=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.connectionDelayMillis="500"</code></pre>
+</div>
+
+<a id="troubleshooting_performance" class="anchor" href="#troubleshooting_performance">&nbsp;</a>
+
+<h2>Troubleshooting: MockServer Becomes Slow or Unresponsive</h2>
+
+<p>If MockServer appears to freeze, hang, or become progressively slower under sustained load, the most likely cause is <strong>memory pressure</strong> from log entry accumulation. This section explains why it happens and how to fix it.</p>
+
+<p><strong>If instead connections are being refused or failing to open, this is not the section you want.</strong> Two errors in particular are operating-system limits rather than MockServer, and neither is fixed by any MockServer setting:</p>
+<ul>
+    <li><span class="inline_code">Too many open files</span>, or Netty's <span class="inline_code">ChannelException: Unable to create Channel</span> &mdash; the process has run out of file descriptors, one of which every connection needs. <strong>On macOS the JVM caps this at 10,240 however high you set <span class="inline_code">ulimit -n</span></strong>, and the fix differs between macOS and Linux.</li>
+    <li><span class="inline_code">Can't assign requested address</span> / <span class="inline_code">BindException</span> &mdash; the <em>client</em> machine has run out of ephemeral source ports. This one is never the server.</li>
+</ul>
+<p>See <a href="/mock_server/performance.html#connection_limits">Concurrent connection limits are set by the OS and the JVM</a> for the cause of each and what to change.</p>
+
+<h3>Why Does MockServer Slow Down?</h3>
+
+<p>MockServer keeps a record of every request it processes and every response it sends. This is a deliberate feature, not a side-effect of logging &mdash; it is what makes <span class="inline_code">verify</span>, <span class="inline_code">retrieveRecordedRequests</span>, and the dashboard work. Because these entries exist to support verification, <strong>they are stored regardless of the configured log level</strong>. Lowering the log level reduces the diagnostic output written to stdout and cuts per-matcher allocation on the matching hot path (see the note on log level below), but the request and response records themselves are always written to the in-memory store. Many users reach for the log level first when they notice slowness; that will not fix this cause.</p>
+
+<p>The store is bounded: when it fills up, the oldest entries are evicted to make room for new ones. Under sustained load, entries are evicted and replaced continuously, and the JVM must reclaim the memory those evicted entries held. It does this by periodically stopping all application threads briefly &mdash; a garbage collection pause. Most requests land between pauses and see very low latency. But the small fraction of requests that arrive just as a collection starts must wait for it to finish. This is why a load test can show a comfortable median alongside an alarming p99: the median reflects the majority of requests that were never affected, while the tail captures the unlucky few that waited behind a pause.</p>
+
+<p><strong>Request rate, not response body size, is the primary driver.</strong> Even a response of just a few bytes creates a log entry dominated by request metadata, headers, and match context &mdash; each entry occupies roughly 4&ndash;10&nbsp;KB of heap regardless of whether the body is 6 bytes or 6 kilobytes. At high request rates the ring buffer turns over quickly, triggering eviction and collection more and more often. Measured on a deliberately heap-constrained server to make collections visible: garbage collection consumed 6.6% of wall-clock time at around 48,000 requests per second, with pauses averaging around 56&nbsp;ms each. The number of collections rose almost perfectly in step with request rate; each individual pause stayed roughly the same length. More load means more pauses, not longer ones &mdash; but as the rate climbs, more requests fall inside them and the tail grows. A workload returning a 6-byte response at 8,000 req/s showed a sub-millisecond median alongside a p99 in the tens of milliseconds. Response body size shifts the numbers but does not change the pattern. The constrained-heap figures here are from a test server sized to make collections frequent and visible; on a larger production heap the allocation volumes per minute are the same, but each collection comes less often against a bigger budget.</p>
+
+<p>There is a further practical point. At around 40,000 req/s, the default store holds roughly one second of history &mdash; at 8,000 req/s the same store holds roughly five seconds. At high throughput, the store is costing latency tail to retain a window that most users could never query in time anyway. This is the sharpest argument for reducing <a href="/mock_server/configuration_properties.html#button_configuration_request_log_size"><span class="inline_code">maxLogEntries</span></a> when running at high rates: the GC pressure drops, and the history window you give up is already far too short to be useful.</p>
+
+<p>The table below shows log allocation throughput at a range of rates and body sizes. The high-rate figure is derived from the per-entry cost above at its lower bound (two entries of 4&nbsp;KB per request) and is therefore a floor, not a ceiling &mdash; larger headers or a third entry per request push it higher. The high-rate row shows that at 8,000 req/s even a tiny response generates the better part of four gigabytes of allocation per minute &mdash; far more than any of the body-size comparisons.</p>
+
+<table>
+    <tr>
+        <th>Request Rate</th>
+        <th>Response Body Size</th>
+        <th>Log Data Generated Per Minute</th>
+    </tr>
+    <tr>
+        <td>1 req/s</td>
+        <td>1 KB</td>
+        <td>~1 MB</td>
+    </tr>
+    <tr>
+        <td>10 req/s</td>
+        <td>1 KB</td>
+        <td>~12 MB</td>
+    </tr>
+    <tr>
+        <td>10 req/s</td>
+        <td>100 KB</td>
+        <td>~120 MB</td>
+    </tr>
+    <tr>
+        <td>1 req/s</td>
+        <td>1 MB+</td>
+        <td>~120 MB</td>
+    </tr>
+    <tr>
+        <td>8,000 req/s</td>
+        <td>~10 bytes (body barely matters; metadata dominates)</td>
+        <td>~3,750 MB or more</td>
+    </tr>
+</table>
+
+<p>Large response bodies increase the per-entry cost and make the problem worse at any given rate &mdash; a single expectation returning a very large response at even a modest rate can generate a significant volume of log allocation. But body size is a multiplier on a pattern that is already present at high request rates with tiny responses.</p>
+
+<p><strong>Note:</strong> Expectations with large response bodies also consume heap proportionally (e.g., a 50 KB response body results in ~55-75 KB per stored expectation). If you have many expectations with large bodies, reduce <span class="inline_code">maxExpectations</span> as well.</p>
+
+<h3>How To Fix It</h3>
+
+<p>Apply one or more of the following, depending on your use case:</p>
+
+<table>
+    <tr>
+        <th>Fix</th>
+        <th>When To Use</th>
+        <th>Trade-off</th>
+    </tr>
+    <tr>
+        <td>Increase JVM heap size</td>
+        <td>Gives the GC more headroom so it collects less often &mdash; useful at high request rates and with large response bodies</td>
+        <td>Uses more container/host memory</td>
+    </tr>
+    <tr>
+        <td>Reduce <span class="inline_code">maxLogEntries</span></td>
+        <td>The single most effective fix at high request rates &mdash; fewer entries to evict means less collection work. At high rates (thousands of req/s) the default store already holds only seconds of history, so you are giving up very little by bounding it tightly</td>
+        <td>Fewer requests available for verification</td>
+    </tr>
+    <tr>
+        <td>Reduce <span class="inline_code">maxExpectations</span></td>
+        <td>When expectations contain large response bodies</td>
+        <td>Fewer expectations can be stored simultaneously</td>
+    </tr>
+    <tr>
+        <td>Switch to ZGC (<span class="inline_code">-XX:+UseZGC</span>)</td>
+        <td>Heap &ge; 4 GB and matcher latency matters &mdash; typically gives single-digit-millisecond GC pauses where G1 commonly sits in the 50&ndash;200 ms range under sustained allocation</td>
+        <td>Fixed memory overhead (less attractive below ~4 GB); set <span class="inline_code">-Xms</span> and <span class="inline_code">-Xmx</span> to the same value (e.g. <span class="inline_code">-Xms4g -Xmx4g</span>) so the heap is pre-committed</td>
+    </tr>
+</table>
+
+<p><strong>Note on GC selection:</strong> <strong>the MockServer Docker images already run generational ZGC by default (from v8.x)</strong> &mdash; you get the lower tail latency below without setting anything, and can revert with <span class="inline_code">JAVA_TOOL_OPTIONS=-XX:+UseG1GC</span>. The guidance here applies mainly to the standalone JAR, where the JDK default collector (G1) is used unless you pass <span class="inline_code">-XX:+UseZGC</span> yourself. ZGC has been production-ready since Java 17, and <span class="inline_code">-XX:+UseZGC</span> can cut p99 matcher latency for deployments with deep ring buffers (high <span class="inline_code">maxLogEntries</span>) or large heaps, by holding stop-the-world pauses to the single-digit-millisecond range. <strong>Which ZGC you get depends on the Java version.</strong> From Java 23 onwards ZGC defaults to <em>generational</em> and <span class="inline_code">-XX:+UseZGC</span> alone selects it &mdash; that is what the MockServer Docker images give you, since they bundle Java 25 or later (the <span class="inline_code">-clustered</span> image bundles Java 21). On Java 22 and earlier, including Java 21, the same flag gives the older non-generational collector unless you add <span class="inline_code">-XX:+ZGenerational</span>; on Java 17 only the non-generational collector exists. Java 24 removed the non-generational mode altogether. Generational ZGC reaches noticeably shorter pauses than the 1&ndash;5&nbsp;ms typical of the non-generational one. The separate <span class="inline_code">-XX:+ZGenerational</span> flag was removed in Java 24 &mdash; passing it there does no harm, but it is ignored with a warning, so drop it. For a standalone-JAR sidecar with a very small heap the JDK default collector is fine &mdash; ZGC carries a fixed memory overhead. On the Docker images, though, ZGC is the default even on small containers: testing showed it lower request tail latency on the default container heap without OOM-killing a 512&nbsp;MB or 1&nbsp;GB container (under load it grows to its full heap and keeps it while the load lasts, in memory the kernel cannot reclaim, and it holds roughly 60&ndash;80&nbsp;MB more idle memory than the previous default; the images&rsquo; 45%-of-limit heap cap leaves room for that down to the 512&nbsp;MB floor, or 768&nbsp;MB for a <span class="inline_code">-clustered</span> node with the Infinispan backend), so the earlier &ldquo;only worth it above ~4&nbsp;GB&rdquo; guidance does not apply to the way the images are configured. In containerised deployments using ZGC, size the container memory limit at ~1.5&times; your <span class="inline_code">-Xmx</span> value to leave headroom for JVM overhead (code cache, metaspace, thread stacks) and Netty’s direct buffer pool. Note that ZGC multi-maps the same physical pages for its coloured-pointer scheme; under some cgroup RSS-accounting modes those pages are counted multiple times against the container limit, so the process can be OOM-killed even though the actual physical footprint fits (e.g. <span class="inline_code">-Xmx4g</span> &rarr; <span class="inline_code">--memory=6g</span>). Shenandoah is not recommended &mdash; it is not available in every JDK distribution, so ZGC is the simpler choice.</p>
+
+<p><strong>Note on <span class="inline_code">logLevel</span> and <span class="inline_code">disableLogging</span>:</strong> the <em>received-request and response</em> log entries &mdash; the ones a <span class="inline_code">verify</span> reads &mdash; are always stored regardless of log level, so lowering the level never breaks verification. But the per-expectation <em>match / did-not-match</em> diagnostic entries are stored only at <span class="inline_code">INFO</span> or more verbose: at <span class="inline_code">WARN</span> they are neither produced nor retained. So on a workload with many expectations, running at <span class="inline_code">WARN</span> genuinely reduces the number of entries retained per request (a request that scans <em>N</em> expectations before matching can log up to <em>N</em> diagnostic entries at <span class="inline_code">INFO</span>), which lowers memory and the pressure on the entry-count limit (<span class="inline_code">maxLogEntries</span>) without affecting what <span class="inline_code">verify</span> can find &mdash; though the default byte budget is smaller at <span class="inline_code">WARN</span>, so on a workload where that budget is what evicts, raise <span class="inline_code">maxEventLogSizeInBytes</span> too &mdash; the cheapest safe lever when a memory-constrained server is under load. It does <strong>not</strong> reduce the memory held by large request/response <em>bodies</em>, which are on the always-retained entries; for those, the byte budget (<a href="/mock_server/configuration_properties.html#button_configuration_max_event_log_size_in_bytes"><span class="inline_code">maxEventLogSizeInBytes</span></a>, on by default) bounds the kept entries, and entries still waiting to be logged are capped at the larger of that budget and a seventh of the heap ceiling (a twelfth at <span class="inline_code">INFO</span>) — the server drops waiting entries rather than OOM-ing when that cap is reached (see the heap-sizing section below). <span class="inline_code">WARN</span> widens the waiting-entries cap by about 70% and drains it faster, so it remains the cheapest lever against drops for large-body workloads; but the default <em>kept</em> history is smaller at <span class="inline_code">WARN</span> (a twentieth of the heap ceiling, against a twelfth at <span class="inline_code">INFO</span>), so raise <span class="inline_code">maxEventLogSizeInBytes</span> if you need more of it. <span class="inline_code">maxLoggedBodyBytes</span> (per-entry body truncation) reduces the deque's steady-state body footprint — truncation runs in the consumer, after the ring, so it does not reduce the ring's in-flight byte contribution — and <strong>breaks verification against body content</strong> &mdash; a verify that matches on body will fail against a truncated entry; verification by path, method, and header is unaffected. <span class="inline_code">disableLogging</span> only suppresses system-out output and does not reduce memory usage.</p>
+
+<p><strong>Note on <span class="inline_code">logLevel</span> and matching throughput:</strong> beyond the retained-entry saving above, running below <span class="inline_code">INFO</span> also cuts <em>transient</em> per-request allocation on the matching hot path. At <span class="inline_code">INFO</span>, every request that scans expectations builds and logs a diagnostic &ldquo;matched&rdquo;/&ldquo;did not match because&hellip;&rdquo; message per matcher; below <span class="inline_code">INFO</span> that work &mdash; the per-matcher log entry and the human-readable &ldquo;because&rdquo; string assembly &mdash; is skipped entirely. For a deployment with many expectations under sustained load this is the single largest matching-path allocation, so running at <span class="inline_code">WARN</span> noticeably cuts allocation churn and GC pressure (it does not change which requests match, only whether the diagnostic narrative is produced). Lowering the level therefore helps on two fronts &mdash; fewer retained diagnostic entries (memory) and less transient allocation (throughput/GC) &mdash; while leaving the received-request/response entries that <span class="inline_code">verify</span> depends on fully intact.</p>
+
+<p><strong>Note on <span class="inline_code">logLevel</span> and high request rates:</strong> logging at <span class="inline_code">INFO</span> is produced by a single background thread, and on a busy server that thread can fall behind the rate requests arrive &mdash; in our own load tests we estimate this starting roughly from 8,000&ndash;10,000&nbsp;requests/second on a 6-core server with four expectations, where the request matches the last one (about six log entries per request: the match attempt against each of the first three, the match, and the recorded request/response). Each expectation checked before a match adds another log entry, so with more expectations the same server starts dropping at a lower request rate &mdash; roughly half as many requests per second with ten (again matching the last one). Past that point, log entries are dropped, which can mean a request is missing from <span class="inline_code">retrieveRecordedRequests</span>, from the dashboard, or from a <span class="inline_code">verify</span> &mdash; by default (<span class="inline_code">failVerificationOnEvictedLog</span>), an upper-bound <span class="inline_code">verify</span> (<span class="inline_code">never()</span>, <span class="inline_code">atMost(n)</span>, <span class="inline_code">exactly(n)</span>, <span class="inline_code">once()</span>, <span class="inline_code">between(a,b)</span>) fails rather than passes once this happens, naming the drop in its failure message, until the log is reset or cleared entirely. A once-only WARN (&ldquo;Log event ring buffer full &mdash; dropping log events&hellip;&rdquo;) is logged the first time this happens after each reset regardless of <span class="inline_code">metricsEnabled</span>, unless logging or system-out is disabled. For high-throughput tests that call <span class="inline_code">verify</span>, run at <span class="inline_code">WARN</span> or <span class="inline_code">ERROR</span> instead of the <span class="inline_code">INFO</span> default &mdash; it keeps the entries <span class="inline_code">verify</span> needs while skipping the per-expectation diagnostics that saturate the logging thread. You can also watch this happening with <span class="inline_code">metricsEnabled</span> set to <span class="inline_code">true</span>: the <span class="inline_code">mock_server_dropped_log_events</span> Prometheus counter (these drops carry the label <span class="inline_code">reason="ring_full"</span>) and the dashboard's log-pressure banner both need it, and show nothing while it is off (the default).</p>
+
+<h3>Recommended Configurations</h3>
+
+<p><strong>High-throughput workloads</strong> (any response size &mdash; this applies regardless of body size; request rate is the driver):</p>
+<pre class="code" style="padding: 2px;"><code class="code">docker run -d --rm -p 1080:1080 \
+  -e MOCKSERVER_MAX_LOG_ENTRIES=5000 \
+  mockserver/mockserver</code></pre>
+
+<p><strong>Large response bodies</strong> (e.g., responses &gt;100 KB):</p>
+<pre class="code" style="padding: 2px;"><code class="code">docker run -d --rm -p 1080:1080 \
+  -e JAVA_TOOL_OPTIONS="-XX:+UseZGC -Xmx1g" \
+  -e MOCKSERVER_MAX_LOG_ENTRIES=1000 \
+  -e MOCKSERVER_MAX_EXPECTATIONS=100 \
+  mockserver/mockserver</code></pre>
+
+<p><strong>Maximum throughput, minimal memory</strong> (verification limited to most recent requests):</p>
+<pre class="code" style="padding: 2px;"><code class="code">docker run -d --rm -p 1080:1080 \
+  -e JAVA_TOOL_OPTIONS="-XX:+UseZGC -Xmx512m" \
+  -e MOCKSERVER_MAX_LOG_ENTRIES=100 \
+  -e MOCKSERVER_LOG_LEVEL=WARN \
+  mockserver/mockserver</code></pre>
+<p><span class="inline_code">MOCKSERVER_LOG_LEVEL=WARN</span> drops the per-matcher diagnostic logging on the matching hot path (see the note above), which is the largest matching-path allocation when many expectations are registered. If your matchers rely heavily on regular expressions <em>and</em> your patterns and inputs are trusted, also add <span class="inline_code">-e MOCKSERVER_REGEX_MATCHING_TIMEOUT_MILLIS=0</span> to evaluate regexes inline and skip the per-regex thread hand-off (this removes the catastrophic-backtracking guard &mdash; see <a href="/mock_server/configuration_properties.html#button_configuration_regex_matching_timeout_millis">Regex Matching Timeout</a>).</p>
+
+<h3>Configuring JVM Heap Size</h3>
+
+<p>The MockServer Docker image caps the JVM heap at 45% of the container's memory limit (<span class="inline_code">-XX:MaxRAMPercentage=45.0</span>), so the in-memory ring buffers size off a bounded heap. <strong>Always run the container with an explicit memory limit of at least 512&nbsp;MiB</strong> (768&nbsp;MiB for a <span class="inline_code">-clustered</span> node with the Infinispan backend) (for example <span class="inline_code">--memory=2g</span>, or <span class="inline_code">resources.limits.memory</span> in Kubernetes) &mdash; without one the JVM sizes its heap off the host's total memory, and the default ring sizes (<span class="inline_code">maxLogEntries</span> and <span class="inline_code">maxExpectations</span>, which derive from available heap) scale up with it, so MockServer can be OOM-killed under load.</p>
+
+<p><strong>Sizing the container for your workload.</strong> The heap is only part of what the Java process occupies, and &mdash; this is the part that trips people up &mdash; the rest is <strong>not a fixed fraction of the heap</strong>. It is largely additive and driven by load, not by heap size. Under sustained load a 1,536&nbsp;MiB heap was measured occupying 2,271&nbsp;MiB of real memory; the 735&nbsp;MiB difference breaks down as:</p>
+<ul>
+<li>class metadata (metaspace) and the JIT code cache &mdash; about 133&nbsp;MiB, and roughly constant regardless of heap;</li>
+<li>one stack per thread &mdash; tens of MiB, set by the thread count (which tracks CPU cores), not the heap;</li>
+<li>the garbage collector's own bookkeeping &mdash; this part <em>does</em> scale with the heap;</li>
+<li>and the largest, most variable piece: the pool of direct (off-heap) network buffers Netty uses for request and response bodies, whose size is driven by concurrency and body size rather than by the heap, and which is capped at a quarter of the heap (see <em>Off-heap buffer limit</em> below).</li>
+</ul>
+<p>None of that is counted by <span class="inline_code">-Xmx</span>, and most of it does not shrink when you shrink the heap. So the practical model is <strong>footprint &asymp; heap + overhead</strong>, where the overhead is dominated by heap-independent, load-driven terms. A 75% cap could not fit &mdash; at 75% of a 2&nbsp;GiB limit the heap alone (1,536&nbsp;MiB) plus this overhead exceeded the limit and the kernel killed the process. 60% did not fit at the small end either: the Z garbage collector (the images' default) under load grows to its full heap and keeps it while the load lasts, in memory the kernel cannot reclaim, so at 512&nbsp;MiB a 308&nbsp;MiB heap plus about 150&nbsp;MiB of other JVM memory and about 20&nbsp;MiB of kernel socket buffers for ~4,800 connections left almost nothing, and the container was killed under load. That is why the default is 45%: at 50% the container survived, but in some runs peaked above 90% of its limit.</p>
+
+<p>The convenient &ldquo;budget about <strong>1.5&times; the heap</strong>&rdquo; shorthand is just what <span class="inline_code">heap + overhead</span> happened to work out to <em>at around a 1.5&nbsp;GiB heap under sustained load</em> (1,536 + 735 &asymp; 1.48&times;). It is a reasonable floor for heaps of roughly a gigabyte or more, but it <strong>gets progressively worse as the container gets smaller</strong>: the fixed overhead stays roughly the same while the heap shrinks, so the effective multiple climbs and a larger fraction of the container goes to memory the percentage cap cannot bound. Do not extrapolate 1.5&times; down to a small container &mdash; and note the 735&nbsp;MiB itself is a conservative upper bound (the measurement run carried profiling instrumentation, which uses native memory) that <em>rises</em> further with more concurrent connections and larger bodies. The heap the 45% cap gives you, and what that leaves for the overhead, at common container sizes:</p>
+
+<table>
+    <tr>
+        <th>Container memory limit</th>
+        <th>Heap at the 45% default</th>
+        <th>Left for non-heap + native</th>
+        <th>Realistic use</th>
+    </tr>
+    <tr><td>256&nbsp;MiB</td><td>~126&nbsp;MiB</td><td>~130&nbsp;MiB</td><td>Not supported with the defaults &mdash; the fixed overhead alone is larger than this. Only with a small explicit <span class="inline_code">-Xmx</span> and light load.</td></tr>
+    <tr><td>512&nbsp;MiB</td><td>~232&nbsp;MiB</td><td>~280&nbsp;MiB</td><td>The supported minimum (not for a <span class="inline_code">-clustered</span> node with the Infinispan backend, which needs 768&nbsp;MiB). Survives sustained load on one core (tested at 16,000 req/s over ~4,500 connections with small bodies, peaking at 79&ndash;83% of the limit); keep bodies to a few KB.</td></tr>
+    <tr><td>1&nbsp;GiB</td><td>~462&nbsp;MiB</td><td>~562&nbsp;MiB</td><td>Moderate load and body sizes.</td></tr>
+    <tr><td>2&nbsp;GiB</td><td>~922&nbsp;MiB</td><td>~1126&nbsp;MiB</td><td>Comfortably above the ~735&nbsp;MiB of overhead measured under sustained load &mdash; recommended for high request rates.</td></tr>
+    <tr><td>4&nbsp;GiB</td><td>~1844&nbsp;MiB</td><td>~2252&nbsp;MiB</td><td>High concurrency and/or large bodies.</td></tr>
+</table>
+
+<p>The &ldquo;left for non-heap + native&rdquo; column is simply <span class="inline_code">limit &minus; heap</span> &mdash; the budget the percentage cap leaves for everything <span class="inline_code">-Xmx</span> does not count. Compare it against the overhead <em>your</em> traffic actually produces: the ~735&nbsp;MiB measured is for one sustained-load profile and grows with concurrency and body size (the same effect that makes 1.5&times; a floor, not a constant). A container is safe when this column comfortably exceeds your measured overhead &mdash; which is why 2&nbsp;GiB is recommended at high request rates and 512&nbsp;MiB is a floor, not a target. To size for your own workload, watch container RSS or enable CSV memory tracking (see <em>Monitoring Memory Usage</em> below) under representative load rather than trusting a multiple of the heap; and when in doubt, give the non-heap side room, because it is the part the heap-percentage cap cannot bound.</p>
+
+<p><strong>If your container is killed with exit code 137.</strong> When the total footprint exceeds the container limit, the Linux kernel kills the process &mdash; the container exits with code <span class="inline_code">137</span> and <span class="inline_code">OOMKilled: true</span>, and there is <strong>no</strong> Java stack trace and no <span class="inline_code">OutOfMemoryError</span> in the logs, because the JVM did not fail &mdash; it was killed from outside. Confirm it with:</p>
+<pre class="code" style="padding: 2px;"><code class="code">docker inspect --format '{{json .State}}' &lt;container&gt;
+# "OOMKilled": true, "ExitCode": 137</code></pre>
+<p>The fix is a <strong>larger memory limit or a smaller heap percentage &mdash; not a bigger heap</strong>. Seeing 137 with plenty of <span class="inline_code">-Xmx</span> headroom is the classic trap: raising <span class="inline_code">-Xmx</span> makes it worse, because the heap was never the whole footprint. Either raise <span class="inline_code">--memory</span> to cover the heap <em>plus</em> the load-driven overhead above, or lower the cap.</p>
+
+<p><strong>Off-heap buffer limit.</strong> Whenever MockServer runs as its own process (the Docker images, the standalone jar, the forked Maven plugin and the launchers), the off-heap buffers Netty uses for request and response bodies are limited to a quarter of the maximum heap, and at least 64&nbsp;MiB. At the images' default heap that is 64&nbsp;MiB in a 512&nbsp;MiB container and 115&nbsp;MiB in a 1&nbsp;GiB one. Without the limit these buffers could grow as large as the heap itself, and the container could be killed with exit code 137. What counts against it:</p>
+<ul>
+<li><strong>Large downloads by slow clients count very little.</strong> MockServer sends a large response a slice at a time as the client reads it, so each such client holds about 64&nbsp;KB.</li>
+<li><strong>Forwarded and proxied responses are held in full while MockServer collects them</strong>, and so are request bodies while they are being uploaded. Several large forwards or uploads at once can reach the limit: at 64&nbsp;MiB, one forwarded 49&nbsp;MiB response succeeds, but two at the same time both fail.</li>
+<li><strong>Responses through a <span class="inline_code">CONNECT</span> or SOCKS tunnel</strong> are also held in full on their way to the client.</li>
+</ul>
+<p>When the limit is reached, whichever connection needs a buffer next is closed &mdash; which may be an unrelated request, not the one holding the memory &mdash; and MockServer keeps serving everything else. A client whose request was being forwarded gets a <span class="inline_code">502</span> response; a client whose own connection was the one closed sees the connection drop (for example a connection reset, or an incomplete upload). The log shows <span class="inline_code">direct memory limit (io.netty.maxDirectMemory) reached</span>. If your traffic needs more, raise the limit with <span class="inline_code">-XX:MaxDirectMemorySize</span> or <span class="inline_code">-Dio.netty.maxDirectMemory=&lt;bytes&gt;</span> &mdash; in Docker, through <span class="inline_code">JAVA_TOOL_OPTIONS</span>, keeping the image's <span class="inline_code">-XX:+UseZGC</span>, for example <span class="inline_code">-e JAVA_TOOL_OPTIONS="-XX:+UseZGC -XX:MaxDirectMemorySize=256m"</span>. MockServer leaves either setting as you set it, and logs the limit in effect at start-up in a line beginning <span class="inline_code">netty direct memory limit</span>. Leave room for the limit in the container on top of the heap.</p>
+
+<p><strong>Overriding the default, and what you trade.</strong> The 45% cap only applies when you have <em>not</em> set an explicit heap. To change it you have two levers, and it is important not to confuse them:</p>
+<ul>
+<li>To use a <strong>different percentage</strong> of the container limit, rebuild or re-run so the JVM sees a different <span class="inline_code">-XX:MaxRAMPercentage</span>. Note the footgun: passing a different <span class="inline_code">-XX:MaxRAMPercentage</span> via <span class="inline_code">JAVA_TOOL_OPTIONS</span> does <strong>not</strong> work &mdash; the image's entrypoint applies its own value last, so it always wins.</li>
+<li>To pin an <strong>absolute heap size</strong>, set an explicit <span class="inline_code">-Xmx</span> via <span class="inline_code">JAVA_TOOL_OPTIONS</span>. Be aware that setting <span class="inline_code">-Xmx</span> (or any heap sizing via <span class="inline_code">JAVA_TOOL_OPTIONS</span>) <strong>disables</strong> <span class="inline_code">MaxRAMPercentage</span> entirely &mdash; the percentage cap no longer applies at all. A user who sets one thinking it tunes the other gets neither, so choose one mechanism, and still size the container against the heap <em>plus</em> the load-driven overhead above &mdash; not a fixed multiple of the heap:</li>
+</ul>
+
+<pre class="code" style="padding: 2px;"><code class="code">docker run -d --rm -p 1080:1080 \
+  -e JAVA_TOOL_OPTIONS="-XX:+UseZGC -Xmx512m" \
+  mockserver/mockserver</code></pre>
+
+<p>When running with docker compose:</p>
+<pre class="prettyprint lang-yaml code"><code class="code">services:
+  mockServer:
+    image: mockserver/mockserver
+    ports:
+      - "1080:1080"
+    environment:
+      JAVA_TOOL_OPTIONS: "-XX:+UseZGC -Xmx512m"
+      MOCKSERVER_MAX_LOG_ENTRIES: "5000"</code></pre>
+
+<p>When running as a standalone JAR:</p>
+<pre class="code" style="padding: 2px;"><code class="code">java -Xmx512m -jar mockserver-netty.jar -serverPort 1080</code></pre>
+
+<p><strong>How large bodies affect this choice.</strong> Whether <span class="inline_code">-Xmx512m</span> is adequate depends entirely on the bodies your traffic carries. Under sustained load at the default <span class="inline_code">INFO</span> log level, a 512&nbsp;MB heap handled 1&nbsp;KB request bodies — 200,000 requests served with peak heap at 479 of 512&nbsp;MB. With the ring buffer’s in-flight bytes now bounded by an in-flight cap (at <span class="inline_code">INFO</span>, the same twelfth of the heap ceiling as the <span class="inline_code">maxEventLogSizeInBytes</span> default), larger bodies survive too: at <span class="inline_code">INFO</span> with 256&nbsp;KB bodies, all 200,000 requests completed (peak 443&nbsp;MB); at <span class="inline_code">INFO</span> with 64&nbsp;KB bodies, all 200,000 requests completed. These runs were measured on earlier September 2026 builds whose <span class="inline_code">INFO</span> budget was larger than today's default of a twelfth of the heap ceiling (a quarter for the 1&nbsp;KB run, an eighth for the 64&nbsp;KB and 256&nbsp;KB runs), and before later fixes to how completely the budget counts each entry, so the log held more memory in those runs than the current default allows. They were measured with a single expectation — a best case that generates roughly three log entries per request. A suite with many expectations generates more log entries per request and will exhaust the ring sooner, so treat these as upper bounds, not floors.</p>
+
+<p><strong>Why it now survives, and what happens under extreme pressure.</strong> The previous failure path was the LMAX Disruptor ring: requests were published to it holding their full body, and the byte budget only applied after an entry was consumed into the deque. At <span class="inline_code">INFO</span>, the consumer is slow (it formats every entry to system-out), so the ring backed up with full bodies before the budget could apply — exhausting the heap before any eviction ran. The ring’s in-flight bytes are now bounded too, by the larger of <span class="inline_code">maxEventLogSizeInBytes</span> and a heap-derived cap (a seventh of the heap ceiling, a twelfth at <span class="inline_code">INFO</span>): once body bytes waiting in the ring would exceed it, new entries are dropped rather than admitted. A second inflation source has also been eliminated: previously, each JSON-body entry was retaining a parsed Jackson node tree roughly five times its raw body size for its whole life in the deque, but the weigher counted only the raw bytes &mdash; so a server told to hold 256&nbsp;MB of bodies could hold well over a gigabyte and die of heap exhaustion while the budget believed it had room. Those trees are now built transiently at render time only and are not retained on the entry: measured on 20,000 retained entries, actual heap dropped from 429&nbsp;MB to 61&nbsp;MB with bodies unchanged. The budget therefore now tracks retained memory far more closely. The weigher was also made honest about the memory each entry holds beyond its body: it now counts the header bytes and a fixed per-entry overhead for the log entry and each request/response object it retains, not the raw body bytes alone. Measured on live heaps, this brought real retention from about 2.6&times; the budget at <span class="inline_code">WARN</span> and 4.8&times; at <span class="inline_code">INFO</span> down to about 2&times; and 3&times;. Later fixes removed the remaining copies of each body that the budget could not see (the decoded string kept alongside the raw bytes, and extra copies held by forwarded and templated-echo entries). Re-measured in September 2026 under both the G1 and ZGC garbage collectors, real retention is now <strong>0.50&ndash;0.80&times; the counted budget at <span class="inline_code">WARN</span></strong> and <strong>1.04&ndash;2.03&times; at <span class="inline_code">INFO</span></strong> once the log has caught up, rising to 0.97&times; and 2.31&times; when the server receives more traffic than it can log. The entries still waiting to be logged, which hold up to another 0.72&times; of their cap, are capped separately, and the default divisors are set so both parts together stay at or below about a quarter of the heap ceiling. The remaining <span class="inline_code">INFO</span> gap is the formatted log message, which embeds the body as text and is kept on the entry only at a rendering log level; the waiting-entries cap is tighter at <span class="inline_code">INFO</span> so that the whole log, whose kept entries are heavier there, stays near a quarter of the heap. <strong>Because the old accounting under-counted, the same <span class="inline_code">maxEventLogSizeInBytes</span> value now retains fewer entries</strong> &mdash; the budget evicts sooner, which is the bound doing what it claims; raise it if you relied on the previous, larger retention for a given budget. Size against the multiple, not the budget alone, and measure against your own workload &mdash; the multiple depends on how large your bodies and headers are. Under enough sustained pressure MockServer drops entries rather than dying — <strong>drops are not silent</strong>: a once-only WARN is logged on the first drop, the <span class="inline_code">mock_server_dropped_log_events</span> Prometheus counter increments under the label <span class="inline_code">reason="in_flight_bytes"</span> (drops because the logging thread fell behind are labelled <span class="inline_code">reason="ring_full"</span>), and the dashboard's log-pressure banner says which kind of drop happened and what to change. A dropped entry is a lost record: a verify with an upper bound (<span class="inline_code">never()</span>, <span class="inline_code">atMost(n)</span>, <span class="inline_code">exactly(n)</span>, <span class="inline_code">once()</span>, <span class="inline_code">between(a,b)</span>) will <strong>fail</strong> rather than pass once entries have been dropped — the same fail-closed treatment eviction already has. Resetting the log, or clearing it entirely (a filtered <span class="inline_code">clear(request)</span> does not reset the taint), rearms the warn-once latch and resets the drop taint. Running at <span class="inline_code">WARN</span> still helps against drops: the cap on entries waiting to be logged is log-level-aware (heap/12 at <span class="inline_code">INFO</span>&nbsp;/<span class="inline_code">DEBUG</span>&nbsp;/<span class="inline_code">TRACE</span>, heap/7 at <span class="inline_code">WARN</span>&nbsp;/<span class="inline_code">ERROR</span>&nbsp;/<span class="inline_code">OFF</span>), so <span class="inline_code">WARN</span> widens it by about 70% and drains it faster by skipping per-entry formatting. It is not a prerequisite for survival on a 512&nbsp;MB heap, but it remains the cheapest lever. Note that the default <em>kept</em> history is smaller at <span class="inline_code">WARN</span> (heap/20, against heap/12 at <span class="inline_code">INFO</span>), because <span class="inline_code">WARN</span> is where throughput is high enough for long-lived entries to slow the garbage collector; an unrendered entry costs up to about 1&times; its counted bytes in the measured runs against up to about 2.3&times; rendered, so if you raise <span class="inline_code">maxEventLogSizeInBytes</span> at <span class="inline_code">WARN</span> you get more history for the same real heap than at <span class="inline_code">INFO</span>.</p>
+
+<p><span class="inline_code">maxLoggedBodyBytes</span> has a different, narrower role: it limits how many bytes of each body are stored in the deque, reducing the deque's steady-state footprint and what the dashboard displays. It pairs well with disk capture (<span class="inline_code">persistRecordedRequestsToDisk</span>), which writes the full body before truncation runs and keeps the complete record on disk. <strong>Important:</strong> setting <span class="inline_code">maxLoggedBodyBytes</span> breaks verification against request or response body content &mdash; a verify that matches on body returns a 406 against a truncated entry where the original body would return a 202. Verification by path, method, and header is not affected. The truncation is visible in the retrieved entry and in the dashboard via the <span class="inline_code">x-mockserver-body-truncated: &lt;originalLength&gt;</span> header on the stored copy. It does not prevent ring-backlog drops: <span class="inline_code">maxLoggedBodyBytes</span> truncation runs in the consumer, downstream of the ring, so the body is already in the ring at full size before truncation can run. Use it to manage the deque’s body footprint when disk capture holds the full record, not as a substitute for the byte budget.</p>
+
+<h3>Monitoring Memory Usage</h3>
+
+<p>To diagnose memory issues, enable CSV memory tracking:</p>
+<pre class="code" style="padding: 2px;"><code class="code">docker run -d --rm -p 1080:1080 \
+  -e MOCKSERVER_OUTPUT_MEMORY_USAGE_CSV=true \
+  -e MOCKSERVER_MEMORY_USAGE_CSV_DIRECTORY=/config \
+  -v $(pwd):/config \
+  mockserver/mockserver</code></pre>
+
+<p>This creates a <span class="inline_code">memoryUsage_&lt;date&gt;.csv</span> file that records heap usage, log entry count, and expectation count over time. If you see heap usage consistently near the maximum, increase <span class="inline_code">-Xmx</span> or reduce <span class="inline_code">maxLogEntries</span>.</p>
+
+<a id="ongoing_optimisation" class="anchor" href="#ongoing_optimisation">&nbsp;</a>
+
+<h3>Ongoing Optimisation Work</h3>
+
+<p>We are actively investigating further options to reduce the latency tail under high request rates, including changes to garbage collector strategy and JVM runtime configuration. No specific outcomes or timelines are available yet. This section will be updated when measurements confirm an improvement that users should act on.</p>
+
+<a id="proxying_large_bodies" class="anchor" href="#proxying_large_bodies">&nbsp;</a>
+
+<h3>Proxying LLM / Large-Body Traffic Without OOM</h3>
+
+<p><strong>TL;DR:</strong> enable disk capture so every exchange is durable, and set a byte budget so the in-memory log stays bounded. Memory never grows unbounded; disk holds the complete session history.</p>
+
+<p>When MockServer proxies LLM traffic — tool schemas, growing conversation context, SSE chunk accumulation — individual request/response bodies can be hundreds of kilobytes each. The in-memory event log is normally bounded only by <em>entry count</em> (<span class="inline_code">maxLogEntries</span>), not by body size, so even a few thousand LLM exchanges can exhaust the heap.</p>
+
+<p>Two complementary settings address this:</p>
+
+<table>
+    <tr>
+        <th>Setting</th>
+        <th>What it does</th>
+        <th>When to use</th>
+    </tr>
+    <tr>
+        <td><a href="/mock_server/configuration_properties.html#button_configuration_max_event_log_size_in_bytes"><span class="inline_code">maxEventLogSizeInBytes</span></a></td>
+        <td>Caps the total request+response body bytes held in memory. Once exceeded, the oldest entries are evicted (oldest-first), in addition to the entry-count bound.</td>
+        <td>Always, when proxying traffic with large bodies. Set it well under the JVM heap — for a 2 GB heap, 256 MB (<span class="inline_code">268435456</span>) is a good starting point.</td>
+    </tr>
+    <tr>
+        <td><a href="/mock_server/configuration_properties.html#button_configuration_persist_recorded_requests_to_disk"><span class="inline_code">persistRecordedRequestsToDisk</span></a></td>
+        <td>Appends every proxied exchange — full request and response — as a single NDJSON line to a file, written to disk in small batches as soon as MockServer catches up with its log. The file is the durable record: entries evicted from the in-memory window are never lost from disk (a hard kill can lose only the last few KB of recent lines).</td>
+        <td>Always paired with <span class="inline_code">maxEventLogSizeInBytes</span>. The disk write happens before any in-memory truncation, so the archive is always full-fidelity.</td>
+    </tr>
+</table>
+
+<p><strong>Recommended combo for LLM / large-body capture:</strong></p>
+<pre class="code" style="padding: 2px;"><code class="code">java -Xmx2g \
+  -Dmockserver.maxLogEntries=5000 \
+  -Dmockserver.maxEventLogSizeInBytes=268435456 \
+  -Dmockserver.persistRecordedRequestsToDisk=true \
+  -Dmockserver.persistedRecordedRequestsPath=recordedRequests.ndjson \
+  -jar mockserver-netty.jar -serverPort 1080</code></pre>
+
+<p>With this configuration:</p>
+<ul>
+    <li>Every proxied exchange is written to <span class="inline_code">recordedRequests.ndjson</span> in full as it completes</li>
+    <li>The in-memory log retains at most the most recent 256 MB of body bytes (plus up to 5,000 entries by count) — the dashboard shows this recent window</li>
+    <li>Older entries evicted from memory are still on disk — nothing is lost</li>
+</ul>
+
+<p>The <span class="inline_code">mockserver-ui/scripts/launch-with-llm-capture.sh</span> script uses exactly this combination by default (2 GB heap, 256 MB byte budget, NDJSON disk capture). Run it with a tool name to start MockServer as an HTTPS proxy capturing that tool's LLM traffic:</p>
+<pre class="code" style="padding: 2px;"><code class="code">./mockserver-ui/scripts/launch-with-llm-capture.sh opencode</code></pre>
+
+<p><strong>Optional secondary valve — <a href="/mock_server/configuration_properties.html#button_configuration_max_logged_body_bytes"><span class="inline_code">maxLoggedBodyBytes</span></a>:</strong> when set to a positive value, bodies are truncated in memory beyond that many bytes (the in-memory copy gets a <span class="inline_code">x-mockserver-body-truncated: &lt;originalLength&gt;</span> header). The disk write is <em>not</em> affected, so the NDJSON archive always holds the full body. Use this only when you want the dashboard to show abbreviated bodies — leave it at 0 (the default) when the byte-budget eviction (<span class="inline_code">maxEventLogSizeInBytes</span>) is sufficient. <strong>Be aware that enabling this setting breaks verification against request or response body content</strong> — a verify that matches on body will fail against a truncated entry (returning 406 where the full body would return 202). Verification by path, method, and header is not affected.</p>
+
+<p><strong>Security — data at rest:</strong> the <span class="inline_code">recordedRequests.ndjson</span> archive contains the full recorded request and response bodies on disk, which for proxied LLM and API traffic can include credentials (<span class="inline_code">Authorization</span> headers, API keys) and other sensitive data. The archive honours <a href="/mock_server/configuration_properties.html"><span class="inline_code">redactSecretsInLog</span></a> — enable it to mask known secret headers and configured body fields in the file just as they are masked in the dashboard. Treat the file as sensitive regardless: store it on a protected volume and delete it when you are done. The capture launcher truncates it at the start of each session (unless you pass <span class="inline_code">--keep-log</span>).</p>
+
+<a id="scalability_configuration" class="anchor" href="#scalability_configuration">&nbsp;</a>
 <h2>Scalability Configuration:</h2>
+
+<button id="button_configuration_use_native_transport" class="accordion title"><strong>Use Native Transport (Epoll)</strong></button>
+<div class="panel title">
+    <p>When enabled (the default), MockServer uses the native Linux epoll transport for higher throughput and lower latency. This is also required for transparent-proxy <span class="inline_code">SO_ORIGINAL_DST</span> resolution, which needs epoll socket channels to read the original destination address from iptables REDIRECT rules. The official Docker images cannot yet use that lookup even on epoll, so there it falls back to the Linux connection-tracking table.</p>
+    <p>On non-Linux platforms (macOS, Windows) this setting has no effect &mdash; MockServer transparently falls back to the Java NIO transport regardless. Set to <span class="inline_code">false</span> to force the NIO transport on all platforms, including Linux.</p>
+    <p>At start-up MockServer logs which transport it chose, for example <span class="inline_code">using native epoll transport</span> or <span class="inline_code">using NIO transport (native epoll transport unavailable: ...)</span>. Check this line if you rely on epoll. Docker images published before this release ran NIO even on Linux, because their bundled epoll library could not be loaded.</p>
+    <p>This property is read at start-up only.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">true</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.useNativeTransport(boolean enable)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.useNativeTransport=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_USE_NATIVE_TRANSPORT=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.useNativeTransport=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.useNativeTransport=true</code></pre>
+</div>
+
+<button id="button_configuration_so_backlog" class="accordion title"><strong>TCP Accept Queue Depth (SO_BACKLOG)</strong></button>
+<div class="panel title">
+    <p>How many connections the kernel may hold after completing their TCP handshake, while they wait for MockServer to accept them.</p>
+    <p>This matters when many clients connect at once &mdash; a load test ramping up, a connection pool refilling, or a fleet of containers starting together. Steady traffic over existing keep-alive connections does not touch the accept queue at all.</p>
+    <p><strong>What a full queue looks like.</strong> The kernel does not refuse the connection &mdash; it silently <em>drops</em> the handshake packet, and the client retransmits after its initial timeout, typically one second on Linux. So the symptom is a median latency that jumps to around a second <em>with no errors at all</em>, which reads like a slow server rather than a connection limit. If you see that shape, raise this before looking anywhere else.</p>
+    <p><strong>The OS caps this value.</strong> Your setting is reduced to the operating system's limit, so raise both together:</p>
+    <ul>
+        <li>Linux: <code class="inline code">sysctl -w net.core.somaxconn=16384</code> (commonly 4096 by default)</li>
+        <li>Docker: <code class="inline code">docker run --sysctl net.core.somaxconn=16384 ...</code> &mdash; containers get their own value, so setting it on the host is not enough</li>
+        <li>macOS: <code class="inline code">sysctl -w kern.ipc.somaxconn=16384</code></li>
+    </ul>
+    <p>Type: <span class="keyword">int</span> Default: <span class="this_value">1024</span></p>
+    <p><strong>Raise this deliberately, not routinely.</strong> A deeper queue lets the kernel admit connections your server may then be unable to serve, so the default acts as backpressure: the failure mode changes from slow to dead. Raise it when you have measured that connections are being dropped at the queue, and raise <code class="inline code">somaxconn</code> with it.</p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.soBacklog(int backlog)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.soBacklog=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_SO_BACKLOG=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.soBacklog=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.soBacklog=16384</code></pre>
+</div>
+
+<button id="button_configuration_inbound_connection_idle_timeout_millis" class="accordion title"><strong>Idle Connection Timeout</strong></button>
+<div class="panel title">
+    <p>How long, in milliseconds, a client connection may sit completely idle before MockServer closes it. Every open connection costs memory even when it carries no traffic (roughly 4 KB of kernel socket memory plus MockServer's own per-connection state), so clients that open keep-alive connections and never close them can slowly push a container towards its memory limit. This timeout releases them.</p>
+    <p>Only genuinely quiet connections are closed: nothing read or written for the whole timeout <em>and</em> nothing in progress. A connection is never closed by this timeout while it is:</p>
+    <ul>
+        <li>waiting for a response &mdash; a delayed response, a slow forward, or a request paused at a breakpoint</li>
+        <li>streaming a response &mdash; Server-Sent Events, chunked or gRPC streaming, however long the gaps between messages</li>
+        <li>carrying an open HTTP/2 stream</li>
+        <li>a WebSocket or a raw (non-HTTP) proxied connection</li>
+    </ul>
+    <p>A CONNECT or SOCKS proxy tunnel is treated like any other connection: it is closed, together with MockServer's own internal connection for it, once nothing has passed through it for the whole timeout and no request sent through it is waiting for its response. A tunnel with a request still being uploaded, a delayed or streamed response, or an open HTTP/2 stream is never closed by this timeout. Clients that pool proxy tunnels reconnect as they do for any idle connection closed by a server.</p>
+    <p>An <span class="inline_code">error()</span> action that keeps the connection open is not waiting for anything once it has sent its bytes, or if it sends none, so that connection counts as idle and is closed once the timeout passes. A CONNECT or SOCKS proxy tunnel that carried such a request is closed on the same terms.</p>
+    <p>The same goes for a response whose status code is <span class="inline_code">1xx</span> (other than <span class="inline_code">101</span>), such as <span class="inline_code">102</span> or <span class="inline_code">103</span>: it is the whole of what the expectation sends, so nothing more is coming. Over HTTP/1.1 the connection stays open and is closed once the timeout passes. Over HTTP/2 MockServer sends the <span class="inline_code">1xx</span> and then resets that request's stream (<span class="inline_code">RST_STREAM</span> with <span class="inline_code">NO_ERROR</span>), so the client's request fails at once instead of waiting for a final response, and the connection is closed once it has been idle for the timeout. Over HTTP/3 MockServer sends the <span class="inline_code">1xx</span> (<span class="inline_code">101</span> included, as HTTP/3 has no upgrade) without any body or trailers the expectation has, and then resets the stream with <span class="inline_code">H3_NO_ERROR</span>; the client may not see the <span class="inline_code">1xx</span> before the reset. Over HTTP/2 and HTTP/3, MockServer logs one warning the first time each such expectation is used.</p>
+    <p>Mainstream HTTP clients (Java, OkHttp, Apache, Python, Node, Go) notice a server closing an idle pooled connection and open a new one, so the 5 minute default should go unnoticed by normal test suites. In rare cases a request sent at the exact moment a connection is closed may fail and need a retry, as with any server that closes idle keep-alive connections. Set it to <span class="inline_code">0</span> to never close idle connections, which was the behaviour before this setting existed. The value applies to connections accepted after it is changed.</p>
+    <p>Type: <span class="keyword">long</span> Default: <span class="this_value">300000</span> (5 minutes)</p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.inboundConnectionIdleTimeoutMillis(long millis)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.inboundConnectionIdleTimeoutMillis=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_INBOUND_CONNECTION_IDLE_TIMEOUT_MILLIS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.inboundConnectionIdleTimeoutMillis=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.inboundConnectionIdleTimeoutMillis=60000</code></pre>
+</div>
+
+<button id="button_configuration_max_inbound_connections" class="accordion title"><strong>Maximum Open Connections</strong></button>
+<div class="panel title">
+    <p>The most client connections MockServer will hold open at once. When the limit is reached, a new connection is closed immediately (the client sees a connection reset straight away rather than hanging), a warning is logged at most every 10 seconds, and <span class="inline_code">mock_server_inbound_connections_rejected_total</span> is incremented. As soon as a connection closes, new ones are accepted again.</p>
+    <p>Use it to put a hard ceiling on connection memory in a memory-limited container, for example when many load-test clients each hold a pool of keep-alive connections. Watch <span class="inline_code">mock_server_inbound_connections_open</span> to choose a value. Each CONNECT or SOCKS proxy tunnel uses <strong>two</strong> connections (the client's plus MockServer's own internal connection to itself); if the second is refused the client receives a <span class="inline_code">502</span>.</p>
+    <p>HTTP/3 (QUIC) connections are not counted. MockServer's own start-up warm-up request (see <span class="inline_code">startupWarmup</span>) holds one connection for a few seconds after start, so allow for it with a very small limit. The value is read for each new connection, so it can be changed while MockServer is running.</p>
+    <p>Type: <span class="keyword">int</span> Default: <span class="this_value">0</span> (no limit)</p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.maxInboundConnections(int maxConnections)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maxInboundConnections=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_MAX_INBOUND_CONNECTIONS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.maxInboundConnections=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maxInboundConnections=5000</code></pre>
+</div>
+
+<button id="button_configuration_response_write_stall_timeout_millis" class="accordion title"><strong>Response Write Stall Timeout</strong></button>
+<div class="panel title">
+    <p>How long, in milliseconds, a response may wait for a client that has stopped reading it before MockServer gives up on it. A client that stops reading (a hung test, a paused debugger, a consumer that stops taking a stream) would otherwise keep what is waiting for it for as long as its connection stays open: an aggregated response up to its full size, and for a streamed response up to <span class="inline_code">maxResponseBodySize</span> plus an open connection to the upstream it is forwarded from.</p>
+    <p>When bytes of a response have been waiting for the whole timeout and the client has taken none of them, the response ends incomplete, is logged as a warning and is counted by the <span class="inline_code">mock_server_response_write_stalls_total</span> <a href="/mock_server/observability.html">metric</a>:</p>
+    <ul>
+        <li>HTTP/1.1: the connection is closed (for a CONNECT or SOCKS tunnel, the tunnel is closed)</li>
+        <li>HTTP/2 (including HTTP/2 inside a CONNECT or SOCKS tunnel) and HTTP/3: only that stream is reset; other streams on the connection carry on (an HTTP/2 client that stops reading the connection altogether has the connection closed). An HTTP/2 stream that was waiting only for flow-control window held by the stalled stream is not reset before it, and gets another timeout period to receive that window once the stalled stream is reset. An HTTP/2 client counts as reading a stream only while the stream's data is actually being sent to it: flow-control frames that let no data be sent (a <span class="inline_code">WINDOW_UPDATE</span> while the connection's window is used up, or a changed initial window size) do not keep a stalled stream open. An HTTP/3 stream that has been sent little or nothing because stalled streams hold the connection's flow-control credit also gets another timeout period once such a stream is reset</li>
+        <li>a streamed (forwarded) response: its upstream connection is closed too</li>
+    </ul>
+    <p>A client that keeps taking some of the response at least once per timeout period is not affected, and neither is a client waiting for a delayed or slow response, because nothing is waiting for it to read. The same applies to a WebSocket whose client stops reading the messages sent to it. The operating system sends data to a slow reader in bursts, sometimes seconds apart, so keep the timeout well above a few seconds; the 1 minute default leaves plenty of room. Set it to <span class="inline_code">0</span> to never cut off a stalled client, which was the behaviour before this setting existed. The value applies to connections accepted after it is changed.</p>
+    <p>Type: <span class="keyword">long</span> Default: <span class="this_value">60000</span> (1 minute)</p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.responseWriteStallTimeoutMillis(long millis)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.responseWriteStallTimeoutMillis=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_RESPONSE_WRITE_STALL_TIMEOUT_MILLIS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.responseWriteStallTimeoutMillis=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.responseWriteStallTimeoutMillis=120000</code></pre>
+</div>
 
 <button id="button_configuration_nio_event_loop_thread_count" class="accordion title"><strong>Number of Event Loop Threads</strong></button>
 <div class="panel title">
@@ -50,6 +495,46 @@
     <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.actionHandlerThreadCount="5"</code></pre>
 </div>
 
+<button id="button_configuration_max_pending_delayed_responses" class="accordion title"><strong>Maximum Pending Delayed Responses</strong></button>
+<div class="panel title">
+    <p>Maximum number of matched requests that can be waiting at the same time for a configured delay before their response is sent. This covers a response or forward <span class="inline_code">delay</span>, <span class="inline_code">globalResponseDelayMillis</span> and chaos latency.</p>
+    <p>Each waiting request is held in memory until its delay ends, so a high request rate against a slow expectation (for example 1,000 requests per second with a 10 second delay keeps 10,000 requests waiting) can use a lot of heap. When the limit is reached, further requests are answered straight away with <span class="inline_code">503 Service Unavailable</span> and a <span class="inline_code">Retry-After: 1</span> header instead of being held, so the server stays healthy.</p>
+    <p>A request answered this way has still matched its expectation: it counts towards the expectation's <span class="inline_code">times</span> (so a <span class="inline_code">once()</span> expectation is used up), may have used a rate-limit allowance, and has no response entry in the request log. A forwarded response that is waiting only for chaos latency is sent immediately without the latency instead of being refused, because the upstream has already been called.</p>
+    <p>Delayed side actions (after-actions, secondary actions and step side effects) have a separate allowance of the same size. When it is full further ones are skipped and logged, so they never cause a 503.</p>
+    <p>Delayed replies of a two-way (bidirectional) WebSocket mock have a third allowance of the same size, counted in reply messages. A reply to one incoming message is always sent completely or not at all: when the allowance is full, the WebSocket is closed with status <span class="inline_code">1013</span> (Try Again Later) and none of that reply is sent. Before that point, a single connection with more than 128 delayed replies still waiting simply stops being read until they drain, which slows a fast client down instead of failing it.</p>
+    <p>Rejections are reported in a WARN log line at most every 10 seconds and, when metrics are enabled (<span class="inline_code">metricsEnabled</span>), counted by the <span class="inline_code">mock_server_overload_rejections</span> metric (with <span class="inline_code">reason</span> <span class="inline_code">delayed_responses</span>, <span class="inline_code">delay_skipped</span>, <span class="inline_code">side_actions</span> or <span class="inline_code">websocket_replies</span>); the <span class="inline_code">mock_server_pending_delayed_tasks</span> metric shows how many are currently waiting.</p>
+    <p>Raise this if you deliberately run many slow requests at once and have the heap for them; set it to <span class="inline_code">0</span> to restore the previous unlimited behaviour (not recommended).</p>
+    <p>Type: <span class="keyword">int</span> Default: <span class="this_value">maximum heap divided by 64 KB (an estimate of the memory each waiting request holds), up to 100,000 (about 8,000 for a 512 MB heap; 1,000 if the JVM reports no heap limit)</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.maxPendingDelayedResponses(int maxPendingDelayedResponses)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maxPendingDelayedResponses=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_MAX_PENDING_DELAYED_RESPONSES=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.maxPendingDelayedResponses=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maxPendingDelayedResponses="20000"</code></pre>
+</div>
+
+<button id="button_configuration_max_queued_template_actions" class="accordion title"><strong>Maximum Queued Template Actions</strong></button>
+<div class="panel title">
+    <p>Maximum number of response or forward templates (Velocity, Mustache or JavaScript) that can be queued waiting to be rendered.</p>
+    <p>Templates are rendered on a dedicated pool of threads (as many as <span class="inline_code">actionHandlerThreadCount</span>). If requests arrive faster than templates can be rendered they queue, and each queued request is held in memory. When the limit is reached, further templated requests are answered straight away with <span class="inline_code">503 Service Unavailable</span> and a <span class="inline_code">Retry-After: 1</span> header. As with delayed responses, the request still counts as a match for its expectation and has no response entry in the request log. Rejections are reported in a WARN log line at most every 10 seconds and, when metrics are enabled, counted by the <span class="inline_code">mock_server_overload_rejections</span> metric (with <span class="inline_code">reason="template_actions"</span>); the <span class="inline_code">mock_server_template_action_queued_tasks</span> metric shows the current queue length.</p>
+    <p>If you see these rejections at a load you expect to handle, simplify the template or raise <span class="inline_code">actionHandlerThreadCount</span> before raising this limit; set it to <span class="inline_code">0</span> to restore the previous unlimited behaviour (not recommended).</p>
+    <p>Type: <span class="keyword">int</span> Default: <span class="this_value">maximum heap divided by 64 KB, up to 100,000 (about 8,000 for a 512 MB heap; 1,000 if the JVM reports no heap limit)</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.maxQueuedTemplateActions(int maxQueuedTemplateActions)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maxQueuedTemplateActions=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_MAX_QUEUED_TEMPLATE_ACTIONS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.maxQueuedTemplateActions=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maxQueuedTemplateActions="20000"</code></pre>
+</div>
+
 <button id="button_configuration_client_nio_event_loop_thread_count" class="accordion title"><strong>Number of Client Event Loop Threads</strong></button>
 <div class="panel title">
     <p>Number of threads for client event loop when calling downstream</p>
@@ -87,7 +572,7 @@
 <button id="button_configuration_max_socket_timeout" class="accordion title"><strong>Maximum Future Timeout In Millis</strong></button>
 <div class="panel title">
     <p>Maximum time allowed in milliseconds for any future to wait, for example when waiting for a response over a web socket callback.</p>
-    <p>Type: <span class="keyword">long</span> Default: <span class="this_value">60000</span></p>
+    <p>Type: <span class="keyword">long</span> Default: <span class="this_value">90000</span></p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.maxFutureTimeout(long milliseconds)</code></pre>
     <p>System Property:</p>
@@ -97,14 +582,14 @@
     <p>Property File:</p>
     <pre class="code" style="padding: 2px;"><code class="code">mockserver.maxFutureTimeout=...</code></pre>
     <p>Example:</p>
-    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maxFutureTimeout="60000"</code></pre>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maxFutureTimeout="90000"</code></pre>
 </div>
 
 <button id="button_configuration_matchers_fail_fast" class="accordion title"><strong>Request Matchers Fail Fast</strong></button>
 <div class="panel title">
     <p>If true (the default) request matchers will fail on the first non-matching field, if false request matchers will compare all fields.</p>
-    <p>This is useful to see all mismatching fields in the log event recording that a request matcher did not match.</p>
-    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">true</span></p>
+    <p>Set to <code>false</code> when debugging matching issues to see all mismatching fields in a single log entry. See <a href="/mock_server/troubleshooting_matching.html">Troubleshooting Matching</a> for a step-by-step guide.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">true</span></p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.matchersFailFast(boolean enable)</code></pre>
     <p>System Property:</p>
@@ -128,7 +613,7 @@
     <p>Environment Variable:</p>
     <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_LOG_LEVEL=...</code></pre>
     <p>Property File:</p>
-    <pre class="code" style="padding: 2px;"><code class="code">mockserver.logLevel</code></pre>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.logLevel=...</code></pre>
     <p>The log level, which can be TRACE, DEBUG, INFO, WARN, ERROR, OFF, FINEST, FINE, INFO, WARNING, SEVERE</p>
     <p>Example:</p>
     <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.logLevel="DEBUG"</code></pre>
@@ -150,9 +635,9 @@
     <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.disableSystemOut="true"</code></pre>
 </div>
 
-<button id="button_configuration_performance_disable_logging" class="accordion title"><strong>Disable All Logging</strong></button>
+<button id="button_configuration_performance_disable_logging" class="accordion title"><strong>Disable Logging To System Out</strong></button>
 <div class="panel title">
-    <p>Disable all logging and processing of log events</p>
+    <p>Disable logging output to system out. Request/response log entries are still recorded in memory for verification.</p>
     <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.disableLogging(boolean disableLogging)</code></pre>
@@ -164,4 +649,22 @@
     <pre class="code" style="padding: 2px;"><code class="code">mockserver.disableLogging=...</code></pre>
     <p>Example:</p>
     <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.disableLogging="true"</code></pre>
+</div>
+
+<button id="button_configuration_max_llm_conversation_body_size" class="accordion title"><strong>Maximum LLM Conversation Body Size</strong></button>
+<div class="panel title">
+    <p>Maximum request body size in bytes that conversation-aware LLM matchers will parse. LLM conversation matchers (<span class="inline_code">whenLatestMessageContains</span>, <span class="inline_code">whenContainsToolResultFor</span>, etc.) parse the inbound request body as JSON to extract the message history. For deep conversation histories or large tool results, this parse step is proportional to body size.</p>
+    <p>Requests whose body exceeds this cap skip conversation-aware matching and are treated as a no-match for conversation predicates (the scenario state machine is unaffected). Increase this value only when your LLM conversations regularly include very large tool results or long message histories. Reduce it in memory-constrained environments to bound the maximum allocation per matching attempt.</p>
+    <p>Type: <span class="keyword">int</span> Default: <span class="this_value">1048576</span> (1 MiB) Range: <span class="this_value">16384</span> (16 KiB) &mdash; <span class="this_value">67108864</span> (64 MiB)</p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.maxLlmConversationBodySize(int size)</code></pre>
+    <pre class="prettyprint lang-java code"><code class="code">Configuration.maxLlmConversationBodySize(Integer size)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maxLlmConversationBodySize=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_MAX_LLM_CONVERSATION_BODY_SIZE=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.maxLlmConversationBodySize=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maxLlmConversationBodySize="4194304"</code></pre>
 </div>

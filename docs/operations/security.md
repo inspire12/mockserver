@@ -1,0 +1,366 @@
+# Security
+
+MockServer's security scanning, vulnerability management, and the security posture of released and pre-release artifacts.
+
+## Overview
+
+MockServer is a **development and testing tool** -- it is not designed for production deployment. Its security posture reflects this: the project invests heavily in automated scanning and dependency management to keep the supply chain clean, while deliberately retaining certain capabilities (like SSRF forwarding and trust-all TLS) that are essential for testing but would be vulnerabilities in a production service.
+
+Users who need to lock down a MockServer deployment can harden these capabilities through configuration. The consumer-facing [**API Security: Configuration Hardening**](https://www.mock-server.com/mock_server/control_plane_authorisation.html#configuration_hardening) guide ([source](../../jekyll-www.mock-server.com/mock_server/control_plane_authorisation.html)) documents the recommended property values -- loopback binding, SSRF blocking, upstream TLS validation, the TLS protocol floor, response-template class restrictions, request-parsing limits, and control-plane authentication (mTLS/JWT).
+
+See [SECURITY.md](../../SECURITY.md) for the full security policy, including intentional security behaviours and vulnerability reporting.
+
+## Control-plane audit logging
+
+When MockServer runs as shared infrastructure, an opt-in audit log records *who changed mock state* (control-plane mutations: who/what/when/where/outcome) so changes are accountable. It is off by default and is **not** data-plane traffic logging. Enable it with `controlPlaneAuditEnabled` and retrieve it via `GET /mockserver/audit`. See [event-system.md](../code/event-system.md#control-plane-audit-log) and [configuration-reference.md](../code/configuration-reference.md#controlplaneauditenabled-controlplaneauditmaxentries-controlplaneauditreads).
+
+Security-relevant properties of the audit log:
+
+- **Records no bodies and no headers.** Each entry stores only redacted, structural metadata (method, control-plane path with the query string dropped, logical operation, source address, best-effort principal, outcome). It can never become a sink for request payloads or credential headers.
+- **Redaction (by omission).** The path's query string is stripped, and no header or body is ever stored, so there is no credential-bearing free text to scrub; the `summary` field is unused (`null`) in v1. The best-effort principal parser reads only the JWT `sub` claim (or the mTLS subject CN) and never stores the raw bearer token. (If a non-null `summary` is added later it must be scrubbed via `FixtureRedactor`'s default sensitive set + `***REDACTED***` at that point.)
+- **Default-off and fail-soft.** When disabled, control-plane operations behave byte-for-byte identically. The audit emit is wrapped in `try/catch` and can never throw into the request path.
+- **Best-effort, UNVERIFIED principal (v1).** The principal is read from an unverified JWT `sub` (no signature verification) or the mTLS client-certificate CN, else `anonymous`. **Verified identity is a later unit (1.5-A)** — do not treat the v1 principal as an authenticated subject; treat it as a hint correlated with the (separately enforced) control-plane authentication.
+
+## Static Analysis: CodeQL
+
+GitHub's CodeQL semantic analysis runs automatically on:
+- Every push to `master`
+- Every pull request targeting `master`
+- Weekly (Tuesdays at 22:00 UTC)
+
+CodeQL scans **four languages** in the monorepo:
+
+| Language | Scope |
+|----------|-------|
+| Java | `mockserver/` (server, core, clients, integrations) |
+| JavaScript | `mockserver-ui/`, `mockserver-client-node/`, `mockserver-node/` |
+| Python | `mockserver-client-python/` |
+| Ruby | `mockserver-client-ruby/` |
+
+Results appear in the [GitHub Security tab](https://github.com/mock-server/mockserver-monorepo/security/code-scanning). CodeQL detects issues including SQL injection, path traversal, insecure deserialization, cross-site scripting, and other OWASP Top 10 categories.
+
+**Workflow:** [`.github/workflows/codeql-analysis.yml`](../../.github/workflows/codeql-analysis.yml)
+
+## Dependency Scanning: Dependabot
+
+Dependabot monitors **8 package ecosystems** across the monorepo for outdated and vulnerable dependencies:
+
+| Ecosystem | Directory(ies) | PR Limit |
+|-----------|----------------|:--------:|
+| Maven | `/mockserver` | 20 |
+| Maven | `/examples/java` | 10 |
+| Maven | `/mockserver/mockserver-maven-plugin` | 10 |
+| npm | `/mockserver-ui`, `/mockserver-client-node`, `/mockserver-node`, `/.opencode` | 10 |
+| pip | `/mockserver-client-python` | 10 |
+| Bundler | `/mockserver-client-ruby`, `/jekyll-www.mock-server.com` | 10 |
+| GitHub Actions | `/` | 10 |
+| Docker | `/docker` + subdirs, `/docker_build/*` | 10 |
+| Terraform | `/terraform/*` | 10 |
+
+The Docker and Terraform directory columns are summarised; Dependabot has no glob support, so each directory is listed explicitly in [`.github/dependabot.yml`](../../.github/dependabot.yml) (10 Docker dirs, 4 Terraform dirs). When you add a new Docker/Terraform directory, add it there too or it will not be scanned.
+
+Dependabot runs **daily** and opens pull requests for version updates and security patches. Minor and patch updates are **grouped per ecosystem** (e.g. `maven-minor-and-patch`) so related bumps land in a single PR instead of many.
+
+### Namespace Migration Status
+
+The `javax` → `jakarta` namespace migration is **complete** (Spring 7, Spring Boot 4, Tomcat 11, Jetty 12, Jersey 4, jakarta.* artifacts at EE 10+). The Dependabot ignore list no longer carries jakarta-related blocks. JDK-namespace `javax.*` (e.g. `javax.net.ssl`, `javax.xml.*`, `javax.script.*`, `javax.annotation.Nullable` JSR-305) remains unchanged — those classes ship with the JDK and stay `javax`.
+
+See the Java compatibility policy in [AGENTS.md](../../AGENTS.md#java-compatibility-policy).
+
+### Version Ceilings (Java 17 Floor)
+
+MockServer targets **Java 17** as the minimum supported runtime. Some dependencies drop Java 17 support in newer major lines, so they are pinned below the version that requires a newer JDK. These ceilings are enforced in `.github/dependabot.yml` with explicit `versions: [">=X.0.0"]` ignore entries (stricter than ignoring only `version-update:semver-major`, and applied in **every** Maven block that references the dependency).
+
+| Dependency | Ceiling | Reason |
+|------------|---------|--------|
+| `com.puppycrawl.tools:checkstyle` | `< 13.0.0` (stay on 12.x) | checkstyle 13.x is compiled for Java 21 (class file version 65.0) and fails to load under Java 17 — see the CodeQL `Analyze (java)` build, which runs on Java 17 |
+| `org.infinispan:infinispan-core` | `< 15.0.0` (stay on 14.0.x) | Infinispan 15.x requires Java 21+. The 14.0.x line is the last to support Java 17. Used only by `mockserver-state-infinispan`. |
+| `com.graphql-java:graphql-java` | `< 27.0.0` (precautionary) | graphql-java through 26.x ships Java 11 bytecode and runs fine on Java 17 (verified by `mockserver-core` build/tests on the Java 17 target). The ceiling is precautionary: a future major (27.x) could raise the runtime floor, so it must be manually verified on Java 17 before adoption. Pulls in `com.graphql-java:java-dataloader` (6.0.0); ANTLR4 runtime and `reactive-streams` arrive transitively. Used by `org.mockserver.graphql.*` for schema-driven GraphQL response synthesis. |
+
+**When raising the Java floor:** remove the corresponding ceiling here and the matching ignore entries in `.github/dependabot.yml`, then let the dependency upgrade. The Dependabot ignore does not block **manual** version bumps in `pom.xml` — keep this table in mind when hand-editing dependency versions.
+
+### Native / Platform Dependencies
+
+Dependencies that interact with the OS kernel or native libraries, added for specific platform features. These are safe on all platforms — callers detect availability at runtime and fall through when unavailable.
+
+| Dependency | Version | Module | Purpose | Java 17 compatible |
+|------------|---------|--------|---------|:---:|
+| `net.java.dev.jna:jna` | `${jna.version}` (5.19.0) | `mockserver-netty` | JNA-based `getsockopt(SO_ORIGINAL_DST)` for transparent proxy original-destination resolution (`SoOriginalDstResolver`). O(1) socket option read, tried before the O(n) conntrack table scan. | Yes (supports Java 8+) |
+| `io.netty:netty-transport-classes-epoll` | `${netty.version}` | `mockserver-core`, `mockserver-netty` | Pure-Java API classes for `EpollSocketChannel`, `EpollEventLoopGroup`, `EpollServerSocketChannel`, and `Epoll.isAvailable()` — needed at compile time by `NettyTransport` (transport selection) and `SoOriginalDstResolver` (fd extraction). No native classifier (the `.so` is only needed at runtime on Linux). | Yes (follows Netty BOM) |
+| `io.netty:netty-transport-native-epoll` (classifier: `linux-x86_64`) | `${netty.version}` | `mockserver-netty` (runtime) | Native JNI library that activates `Epoll.isAvailable()` on Linux x86_64. Bundled in the distribution jar-with-dependencies and Docker images. Inert on non-Linux platforms. | Yes (follows Netty BOM) |
+| `io.netty:netty-transport-native-epoll` (classifier: `linux-aarch_64`) | `${netty.version}` | `mockserver-netty` (runtime) | Native JNI library that activates `Epoll.isAvailable()` on Linux aarch64 (ARM64). Bundled in the distribution jar-with-dependencies and Docker images. Inert on non-Linux/non-ARM platforms. | Yes (follows Netty BOM) |
+| `io.netty:netty-codec-http3` | `${netty.version}` | `mockserver-netty` (compile) | HTTP/3 codec for experimental QUIC support (graduated from the Netty incubator into mainline Netty 4.2). Transitively pulls `netty-codec-native-quic` with native classifiers for linux-x86_64, linux-aarch_64, osx-x86_64, osx-aarch_64, windows-x86_64. The native artifact contains a BoringSSL JNI binding. The natives are EXCLUDED from the default `jar-with-dependencies` and ship in the `jar-with-dependencies-http3` classifier instead; the codec CLASSES remain bundled everywhere, so nothing fails to load. Fail-fast at runtime: with `http3Port` set and the native absent, start-up fails with an `IllegalStateException` naming the fixes (it previously logged a warning and started without the listener). The published Docker images run the shaded jar, whose relocated Netty cannot load the stock native, so only the `-http3` image variant (`docker/http3/Dockerfile`, which installs the native under the relocated name in `/usr/lib`) serves HTTP/3. | Yes (follows Netty BOM) |
+| `org.xerial.snappy:snappy-java` | `1.1.10.7` | `mockserver-core` | Raw Snappy **block** compression for the Prometheus Remote-Write push body (`SnappyBlock` / `PrometheusRemoteWriteExporter`) — remote write mandates the block (not framed) format. Ships a self-extracting JNI native for common platforms with a pure-Java fallback; **not** shade-relocated (relocation would break the native resource path). Only exercised when `prometheusRemoteWriteEnabled=true`. | Yes (targets Java 7+) |
+
+### Embedded Data Grid Dependencies (Optional Module)
+
+Dependencies introduced by `mockserver-state-infinispan`, which provides the Infinispan-backed `StateBackend` for clustered MockServer state. This module is **optional** -- it is not pulled into `mockserver-core` or any other module. Its transitive dependencies enter CodeQL/Dependabot scan scope only when the module is included in the reactor build.
+
+| Dependency | Version | Module | Purpose | Java 17 compatible |
+|------------|---------|--------|---------|:---:|
+| `org.infinispan:infinispan-core` | 14.0.35.Final | `mockserver-state-infinispan` | Embedded (non-server) Infinispan cache manager for LOCAL and clustered KV stores. Provides the `StateBackend` implementation when `stateBackend=infinispan` is configured. | Yes (14.0.x line targets Java 11+; 15.x raises to Java 21) |
+| `org.jgroups:jgroups` | (transitive of infinispan-core) | `mockserver-state-infinispan` | Cluster transport for Infinispan. In LOCAL mode (default, `clusterEnabled=false`), no JGroups transport is started. In clustered mode (`clusterEnabled=true`), JGroups provides the SHARED_LOOPBACK in-JVM transport (for testing) or TCP transport for multi-host clustering. The default built-in JGroups stack (`jgroups-loopback.xml`) uses SHARED_LOOPBACK, which does not open network sockets; custom multi-host stacks use TCP bound to loopback by default. | Yes |
+| `org.infinispan.protostream:protostream` | (transitive of infinispan-core) | `mockserver-state-infinispan` | Protocol Buffers serialization framework used internally by Infinispan. Not used directly by MockServer's clustered wire format (which uses `JavaSerializationMarshaller` with an explicit allow-list). | Yes |
+
+**JGroups network security note:** In LOCAL mode (default, `clusterEnabled=false`), JGroups does not open any network listeners. In clustered mode (`clusterEnabled=true`), the default built-in JGroups stack uses `SHARED_LOOPBACK` transport (in-process, no network I/O), suitable for embedded testing. For multi-host clustering, users must provide a custom JGroups stack via the `clusterTransportConfig` property pointing to a JGroups XML file with a real transport (TCP/UDP) and appropriate discovery protocol (TCPPING, DNS_PING, etc.). The TCP transport should be configured with explicit bind addresses and firewall rules appropriate to the deployment environment.
+
+**Infinispan serialization allow-list (P0 security gate -- RESOLVED in Phase 2c):** The Phase 2b LOCAL-mode backend used `global.serialization().allowList().addRegexp(".*")` -- a wildcard that permits deserialization of any class. This was safe in LOCAL mode because caches are heap-only with no network marshalling. Phase 2c **resolves this P0 gate** by configuring the clustered path with:
+
+1. `JavaSerializationMarshaller` as the explicit marshaller (instead of ProtoStream, to handle the generic `VersionedWrapper<V>` types without per-type proto schema definitions)
+2. An **explicit package allow-list** restricted to exactly the types that cross the wire:
+   - `org.mockserver.state.infinispan.*` (VersionedWrapper)
+   - `org.mockserver.state.*` (ExpectationEntry, Blob)
+   - `org.mockserver.mock.*`, `org.mockserver.model.*`, `org.mockserver.matchers.*` (domain model)
+   - `com.fasterxml.jackson.*` (ObjectNode for CRUD entities)
+   - `java.lang.*`, `java.util.*`, `java.time.*`, `[B` (JDK types, byte arrays)
+
+The `ExpectationEntry` uses custom `writeObject`/`readObject` to serialize the `Expectation` as its JSON string (via `ExpectationDTO`), avoiding the need for the entire domain model to implement `Serializable`. The LOCAL-mode path retains the `".*"` wildcard because heap-only storage never deserializes untrusted bytes.
+
+### Cloud Blob Store Dependencies (Optional Modules)
+
+Dependencies introduced by the cloud blob store modules, which provide durable `BlobStore` implementations for S3, GCS, and Azure Blob Storage. Each module is **optional** -- it is not pulled into `mockserver-core` or any other module. mockserver-core has **zero** compile-time or runtime dependencies on any cloud SDK; the cloud modules self-register via reflection when present on the classpath. Their transitive dependencies enter CodeQL/Dependabot scan scope only when the module is included in the reactor build.
+
+| Dependency | Version | Module | Purpose | Java 17 compatible |
+|------------|---------|--------|---------|:---:|
+| `software.amazon.awssdk:s3` | 2.31.9 | `mockserver-blob-s3` | AWS SDK v2 S3 client for the S3-backed `BlobStore`. Supports any S3-compatible store (MinIO, LocalStack) via endpoint override. | Yes (targets Java 8+) |
+| `com.google.cloud:google-cloud-storage` | 2.49.0 | `mockserver-blob-gcs` | Google Cloud Storage client for the GCS-backed `BlobStore`. Supports fake-gcs-server for testing. | Yes (targets Java 8+) |
+| `com.azure:azure-storage-blob` | 12.35.2 | `mockserver-blob-azure` | Azure Blob Storage client for the Azure-backed `BlobStore`. Supports Azurite emulator for testing. Pulls `azure-core:1.60.0` and `azure-core-http-netty:1.16.8` → `reactor-netty-http`/`reactor-netty-core` `1.2.18` (matched pair, fixes the reactor-netty chained-redirect credential-leak advisory patched in `1.2.8`). The module's `dependencyManagement` pins `io.projectreactor:reactor-core` (currently `3.8.7`; azure-core and reactor-netty both declare `3.7.19`), which keeps maven-enforcer `DependencyConvergence` green. | Yes (targets Java 8+; the whole stack is Java-8 bytecode) |
+
+**Dependency isolation:** Each cloud SDK lives exclusively in its own module. The `mockserver-core` dependency tree contains no AWS, Google Cloud, or Azure artifacts. This is enforced by the module structure: core depends only on its own SPI interfaces (`BlobStore`, `BlobStoreFactory`), and cloud modules register their implementations via `StateBackendFactory.registerBlobStoreFactory()` at startup, discovered by reflection when `blobStoreType` is configured.
+
+### Test Dependencies (Docker-Gated)
+
+Test-scoped dependencies used for Docker-gated integration tests. These are never bundled in released artifacts.
+
+| Dependency | Version | Module | Purpose |
+|------------|---------|--------|---------|
+| `org.testcontainers:testcontainers` | 1.21.4 | `mockserver-async`, `mockserver-blob-s3`, `mockserver-blob-gcs`, `mockserver-blob-azure`, `mockserver-netty` (test) | Core Testcontainers API for Docker-gated integration tests |
+| `org.testcontainers:kafka` | 1.21.4 | `mockserver-async` (test) | Kafka container module for live-broker integration tests |
+| `org.postgresql:postgresql` | 42.7.13 | `mockserver-netty` (test) | PostgreSQL JDBC driver: drives a real PostgreSQL session through MockServer's binary proxying (`PostgresThroughMockServerIntegrationTest`), including the in-band TLS upgrade, SCRAM channel binding and binary expectations answering part of a session. Targets Java 8+ |
+
+The Testcontainers version (1.21.4) is aligned with the existing `mockserver-testcontainers` module. Note that `mockserver-testcontainers` depends on `org.testcontainers:testcontainers` (and its transitive `docker-java-*` 3.4.2 artifacts) at **compile scope** — not test scope — because its public `MockServerContainer` extends Testcontainers' `GenericContainer`; consumers of `mockserver-testcontainers` therefore resolve Testcontainers 1.21.4 transitively (overridable via their own dependency management), and these artifacts are in CodeQL/Dependabot scan scope for that module. The 1.20.6 to 1.21.4 bump was required to fix `DockerClientFactory.isDockerAvailable()` returning false on Docker Desktop 4.67+ / Engine 29.x / API 1.54 — the bundled docker-java 3.4.1 in 1.20.6 got a 400 on the info endpoint; 1.21.4 bundles docker-java 3.4.2 and includes explicit fixes for recent Docker Engine API changes. MQTT integration tests use a `GenericContainer` with `eclipse-mosquitto:2.0` (no additional Testcontainers module needed). The PostgreSQL proxying test likewise uses a `GenericContainer` with the official `postgres` image. Transparent-proxy end-to-end tests (`SoOriginalDstEndToEndIntegrationTest`, `TproxyEndToEndIntegrationTest`, `EbpfOriginalDestinationEndToEndIntegrationTest`) use the Docker CLI directly (via `ProcessBuilder`) to build and run NET_ADMIN / privileged containers for iptables REDIRECT/TPROXY rule setup and BPF map operations — they do not use Testcontainers.
+
+### Test Dependencies (gRPC Client)
+
+Test-scoped only, and never bundled in released artifacts. Added so the gRPC wire contract is driven by a **real gRPC client** rather than only asserted at handler level — the gap that let issue #2419 ship, where 34 green handler-level tests coexisted with a 1-in-4 real-client success rate.
+
+| Dependency | Version | Module | Purpose |
+|------------|---------|--------|---------|
+| `io.grpc:grpc-netty-shaded` | 1.70.0 | `mockserver-netty` (test) | gRPC transport for `GrpcUnaryClientIntegrationTest`, including its concurrent-call cases |
+| `io.grpc:grpc-stub` | 1.70.0 | `mockserver-netty` (test) | `ClientCalls.blockingUnaryCall` |
+| `io.grpc:grpc-protobuf` | 1.70.0 | `mockserver-netty` (test) | `ProtoUtils.marshaller` for `DynamicMessage`, so the tests need no protoc-generated stubs |
+
+`grpc-netty-shaded` is used in preference to `grpc-netty` deliberately: grpc-java targets Netty 4.1.x while MockServer runs Netty 4.2, and the shaded artifact bundles its own relocated Netty so the test client can neither be broken by, nor break, the server's Netty version. These artifacts pull `com.google.api.grpc:proto-google-common-protos` transitively; all are test scope in a single module. **Note that `grpc-netty-shaded` bundles a *relocated* copy of Netty inside its own jar, which Dependabot, CodeQL and Snyk cannot see into — it is effectively unscannable rather than narrowly scanned.** That is acceptable here only because it is test-scoped and never reaches a released artifact; it would not be acceptable at compile scope. If a Netty CVE is announced, the shaded copy must be checked manually by bumping `grpc.version` rather than relying on tooling to flag it.
+
+### Test Dependencies (DNS Client)
+
+Test-scoped only, and never bundled in released artifacts. Added for the same reason as the gRPC client above: the DNS wire contract was asserted against MockServer's own model objects and an internal cache, never against bytes a resolver would receive. `DnsRequestHandlerTest` built its `EmbeddedChannel` without the `DatagramDnsResponseEncoder` that `MockServer#bindDnsPort` installs and never called `readOutbound()`, so no test had ever produced a single DNS byte — concealing six RFC 1035 conformance defects, including a label-length bug that turned into a compression pointer and corrupted whole packets.
+
+| Dependency | Version | Module | Purpose |
+|------------|---------|--------|---------|
+| `dnsjava:dnsjava` | 3.6.3 | `mockserver-netty` (test) | Independent DNS message parser for `DnsRequestHandlerWireTest` — parses MockServer's emitted datagrams exactly as a real resolver would (rcode, header flags, per-record RDATA, TXT character-string splitting) |
+
+dnsjava is a mature pure-Java resolver library. Its only non-optional compile-scope dependency is `org.slf4j:slf4j-api`, which MockServer already depends on; `net.java.dev.jna:jna` and `jna-platform` are declared `<optional>true</optional>` and so are not pulled transitively (MockServer already manages `jna` for `SoOriginalDstResolver` in any case). It targets Java 8+, so it sits comfortably under the Java 17 floor. It is used only to *decode* MockServer's output in assertions — it is never on a production code path and never bundled into a released artifact.
+
+### Test Dependencies (OIDC Provider Conformance)
+
+Test-scoped only, and never bundled in released artifacts. Added for the same reason as the gRPC client above: the mock OIDC provider's conformance was asserted only against MockServer's own model objects, which is how `/introspect` came to report `active: true` for arbitrary tokens — and `/userinfo` came to serve claims to unauthenticated callers — without a single test failing.
+
+| Dependency | Version | Module | Purpose |
+|------------|---------|--------|---------|
+| `com.nimbusds:oauth2-oidc-sdk` | 11.23.1 | `mockserver-core` (test) | Independent, spec-driven parsing/validation of the discovery document (`OIDCProviderMetadata.parse`) and introspection responses (`TokenIntrospectionResponse.parse`) in `OidcDiscoveryCallbackTest` and `OidcIntrospectionCallbackTest` |
+
+This is the same code path Spring Security, Nimbus-based resource servers and pac4j use, so a response that parses here is one a real relying party accepts. It shares the `com.nimbusds` group with the already-present compile-scoped `nimbus-jose-jwt` (used to sign and verify tokens) but is a separate artifact and stays test scope — it must not become a compile dependency, since the provider itself deliberately implements OIDC rather than delegating to an SDK. Pulls `com.nimbusds:content-type` and `com.nimbusds:lang-tag` transitively; all test scope in a single module. Requires Java 11+, so it is within the Java 17 floor with no ceiling needed.
+### Test Dependencies (Streaming Protocol Clients)
+
+Test-scoped only, and never bundled in released artifacts. Added for the same reason as the gRPC client above — so WebSocket and SSE wire conformance is driven by **independent implementations of the RFCs** rather than asserted against MockServer's own objects, or against Netty, the library the server itself is built on. That gap is what let the #2419 family of "the stream looks healthy and delivers nothing" defects ship: mocked WebSockets answered no PING and echoed no CLOSE, and SSE data containing a lone CR was truncated, all while handler-level tests were green.
+
+| Dependency | Version | Module | Purpose |
+|------------|---------|--------|---------|
+| `org.java-websocket:Java-WebSocket` | 1.6.0 | `mockserver-netty` (test) | Non-Netty WebSocket client for RFC 6455 control-frame conformance (PING/PONG keepalive, CLOSE handling) in `ThirdPartyStreamingClientConformanceIntegrationTest` |
+| `com.squareup.okhttp3:okhttp-sse` | 5.3.2 | `mockserver-netty` (test) | Real WHATWG event-stream parser, so SSE framing is verified by a client that actually parses it; also used to PUT raw control-plane JSON |
+
+`Java-WebSocket` has **no transitive dependencies**. `okhttp-sse` pulls `com.squareup.okhttp3:okhttp-jvm` 5.3.2, `com.squareup.okio:okio-jvm` 3.16.4 and `org.jetbrains.kotlin:kotlin-stdlib` 2.2.21, all at test scope in this one module — note that MockServer otherwise deliberately keeps okhttp and kotlin-stdlib **out** of the shaded jar (the OTLP exporter excludes the okhttp sender for exactly this reason), so their presence here must stay test-scoped. Unlike `grpc-netty-shaded` these are ordinary unshaded artifacts, so Dependabot, CodeQL and Snyk can see and scan all of them normally.
+
+The `<okhttp-sse.version>` property is named for the artifact it actually manages: only `okhttp-sse` is version-managed, and `okhttp-jvm`/`okio-jvm`/`kotlin-stdlib` arrive transitively at whatever versions that release pins. If a CVE lands in okhttp, okio or kotlin-stdlib, bump `okhttp-sse.version` rather than expecting a direct pin to exist.
+
+### Maven Dependency Graph Submission
+
+**Dependabot vulnerability *alerts* are computed from the dependency graph submitted to GitHub — not from the `pom.xml` manifests directly.** (Dependabot's security-update *pull requests* are a separate mechanism that *does* read manifests; do not conflate the two.) A stale graph therefore produces **both** phantom alerts (advisories against versions the project no longer uses) **and** missed real ones (a genuine new CVE never surfaced because the graph does not reflect what the project actually resolves).
+
+For most languages GitHub builds the graph by statically indexing manifest files. For Maven the accurate, transitive graph comes instead from **dependency submission**: a workflow resolves the full Maven tree and POSTs it to the dependency-graph API.
+
+**The monorepo layout requires an *explicit* submission workflow.** GitHub's managed "Automatic Dependency Submission (Maven)" only discovers a Maven project at the **repository root**. When the Java project moved into the `mockserver/` subfolder (commit `386750356`, 2026-05-05) there was no longer a root `pom.xml`, and managed submission silently stopped — its last run was `2026-05-05T04:58Z`, ~17 minutes before the move. The graph then froze at a pre-move, **pre-Spring-7** snapshot. The concrete cost of that staleness:
+
+- **Phantom alerts:** 20 Spring advisories bounded at `<= 5.3.39` stayed open against a tree actually running Spring 7, and had to be manually triaged and dismissed as inaccurate.
+- **Missed fixes:** the `log4j-api` `2.25.5` and `jsoup` `1.23.1` pins in `mockserver/pom.xml` `dependencyManagement` were not reflected, so alerts for those (e.g. #528, #525) stayed open even though the fixed versions were already resolved.
+
+[`.github/workflows/dependency-submission.yml`](../../.github/workflows/dependency-submission.yml) restores accurate submission using the official [`advanced-security/maven-dependency-submission-action`](https://github.com/advanced-security/maven-dependency-submission-action) (SHA-pinned, as all workflow actions are). It submits exactly the two Maven projects Dependabot is configured for in `.github/dependabot.yml`, each under a distinct `correlator` so the two snapshots coexist rather than overwrite each other:
+
+| Project | `correlator` | Notes |
+|---------|--------------|-------|
+| `mockserver/` | `mockserver-reactor` | The aggregator reactor. Inter-module `SNAPSHOT` deps resolve in-reactor with no prior `install`. **`examples/java` is no longer a reactor module** (removed from `mockserver/pom.xml` so `/mockserver` is a self-contained directory for Dependabot's grouped updates), so its dependencies are not in this graph — intentional, as `examples/java` is sample code that is no longer published to Maven Central (it is no longer in the release reactor, so `mvn deploy -P release` never reaches it; `skipPublishing=true` in its POM guards a future re-add), so it needs no vulnerability-alert submission. Its dependency-*update* proposals are still covered by the `/examples/java` Dependabot block. |
+| `mockserver/mockserver-maven-plugin/` | `mockserver-maven-plugin` | A **separate** build (not a reactor module). It depends on `mockserver-netty` and `mockserver-integration-testing` at the unreleased `${project.version}` `SNAPSHOT`, so its tree only resolves after those reactor modules are `install`ed into `~/.m2` — the job does a targeted `-pl mockserver-netty,mockserver-integration-testing -am install` first. |
+
+The workflow is **path-gated to `mockserver/**/pom.xml`** on pushes to `master` (plus `workflow_dispatch` for on-demand re-submission after a pin lands) because resolving a Maven tree is not free — only a pom change can alter the graph.
+
+**Recommendation on the managed submission:** it is already **inert** (it has found nothing to submit since the move) and cannot be disabled via a repo file — it is a GitHub-managed dynamic workflow. Leave it as-is; because it discovers only a root `pom.xml` that no longer exists, it will not fight the explicit workflow above. Should a root `pom.xml` ever be reintroduced, disable it under **Settings → Code security → Automatic dependency submission** to avoid two mechanisms submitting overlapping Maven graphs.
+
+**Verified locally; one thing can only be verified once it runs on `master`.** Resolving `mockserver/pom.xml` locally produces a tree containing `log4j-api:2.25.5` (compile) and `jsoup:1.23.1` (test), confirming that once submitted these alerts clear. The actual submission to the dependency-graph API — and the resulting recomputation of alerts — can only be confirmed after the workflow first runs on `master`.
+
+## Vulnerability Scanning: Snyk
+
+Snyk provides a second layer of vulnerability scanning, independent of Dependabot:
+
+- **PR status checks:** Two Snyk integrations (`security/snyk (mockserver)` and `security/snyk (jamesdbloom)`) run on every pull request
+- **Dashboard:** [app.snyk.io/org/mockserver/projects](https://app.snyk.io/org/mockserver/projects)
+- **Policy file:** [`.snyk`](../../.snyk) documents any vulnerability IDs that are explicitly ignored, along with the rationale and a review date
+
+The `.snyk` policy file has an `exclude:` entry intended to skip the example project (sample code, not published to Maven Central) — but its effectiveness is unverified: the key is a bare directory/module name (`mockserver-examples`), that directory was relocated to `examples/java` by `d3cfa9aaf` in June 2026, and the exclusion has never been validated with a real `snyk test` run. Treat example-project findings as in-scope until a real `snyk test` run proves otherwise. As of the Java 17 / Jakarta EE 10 modernisation the ignore list is **empty** — the Java-11-era ignores (which suppressed ~20 Spring/Jetty/Boot/OkHttp/Reactor CVEs whose only fix required Java 17+) were removed once those vulnerable versions left the dependency tree. Vulnerabilities are now resolved through normal upgrades; add a new, dated ignore only when a deliberate constraint genuinely blocks a fix.
+
+### Renewing Snyk ignores
+
+When an ignore **is** added, give it a dated `expires:` (convention: 3 months out) so it cannot silently outlive its rationale. Renewal is a manual checkpoint: before the expiry date, re-run the Snyk scan, confirm the constraint still holds, and either remove the ignore (if the fix is now available) or refresh the `expires:` date with an updated reason. An empty ignore list (the current state) needs no renewal.
+
+See [Snyk Security](snyk-security.md) for the full triage workflow, CLI commands, and vulnerability status by module.
+
+## CI/CD Infrastructure Security
+
+Controls applied to the Buildkite build infrastructure and release pipeline. See [AWS Infrastructure](../infrastructure/aws-infrastructure.md) and [CI/CD](../infrastructure/ci-cd.md) for full details.
+
+### Least-Privilege CI Secrets
+
+Each agent queue receives only the Secrets Manager policies it actually consumes — the single `buildkite-read-build-secrets` policy has been replaced by per-secret, per-queue policies:
+
+| Queue | IAM policies attached | Rationale |
+|-------|----------------------|-----------|
+| `default` | `read-build-secrets-default` (API token + Sonatype), `read-dockerhub-secret`, `ecr-public-push` | Snapshot Docker push on master |
+| `trigger` | `read-buildkite-api-token` | Trigger polling only needs API token |
+| `perf` | `read-buildkite-api-token`, `perf-results` | Commit guard + S3 results |
+| `release` | `read-build-secrets-release`, `read-release-secrets`, `read-dockerhub-secret`, `ecr-public-push`, `release-website-tfstate` | Full release publishing |
+
+The `dependency-cache` policy is detached from all queues (runtime wiring reverted pending cache-integrity implementation).
+
+### Release Secret Hygiene (File-based, not env vars)
+
+Release scripts write secrets to `0600` files under `.tmp/` (volume-mounted into Docker containers) rather than passing them as `docker run -e` flags. This prevents secrets appearing in `/proc/1/environ` or `docker inspect` output on the agent host.
+
+### Released Image Signing
+
+All release Docker images (Docker Hub + ECR) are cosign-signed by digest after push, using the same key stored in `mockserver-release/cosign-key`. This allows consumers to verify image provenance. The release Docker step runs on the **release** queue (the only queue granted `read_release_secrets`, which includes the cosign key) and auto-installs a checksum-pinned cosign binary; signing is non-fatal if the key is unavailable. See [Docker](../infrastructure/docker.md#verifying-image-signatures) for the verification command.
+
+### CloudTrail Audit Events
+
+The CloudTrail trail (`mockserver-management-trail`) uses advanced event selectors to capture:
+- All management events (which include every Secrets Manager API call — `GetSecretValue` on `mockserver-build/` and `mockserver-release/` secrets is logged here)
+- All S3 object-level **data** events on the Terraform state bucket (`mockserver-terraform-state/`)
+
+Secrets Manager is not a supported CloudTrail data-event resource type, so secret access is audited via management events rather than a dedicated data-event selector (an `AWS::SecretsManager::Secret` data selector is rejected by the CloudTrail API with `InvalidEventSelectorsException`).
+
+### GuardDuty Alerting
+
+GuardDuty findings with severity ≥ 7 (HIGH and CRITICAL) trigger an EventBridge rule that forwards to the existing `buildkite-mockserver-alerts` SNS topic. The SNS topic is encrypted with `alias/aws/sns`.
+
+### KMS Encryption at Rest
+
+| Resource | CMK |
+|----------|-----|
+| Terraform state bucket | `alias/mockserver-terraform-state` (bootstrap CMK, rotation enabled) |
+| AWS Config delivery bucket | CloudTrail CMK (`alias/mockserver-cloudtrail`, shared) |
+| SNS alerts topic | `alias/aws/sns` (AWS-managed) |
+
+### VPC Flow Logs
+
+VPC flow logs are set to `traffic_type = ALL` on all four VPCs (default, trigger, release, perf queues), capturing both accepted and rejected traffic. Previously only REJECT traffic was logged.
+
+### Tfstate Lock Scoping
+
+The `buildkite-release-website-tfstate` IAM policy grants `s3:DeleteObject` only on `website/terraform.tfstate.tflock` (the S3-native lock file), not on the state file itself. GetObject/PutObject on the state file are separate statements. This prevents accidental or malicious deletion of the live state.
+
+## AI Security Review
+
+In addition to automated scanning, every code change receives a security-focused review as part of the [AI-assisted development process](ai-assisted-development.md):
+
+### Dedicated Security Auditor Agent
+
+A specialist `security-auditor` AI agent performs targeted security reviews with a checklist covering:
+
+- **Secrets & credentials** -- hardcoded tokens, API keys, connection strings, leaked PEM/JKS content, `.env` files
+- **Input validation** -- untrusted data paths, missing bounds checks, charset assumptions
+- **Injection prevention** -- command injection, LDAP injection, XSS, XXE, SSRF
+- **Network security** -- TLS defaults, certificate validation, cipher suite selection, hostname verification
+- **Java-specific** -- unsafe deserialization, `Runtime.exec()` usage, weak random, information leakage
+- **Netty-specific** -- malformed request handling, ByteBuf release, pipeline state, WebSocket validation
+- **Dependencies** -- known CVEs, version pinning, transitive dependency risk
+
+### Security Lens in Every Code Review
+
+The Review Constitution (applied to every commit, not just security-flagged ones) includes an **Insecurity lens** based on STRIDE threat modelling with 13 security principles, including MockServer-specific rules:
+
+- TLS certificate validation must be explicit
+- Control plane must be protectable
+- Template injection must be prevented
+- CORS headers must not weaken security
+
+## GitHub Security Features
+
+The repository uses several GitHub security features:
+
+| Feature | Status | Purpose |
+|---------|--------|---------|
+| [Code scanning (CodeQL)](https://github.com/mock-server/mockserver-monorepo/security/code-scanning) | Active | Static analysis for vulnerabilities |
+| [Dependabot alerts](https://github.com/mock-server/mockserver-monorepo/security/dependabot) | Active | Vulnerable dependency detection |
+| [Dependabot security updates](https://github.com/mock-server/mockserver-monorepo/security/dependabot) | Active | Automatic PRs for security fixes |
+| [Dependency graph](https://github.com/mock-server/mockserver-monorepo/network/dependencies) | Active | Transitive dependency visibility |
+| [Security advisories](https://github.com/mock-server/mockserver-monorepo/security/advisories) | Active | Private vulnerability reporting |
+| Secret scanning | Active (GitHub default) | Prevents accidental secret commits |
+
+## SNAPSHOT and Pre-Release Versions
+
+### What are SNAPSHOT versions?
+
+In the Maven ecosystem, a `-SNAPSHOT` suffix (e.g., `5.16.0-SNAPSHOT`) indicates the **in-development** version of the next release. SNAPSHOT artifacts are published to the Sonatype snapshots repository and represent the latest state of the `master` branch.
+
+### Security status of pre-release artifacts
+
+**SNAPSHOT and pre-release versions may contain unresolved security advisories.** This applies to:
+
+| Artifact | Pre-Release Identifier | Registry |
+|----------|----------------------|----------|
+| Java JARs | `-SNAPSHOT` suffix (e.g., `5.16.0-SNAPSHOT`) | Maven Central snapshots |
+| Docker images | `latest` and `SNAPSHOT` tags | Docker Hub |
+| Node.js packages | Published only at release time | npm |
+| Python package | Published only at release time | PyPI |
+| Ruby gem | Published only at release time | RubyGems |
+
+**At formal release time**, all known security issues are resolved to the extent technically possible. This means:
+
+1. All Dependabot and Snyk alerts with available patches are addressed
+2. Dependencies are updated to their latest compatible versions
+3. Any new CodeQL findings are reviewed and resolved
+4. The Snyk policy file's ignore expiry dates are reviewed and renewed only when a deliberate constraint still prevents a fix
+
+**Between releases**, the `master` branch and SNAPSHOT artifacts may temporarily carry unresolved advisories -- for example, when a new CVE is published against a dependency but the fix has not yet been integrated.
+
+### Base Image OS CVEs (Expected Baseline)
+
+Container scanners (Trivy, Grype, the ArtifactHub Helm security report) will always list a residual set of CVEs against the Debian OS packages (`libc6`, `libexpat1`, `zlib1g`, `libuuid1`, `libpng16`, `liblcms2-2`, `libbz2-1.0`) baked into the distroless base image (`gcr.io/distroless/java25` for most variants, `gcr.io/distroless/java-base-debian12` for the standard/local and AOT images). These belong to the JRE base layer, not to MockServer code or its Maven dependencies, and are **expected** — most carry `Fixed in: -` (no upstream Debian patch yet), so they cannot be remediated at build time regardless of the JRE/Java version. The pinned base-image digests are kept current automatically by Dependabot's `docker` ecosystem, so fixes are adopted as soon as distroless rebuilds. See [Docker → Base Image CVE Baseline](../infrastructure/docker.md#base-image-cve-baseline) for the full triage guide.
+
+### Go Standard Library in the Images (Health-Check Probe)
+
+Every server image ships `/mockserver-healthcheck`, a static Go binary built from `docker/healthcheck/` with the Go toolchain pinned in the Dockerfiles' `healthcheck` stage (`golang:1.27-alpine@sha256:…`, currently go1.27.x). Scanners that read Go build info (Trivy, Grype, Docker Scout) will therefore report the Go standard library at that version — often as `stdlib` — alongside the JRE and Debian packages. The probe uses only `net`, `bufio`, `strconv`, `strings`, `os` and `time` to make one plain-HTTP request to `localhost`, so most Go stdlib advisories (crypto/TLS, HTTP server, parsers) are unreachable. To clear a reported one, bump the golang tag/digest in all eight Dockerfiles together. Dependabot's `docker` ecosystem has a `healthcheck-golang` group (`patterns: ["golang"]`, `group-by: dependency-name`, no `update-types` filter) meant to bump all eight in one PR. Dependabot's grouping of Docker digest bumps has been inconsistent in this repo, though, so a bump may still arrive as several one-directory PRs. `.buildkite/scripts/steps/docker-validate-sync.sh` therefore only **warns** when the eight digests differ (it still fails if any image drops the digest pin); merge the per-directory PRs together, or close them and push one commit that moves all eight. The group is not a `-minor-and-patch` group, so these PRs are never auto-merged.
+
+### Recommendations for Consumers
+
+- **For maximum security:** Pin to a specific release version (e.g., `8.0.0`), not `latest` or `SNAPSHOT`
+- **For Renovate/Dependabot users:** Configure version constraints to only match release versions, not SNAPSHOTs
+- **For Docker users:** Use versioned tags (e.g., `mockserver/mockserver:8.0.0`) rather than `latest`
+- **Subscribe to releases:** Watch the [GitHub releases page](https://github.com/mock-server/mockserver-monorepo/releases) for new versions with resolved security issues
+
+## Vulnerability Reporting
+
+To report a security vulnerability in MockServer, use:
+- **GitHub Security Advisories:** https://github.com/mock-server/mockserver-monorepo/security/advisories/new
+- **Email:** Contact the maintainers through GitHub
+
+Do not open public issues for security vulnerabilities. See [SECURITY.md](../../SECURITY.md) for full reporting guidelines.

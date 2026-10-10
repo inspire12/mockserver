@@ -1,0 +1,1980 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>org.mock-server</groupId>
+    <artifactId>mockserver</artifactId>
+    <version>8.0.1-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <name>MockServer</name>
+    <description>A simple server to support mocking responses from any server / service that uses HTTP. The expectations
+        that configure how the MockServer will respond to incoming requests can be setup using any language that can
+        create JSON. A simple client is provided to make this easy in Java. MockServer includes a built-in MCP
+        (Model Context Protocol) server for AI coding assistant integration.
+    </description>
+    <url>https://www.mock-server.com</url>
+
+    <licenses>
+        <license>
+            <name>The Apache Software License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <scm>
+        <url>https://github.com/mock-server/mockserver-monorepo.git</url>
+        <connection>scm:git:https://github.com/mock-server/mockserver-monorepo.git</connection>
+        <developerConnection>scm:git:git@github.com:mock-server/mockserver-monorepo.git</developerConnection>
+        <tag>HEAD</tag>
+    </scm>
+
+    <distributionManagement>
+        <snapshotRepository>
+            <id>central-portal</id>
+            <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+        </snapshotRepository>
+        <repository>
+            <id>central-portal</id>
+            <url>https://central.sonatype.com/repository/maven-releases/</url>
+        </repository>
+    </distributionManagement>
+
+    <developers>
+        <developer>
+            <id>jamesdbloom</id>
+            <name>James D Bloom</name>
+            <email>jamesdbloom@gmail.com</email>
+            <url>https://blog.jamesdbloom.com</url>
+        </developer>
+    </developers>
+
+
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF8</project.build.sourceEncoding>
+        <slf4j.version>2.0.20</slf4j.version>
+        <jackson.version>2.22.3</jackson.version>
+        <jackson-annotations.version>2.22</jackson-annotations.version>
+        <velocity.version>2.4.1</velocity.version>
+        <netty.version>4.2.19.Final</netty.version>
+        <httpcomponents.version>4.4.1</httpcomponents.version>
+        <bouncycastle.version>1.86</bouncycastle.version>
+        <spring.version>7.0.9</spring.version>
+        <spring-web.version>7.0.9</spring-web.version>
+        <spring-boot.version>4.1.1</spring-boot.version>
+        <mockito.version>5.24.0</mockito.version>
+        <hamcrest.version>3.0</hamcrest.version>
+        <xmlunit.version>2.14.0</xmlunit.version>
+        <skipTests>false</skipTests>
+        <skipAssembly>false</skipAssembly>
+        <skipShade>false</skipShade>
+        <!-- the *-no-dependencies modules' -sources.jar, which Maven Central requires on release; the CI
+             build step passes false because nothing in it reads them -->
+        <mockserver.shadeSourcesJar>true</mockserver.shadeSourcesJar>
+        <mockserver.testOutput>verbose</mockserver.testOutput>
+        <mockserver.testLogLevel>ERROR</mockserver.testLogLevel>
+        <!-- Appended to every surefire/failsafe fork. Reserved for the command line (CI's ring-buffer
+             caps, a developer's port band): no module may set it, because a -D on the command line
+             replaces a pom value outright. It comes last in every argLine, so its -D flags beat the
+             argLine's own, but not a systemPropertyVariables entry (surefire applies those later). -->
+        <mockserver.testArgLine/>
+        <!-- Netty ByteBuf leak gate (see the clean/print/check-netty-leaks executions below). A module
+             opts in by setting mockserver.leakArgLine to ${mockserver.nettyLeakDetectorArgLine}; kept
+             apart from mockserver.testArgLine so that passing that one cannot remove the detector.
+             -Dmockserver.leakArgLine= on the command line turns the detector and the gate off. -->
+        <mockserver.leakArgLine/>
+        <mockserver.leakReportDir>${project.build.directory}/netty-leaks</mockserver.leakReportDir>
+        <!-- paranoid still tracks every buffer; targetRecords=0 drops only the per-access stack traces
+             ("Recent access records"), which cost most of the detector's time. A leak report keeps the
+             allocation site. For access records, re-run a module with -Dio.netty.leakDetection.targetRecords=4
+             in -Dmockserver.testArgLine (it comes after this line, so it wins). -->
+        <mockserver.nettyLeakDetectorArgLine>-Dio.netty.leakDetection.level=paranoid -Dio.netty.leakDetection.targetRecords=0 -Dio.netty.customResourceLeakDetector=org.mockserver.test.FailOnLeakResourceLeakDetector -Dmockserver.leakReportDir=${mockserver.leakReportDir}</mockserver.nettyLeakDetectorArgLine>
+        <!-- false downgrades a recorded leak to a warning while it is triaged; detection and
+             recording stay on, and a gate whose detector never ran still fails. -->
+        <mockserver.failOnNettyLeak>true</mockserver.failOnNettyLeak>
+        <!-- Empty default so the surefire/failsafe @{argLine} token always resolves. jacoco's
+             prepare-agent prepends its agent to it; without this default, invoking surefire:test or
+             failsafe:integration-test directly (no prepare-agent) passes a literal @{argLine} to the
+             fork, which crashes - and failsafe:integration-test alone reports that as BUILD SUCCESS. -->
+        <argLine/>
+        <!-- Modules where integration tests are always expected set this to true, so a verify that ran
+             zero ITs fails rather than passing. Override with -Dmockserver.failIfNoIntegrationTests=false. -->
+        <mockserver.failIfNoIntegrationTests>false</mockserver.failIfNoIntegrationTests>
+        <disableXmlReport>false</disableXmlReport>
+        <redirectTestOutputToFile>false</redirectTestOutputToFile>
+        <deploy.plugin.repository.url>https://central.sonatype.com/repository/maven-releases/</deploy.plugin.repository.url>
+        <release.arguments/>
+        <javadoc.additional.parameters/>
+        <maven-surefire-plugin.version>3.6.0</maven-surefire-plugin.version>
+        <jacoco-maven-plugin.version>0.8.15</jacoco-maven-plugin.version>
+        <!-- netty-tcnative-boringssl-static has NO version property on purpose: the imported
+             netty-bom (see dependencyManagement) is the single source of truth for the tcnative
+             version, pinning the base artifact AND every per-platform classifier in lockstep with
+             ${netty.version}. The shaded server jar ships tcnative CLASSES but no natives (they
+             cannot be shade-relocated — see mockserver-netty-no-dependencies #1778); the Docker
+             images fetch the matching native .so out-of-band, deriving the version from the jar
+             itself (META-INF/mockserver-tcnative.version, stamped at build time from this same
+             resolution) so the .so and the classes can never be different versions and there is
+             no literal for a human to keep in sync. -->
+        <protobuf.version>4.36.2</protobuf.version>
+        <!-- grpc-java: TEST SCOPE ONLY (mockserver-netty). Used to drive MockServer with a real
+             gRPC client so the gRPC wire contract (protobuf framing + grpc-status trailer) is
+             verified end-to-end rather than only at handler level. Never bundled in a release. -->
+        <grpc.version>1.84.0</grpc.version>
+        <!-- Java-WebSocket: TEST SCOPE ONLY (mockserver-netty). An implementation independent of
+             Netty, used to drive mocked WebSockets so RFC 6455 control-frame behaviour (PING/PONG
+             keepalive, CLOSE echo) is verified against a real client rather than against the same
+             library the server is built on. Never bundled in a release. -->
+        <java-websocket.version>1.6.0</java-websocket.version>
+        <!-- okhttp-sse: TEST SCOPE ONLY (mockserver-netty). A real WHATWG event-stream parser, so
+             SSE framing is verified by a client that actually parses it. Never bundled. -->
+        <okhttp-sse.version>5.5.0</okhttp-sse.version>
+        <chicory.version>1.7.5</chicory.version>
+        <hdrhistogram.version>2.2.2</hdrhistogram.version>
+        <jna.version>5.19.1</jna.version>
+        <picocli.version>4.7.7</picocli.version>
+    </properties>
+
+    <modules>
+        <module>mockserver-bom</module>
+        <module>mockserver-testing</module>
+        <module>mockserver-client-java</module>
+        <module>mockserver-client-java-no-dependencies</module>
+        <module>mockserver-core</module>
+        <module>mockserver-integration-testing</module>
+        <module>mockserver-integration-testing-no-dependencies</module>
+        <module>mockserver-war</module>
+        <module>mockserver-proxy-war</module>
+        <module>mockserver-netty</module>
+        <module>mockserver-netty-no-dependencies</module>
+        <module>mockserver-netty-docker</module>
+        <module>mockserver-junit-rule</module>
+        <module>mockserver-junit-rule-no-dependencies</module>
+        <module>mockserver-junit-jupiter</module>
+        <module>mockserver-junit-jupiter-no-dependencies</module>
+        <module>mockserver-spring-test-listener</module>
+        <module>mockserver-spring-test-listener-no-dependencies</module>
+        <module>mockserver-spring-boot-starter</module>
+        <!-- examples/java is deliberately NOT a module of this reactor. It lives at
+             the repo-root examples/java and is built + tested standalone (its parent
+             is ../../mockserver/pom.xml, so it resolves this reactor's just-installed
+             SNAPSHOT artifacts). It CANNOT be a `<module>../examples/java</module>`
+             here: that path escapes Dependabot's directory:"/mockserver" scope, and
+             with no repo-root pom.xml Dependabot re-parses a file subset, finds no
+             top-level pom and aborts EVERY grouped Maven update for this reactor with
+             "No pom.xml!" (broken from d3cfa9aaf until this was removed). CI keeps the
+             examples compiled + tested via a second Maven invocation immediately after
+             this reactor's `install` — see scripts/buildkite_quick_build.sh. Its own
+             dependency updates are covered by the /examples/java block in
+             .github/dependabot.yml. -->
+        <module>mockserver-async</module>
+        <module>mockserver-testcontainers</module>
+        <module>mockserver-state-infinispan</module>
+        <module>mockserver-blob-s3</module>
+        <module>mockserver-blob-gcs</module>
+        <module>mockserver-blob-azure</module>
+        <module>mockserver-k8s-webhook</module>
+    </modules>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- mockserver modules - all published artifacts -->
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-client-java</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-client-java-no-dependencies</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-core</artifactId>
+                <version>${project.version}</version>
+                <type>test-jar</type>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-junit-jupiter</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-junit-jupiter-no-dependencies</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-junit-rule</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-junit-rule-no-dependencies</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-async</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-netty</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-netty</artifactId>
+                <version>${project.version}</version>
+                <classifier>jar-with-dependencies</classifier>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-netty-no-dependencies</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-proxy-war</artifactId>
+                <version>${project.version}</version>
+                <type>war</type>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-proxy-war</artifactId>
+                <version>${project.version}</version>
+                <classifier>classes</classifier>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-spring-test-listener</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-spring-test-listener-no-dependencies</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-spring-boot-starter</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-war</artifactId>
+                <version>${project.version}</version>
+                <type>war</type>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-war</artifactId>
+                <version>${project.version}</version>
+                <classifier>classes</classifier>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-integration-testing</artifactId>
+                <version>${project.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-integration-testing-no-dependencies</artifactId>
+                <version>${project.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-testing</artifactId>
+                <version>${project.version}</version>
+                <scope>test</scope>
+            </dependency>
+
+            <!-- disruptor -->
+            <dependency>
+                <groupId>com.lmax</groupId>
+                <artifactId>disruptor</artifactId>
+                <version>4.0.0</version>
+            </dependency>
+
+            <!-- http -->
+            <dependency>
+                <groupId>jakarta.servlet</groupId>
+                <artifactId>jakarta.servlet-api</artifactId>
+                <version>6.1.0</version>
+            </dependency>
+
+            <!-- Tomcat Server -->
+            <dependency>
+                <groupId>org.apache.tomcat.embed</groupId>
+                <artifactId>tomcat-embed-core</artifactId>
+                <version>11.0.26</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.tomcat.embed</groupId>
+                <artifactId>tomcat-embed-logging-juli</artifactId>
+                <version>8.5.2</version>
+            </dependency>
+
+            <!-- Apache HTTP Client -->
+            <dependency>
+                <groupId>org.apache.httpcomponents</groupId>
+                <artifactId>httpclient</artifactId>
+                <version>4.5.14</version>
+            </dependency>
+
+            <!-- Netty -->
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-bom</artifactId>
+                <version>${netty.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-buffer</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-codec</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-codec-http</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-codec-http2</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-codec-socks</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-common</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-handler</artifactId>
+                <version>${netty.version}</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>io.netty</groupId>
+                        <artifactId>netty-tcnative-classes</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-handler-proxy</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-transport</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-transport-native-unix-common</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <!-- netty-tcnative-boringssl-static (base + all per-platform classifier artifacts) is
+                 governed by the imported netty-bom above, so its version always tracks
+                 ${netty.version} and can never diverge from the classifier natives — which is exactly
+                 what the enforcer DependencyConvergence rule checks. Do NOT re-add an explicit
+                 <version> or a version property here: that override is precisely what caused the
+                 recurring convergence break on every netty bump (a bump moved the bom-governed
+                 classifiers while the override kept the base pinned to the old version). The shaded
+                 server jar ships tcnative CLASSES but no natives; the Docker images fetch the
+                 matching native .so out-of-band, deriving the version from the jar itself
+                 (META-INF/mockserver-tcnative.version, stamped from this same resolution) so the
+                 .so can never drift from the classes. -->
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-resolver</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-resolver-dns</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-codec-dns</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-resolver-dns-native-macos</artifactId>
+                <version>${netty.version}</version>
+                <classifier>osx-x86_64</classifier>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-resolver-dns-classes-macos</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-transport-native-epoll</artifactId>
+                <version>${netty.version}</version>
+                <classifier>linux-x86_64</classifier>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-transport-native-epoll</artifactId>
+                <version>${netty.version}</version>
+                <classifier>linux-aarch_64</classifier>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-transport-classes-epoll</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+
+            <!-- JNA — used by SoOriginalDstResolver for getsockopt(SO_ORIGINAL_DST) -->
+            <dependency>
+                <groupId>net.java.dev.jna</groupId>
+                <artifactId>jna</artifactId>
+                <version>${jna.version}</version>
+            </dependency>
+
+            <!-- log4j-api: pinned to resolve GHSA-qv9r-c865-cp47. Arrives transitively (compile
+                 scope) via spring-boot-starter-logging -> log4j-to-slf4j and lands in a shaded
+                 artifact. This manages log4j-api only (not log4j-core, which is not on the tree). -->
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-api</artifactId>
+                <version>2.26.1</version>
+            </dependency>
+
+            <!-- jsoup: pinned to resolve GHSA-pmhh-3w7g-xqp8. Test scope only (never shipped);
+                 the pin guards against a future transitive downgrade below the fixed version. -->
+            <dependency>
+                <groupId>org.jsoup</groupId>
+                <artifactId>jsoup</artifactId>
+                <version>1.23.2</version>
+            </dependency>
+
+            <!-- lz4-java: pinned to 1.11.1 to resolve GHSA-6qcp-4vqm-vf35 (native XXHash JVM
+                 crash; vulnerable <=1.11.0). This is the at.yawk.lz4 fork coordinate (not org.lz4),
+                 arriving transitively via org.apache.kafka:kafka-clients:3.9.2 — optional in
+                 mockserver-netty and runtime in mockserver-async. -->
+            <dependency>
+                <groupId>at.yawk.lz4</groupId>
+                <artifactId>lz4-java</artifactId>
+                <version>1.12.0</version>
+            </dependency>
+
+            <!-- commons-compress: pinned to 1.27.1 to resolve GHSA advisories against the
+                 >=1.21, <1.26.0 range. Arrives transitively (test scope) via
+                 org.testcontainers:testcontainers:1.21.4, which resolves it at 1.24.0. This direct
+                 pin overrides that without bumping testcontainers, which is deliberately held at
+                 1.21.4 for Docker Desktop 4.67+ compatibility (see docs/operations/security.md). -->
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-compress</artifactId>
+                <version>1.28.0</version>
+            </dependency>
+
+            <!-- HTTP/3 (QUIC) — graduated from incubator into Netty 4.2; native
+                 QUIC transport required at runtime. The codec version is aligned
+                 with ${netty.version} — no separate version property needed. -->
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-codec-http3</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+
+            <!-- protobuf (gRPC support) -->
+            <dependency>
+                <groupId>com.google.protobuf</groupId>
+                <artifactId>protobuf-java</artifactId>
+                <version>${protobuf.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.google.protobuf</groupId>
+                <artifactId>protobuf-java-util</artifactId>
+                <version>${protobuf.version}</version>
+            </dependency>
+
+            <!-- grpc-java (TEST SCOPE ONLY, see the grpc.version property comment).
+                 grpc-netty-shaded is used in preference to grpc-netty because grpc-netty
+                 targets Netty 4.1.x while MockServer runs Netty 4.2; the shaded artifact bundles
+                 its own relocated Netty so the test client cannot be broken by, or break, the
+                 server's Netty version. -->
+            <dependency>
+                <groupId>io.grpc</groupId>
+                <artifactId>grpc-netty-shaded</artifactId>
+                <version>${grpc.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.grpc</groupId>
+                <artifactId>grpc-stub</artifactId>
+                <version>${grpc.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.java-websocket</groupId>
+                <artifactId>Java-WebSocket</artifactId>
+                <version>${java-websocket.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.squareup.okhttp3</groupId>
+                <artifactId>okhttp-sse</artifactId>
+                <version>${okhttp-sse.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.grpc</groupId>
+                <artifactId>grpc-protobuf</artifactId>
+                <version>${grpc.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.google.errorprone</groupId>
+                <artifactId>error_prone_annotations</artifactId>
+                <version>2.50.0</version>
+            </dependency>
+            <dependency>
+                <groupId>com.google.j2objc</groupId>
+                <artifactId>j2objc-annotations</artifactId>
+                <version>3.1</version>
+            </dependency>
+
+            <!-- gzip HTTP deflater & inflater -->
+            <dependency>
+                <groupId>com.jcraft</groupId>
+                <artifactId>jzlib</artifactId>
+                <version>1.1.3</version>
+            </dependency>
+
+            <!-- non-blocking UUID -->
+            <dependency>
+                <groupId>com.fasterxml.uuid</groupId>
+                <artifactId>java-uuid-generator</artifactId>
+                <version>5.2.0</version>
+            </dependency>
+
+            <!-- SSL X509 -->
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcprov-jdk18on</artifactId>
+                <version>${bouncycastle.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcpkix-jdk18on</artifactId>
+                <version>${bouncycastle.version}</version>
+            </dependency>
+
+            <!-- JWT -->
+            <dependency>
+                <groupId>com.nimbusds</groupId>
+                <artifactId>nimbus-jose-jwt</artifactId>
+                <version>10.10</version>
+            </dependency>
+            <!--
+                OAuth2/OIDC SDK - TEST SCOPE ONLY. An independent, spec-driven implementation used to
+                assert that the mock OIDC provider's discovery, token and introspection responses are
+                actually conformant. MockServer's OIDC conformance was previously asserted only against
+                MockServer's own objects, which is how introspection came to report active:true for
+                arbitrary tokens without a single test failing.
+            -->
+            <dependency>
+                <groupId>com.nimbusds</groupId>
+                <artifactId>oauth2-oidc-sdk</artifactId>
+                <version>11.38.2</version>
+                <scope>test</scope>
+            </dependency>
+
+            <!-- templating -->
+            <dependency>
+                <groupId>org.apache.velocity</groupId>
+                <artifactId>velocity-engine-scripting</artifactId>
+                <version>${velocity.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.velocity</groupId>
+                <artifactId>velocity-engine-core</artifactId>
+                <version>${velocity.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.velocity.tools</groupId>
+                <artifactId>velocity-tools-generic</artifactId>
+                <version>3.1</version>
+            </dependency>
+            <dependency>
+                <groupId>com.samskivert</groupId>
+                <artifactId>jmustache</artifactId>
+                <version>1.16</version>
+            </dependency>
+            <dependency>
+                <groupId>net.datafaker</groupId>
+                <artifactId>datafaker</artifactId>
+                <version>2.7.0</version>
+            </dependency>
+            <!-- pin libphonenumber to resolve convergence: datafaker:2.5.4 wants 9.0.23,
+                 com.github.java-json-tools:json-schema-validator:2.2.14 (transitive of
+                 swagger-parser) wants 8.11.1. Take the newer line. -->
+            <dependency>
+                <groupId>com.googlecode.libphonenumber</groupId>
+                <artifactId>libphonenumber</artifactId>
+                <version>9.0.40</version>
+            </dependency>
+
+            <!-- javascript (GraalVM polyglot) -->
+            <dependency>
+                <groupId>org.graalvm.polyglot</groupId>
+                <artifactId>polyglot</artifactId>
+                <version>25.4.4.1.1</version>
+            </dependency>
+            <dependency>
+                <groupId>org.graalvm.polyglot</groupId>
+                <artifactId>js</artifactId>
+                <version>25.4.4.1.1</version>
+                <type>pom</type>
+            </dependency>
+            <dependency>
+                <groupId>org.ow2.asm</groupId>
+                <artifactId>asm</artifactId>
+                <version>9.11</version>
+            </dependency>
+            <dependency>
+                <groupId>org.ow2.asm</groupId>
+                <artifactId>asm-commons</artifactId>
+                <version>9.11</version>
+            </dependency>
+            <dependency>
+                <groupId>org.ow2.asm</groupId>
+                <artifactId>asm-tree</artifactId>
+                <version>9.11</version>
+            </dependency>
+            <dependency>
+                <groupId>org.ow2.asm</groupId>
+                <artifactId>asm-util</artifactId>
+                <version>9.11</version>
+            </dependency>
+
+            <!-- json (object serialisation) -->
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-core</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-annotations</artifactId>
+                <version>${jackson-annotations.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-databind</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>net.javacrumbs.json-unit</groupId>
+                <artifactId>json-unit-core</artifactId>
+                <version>6.3.0</version>
+            </dependency>
+
+            <!-- json validation -->
+            <dependency>
+                <groupId>com.networknt</groupId>
+                <artifactId>json-schema-validator</artifactId>
+                <version>3.0.8</version>
+            </dependency>
+            <!-- Jackson 3 (tools.jackson): pinned to 3.1.5 to resolve GHSA-5gvw-p9qm-jgwh
+                 (vulnerable >=3.0.0, <=3.1.4; first patched 3.1.5). Arrives transitively via
+                 com.networknt:json-schema-validator:3.0.6 (compile scope) and is shade-relocated
+                 to shaded_package.tools.jackson, so it ships in every distributed jar. All three
+                 coupled artifacts (databind, core, dataformat-yaml) resolve in lockstep and must
+                 be pinned together, otherwise maven-enforcer DependencyConvergence fails. -->
+            <dependency>
+                <groupId>tools.jackson.core</groupId>
+                <artifactId>jackson-databind</artifactId>
+                <version>3.2.3</version>
+            </dependency>
+            <dependency>
+                <groupId>tools.jackson.core</groupId>
+                <artifactId>jackson-core</artifactId>
+                <version>3.2.3</version>
+            </dependency>
+            <dependency>
+                <groupId>tools.jackson.dataformat</groupId>
+                <artifactId>jackson-dataformat-yaml</artifactId>
+                <version>3.2.3</version>
+            </dependency>
+            <dependency>
+                <groupId>com.jayway.jsonpath</groupId>
+                <artifactId>json-path</artifactId>
+                <version>3.0.0</version>
+            </dependency>
+            <!-- RFC 6902 JSON Patch and RFC 7386 JSON Merge Patch; already resolves
+                 transitively via json-schema-validator, declared here so the version is
+                 pinned and mockserver-core can depend on it directly. -->
+            <dependency>
+                <groupId>com.github.java-json-tools</groupId>
+                <artifactId>json-patch</artifactId>
+                <version>1.13</version>
+            </dependency>
+
+            <!-- open api -->
+            <dependency>
+                <groupId>io.swagger.parser.v3</groupId>
+                <artifactId>swagger-parser</artifactId>
+                <version>2.1.48</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>com.github.fge</groupId>
+                        <artifactId>json-patch</artifactId>
+                    </exclusion>
+                    <exclusion>
+                        <groupId>javax.validation</groupId>
+                        <artifactId>validation-api</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+            <!-- used by swagger-parser force version due to CVEs -->
+            <dependency>
+                <groupId>org.mozilla</groupId>
+                <artifactId>rhino</artifactId>
+                <version>1.9.1</version>
+            </dependency>
+
+            <!-- graphql schema parsing + response synthesis (schema-valid GraphQL responses).
+                 26.x ships Java 11 bytecode and runs on the Java 17 floor. Newer majors are
+                 ceiling-pinned in .github/dependabot.yml in case they raise the floor — keep that
+                 ceiling ABOVE this version, or it suppresses every update to this dependency
+                 (it read >=25.0.0 while this was already 26.0, which silently blocked them all). -->
+            <dependency>
+                <groupId>com.graphql-java</groupId>
+                <artifactId>graphql-java</artifactId>
+                <version>26.1</version>
+            </dependency>
+            <!-- Converge reactive-streams: graphql-java brings 1.0.3 while infinispan/rxjava bring 1.0.4.
+                 Pin to 1.0.4 (a backward-compatible patch) so maven-enforcer DependencyConvergence passes in
+                 mockserver-state-infinispan. -->
+            <dependency>
+                <groupId>org.reactivestreams</groupId>
+                <artifactId>reactive-streams</artifactId>
+                <version>1.0.4</version>
+            </dependency>
+
+            <!-- xml -->
+            <dependency>
+                <groupId>jakarta.xml.bind</groupId>
+                <artifactId>jakarta.xml.bind-api</artifactId>
+                <version>4.0.5</version>
+            </dependency>
+            <dependency>
+                <groupId>com.sun.xml.bind</groupId>
+                <artifactId>jaxb-impl</artifactId>
+                <version>4.0.9</version>
+            </dependency>
+            <dependency>
+                <groupId>org.xmlunit</groupId>
+                <artifactId>xmlunit-core</artifactId>
+                <version>${xmlunit.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.xmlunit</groupId>
+                <artifactId>xmlunit-placeholders</artifactId>
+                <version>${xmlunit.version}</version>
+            </dependency>
+
+            <!-- commons & guava -->
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-lang3</artifactId>
+                <version>3.21.0</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-text</artifactId>
+                <version>1.15.0</version>
+            </dependency>
+            <dependency>
+                <groupId>commons-codec</groupId>
+                <artifactId>commons-codec</artifactId>
+                <version>1.22.1</version>
+            </dependency>
+            <dependency>
+                <groupId>commons-io</groupId>
+                <artifactId>commons-io</artifactId>
+                <version>2.22.0</version>
+            </dependency>
+            <dependency>
+                <groupId>com.google.guava</groupId>
+                <artifactId>guava</artifactId>
+                <version>33.7.2-jre</version>
+            </dependency>
+            <!-- Pin jspecify to resolve convergence: com.google.guava (33.7.0-jre onward) wants
+                 1.0.1, while com.graphql-java:graphql-java -> com.graphql-java:java-dataloader:6.0.0
+                 wants 1.0.0. There is no managed version, so the two transitive paths diverge the
+                 moment guava moves (PR #2555). jspecify is an annotation-only artifact and 1.0.1 is
+                 a backward-compatible patch that neither consumer rejects, so pin the newer line and
+                 maven-enforcer DependencyConvergence passes across future guava / graphql-java bumps. -->
+            <dependency>
+                <groupId>org.jspecify</groupId>
+                <artifactId>jspecify</artifactId>
+                <version>1.0.1</version>
+            </dependency>
+
+            <!-- classpath scanning -->
+            <dependency>
+                <groupId>io.github.classgraph</groupId>
+                <artifactId>classgraph</artifactId>
+                <version>4.8.197</version>
+            </dependency>
+
+            <!-- logging -->
+            <dependency> <!-- will map to any underlying logging framework -->
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-api</artifactId>
+                <version>${slf4j.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-jdk14</artifactId>
+                <version>${slf4j.version}</version>
+                <optional>true</optional> <!-- do not impose on project importing mock-server -->
+            </dependency>
+            <!-- TEST-scope SLF4J provider. slf4j-jdk14 above is <optional>, so it is NOT transitive:
+                 a module whose tests run a full in-process MockServer resolves slf4j-api with no
+                 provider and SLF4J falls back to the NOP logger, silently discarding every server log
+                 line (including the diagnostics a failing CI run needs). Managed here so the version
+                 can never drift from ${slf4j.version}; declare it version-less where it is needed. -->
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-simple</artifactId>
+                <version>${slf4j.version}</version>
+                <scope>test</scope>
+            </dependency>
+
+            <!-- prometheus -->
+            <dependency>
+                <groupId>io.prometheus</groupId>
+                <artifactId>prometheus-metrics-core</artifactId>
+                <version>1.9.0</version>
+            </dependency>
+            <dependency>
+                <groupId>io.prometheus</groupId>
+                <artifactId>prometheus-metrics-exposition-formats</artifactId>
+                <version>1.9.0</version>
+            </dependency>
+            <dependency>
+                <groupId>io.prometheus</groupId>
+                <artifactId>prometheus-metrics-model</artifactId>
+                <version>1.9.0</version>
+            </dependency>
+            <!-- snappy (raw block format) — required by the Prometheus Remote-Write v1 push exporter -->
+            <dependency>
+                <groupId>org.xerial.snappy</groupId>
+                <artifactId>snappy-java</artifactId>
+                <version>1.1.10.11</version>
+            </dependency>
+
+            <!-- dnsjava (test scope only) — independent DNS wire parser used to verify that the
+                 bytes MockServer's DNS mock emits are decodable by a real third-party resolver -->
+            <dependency>
+                <groupId>dnsjava</groupId>
+                <artifactId>dnsjava</artifactId>
+                <version>3.6.5</version>
+                <scope>test</scope>
+            </dependency>
+
+            <!-- opentelemetry (optional metrics export; off by default) -->
+            <dependency>
+                <groupId>io.opentelemetry</groupId>
+                <artifactId>opentelemetry-bom</artifactId>
+                <version>1.66.0</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- spring -->
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-beans</artifactId>
+                <version>${spring.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-context</artifactId>
+                <version>${spring.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-test</artifactId>
+                <version>${spring.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-web</artifactId>
+                <version>${spring-web.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-core</artifactId>
+                <version>${spring-web.version}</version>
+            </dependency>
+
+            <!-- spring boot (mockserver-spring-boot-starter) -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-autoconfigure</artifactId>
+                <version>${spring-boot.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot</artifactId>
+                <version>${spring-boot.version}</version>
+            </dependency>
+
+            <!-- test -->
+            <dependency>
+                <groupId>junit</groupId>
+                <artifactId>junit</artifactId>
+                <version>4.13.2</version>
+            </dependency>
+            <dependency>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter-engine</artifactId>
+                <version>6.1.3</version>
+            </dependency>
+            <dependency>
+                <groupId>org.mockito</groupId>
+                <artifactId>mockito-core</artifactId>
+                <version>${mockito.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.mockito</groupId>
+                <artifactId>mockito-junit-jupiter</artifactId>
+                <version>${mockito.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.hamcrest</groupId>
+                <artifactId>hamcrest</artifactId>
+                <version>${hamcrest.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.skyscreamer</groupId>
+                <artifactId>jsonassert</artifactId>
+                <version>1.5.3</version>
+            </dependency>
+
+            <!-- Fixes for vulnerable transitive dependencies -->
+            <dependency>
+                <!-- from velocity-tools-generic -->
+                <groupId>commons-collections</groupId>
+                <artifactId>commons-collections</artifactId>
+                <version>3.2.2</version>
+            </dependency>
+
+            <!-- Fixes for conflicting transitive dependencies -->
+            <dependency>
+                <!-- Conflicting versions in json-unit-core and junit -->
+                <groupId>org.hamcrest</groupId>
+                <artifactId>hamcrest-core</artifactId>
+                <version>${hamcrest.version}</version>
+            </dependency>
+            <dependency>
+                <!-- Conflicting versions in json-schema-validator and guava -->
+                <groupId>com.google.code.findbugs</groupId>
+                <artifactId>jsr305</artifactId>
+                <version>3.0.2</version>
+            </dependency>
+            <dependency>
+                <!-- Conflicting versions in jakarta.xml.bind-api and jaxb-core -->
+                <groupId>com.sun.activation</groupId>
+                <artifactId>jakarta.activation</artifactId>
+                <version>2.0.1</version>
+            </dependency>
+            <dependency>
+                <!-- Conflicting versions in swagger-parser and swagger-core -->
+                <groupId>com.fasterxml.jackson.dataformat</groupId>
+                <artifactId>jackson-dataformat-yaml</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <!-- Conflicting versions in swagger-parser and project jackson.version -->
+                <groupId>com.fasterxml.jackson.datatype</groupId>
+                <artifactId>jackson-datatype-jsr310</artifactId>
+                <version>${jackson.version}</version>
+            </dependency>
+            <dependency>
+                <!-- Source-of-truth version for commons-beanutils. velocity-tools-generic and
+                     commons-digester3 declare vulnerable 1.9.4/1.8.3 (GHSA-wxr5-93ph-8wr9); mockserver-core
+                     excludes those edges and declares commons-beanutils directly so this fixed version is
+                     used by the build AND propagated to downstream consumers (dependencyManagement is not
+                     transitive). -->
+                <groupId>commons-beanutils</groupId>
+                <artifactId>commons-beanutils</artifactId>
+                <version>1.11.0</version>
+            </dependency>
+            <dependency>
+                <!-- Conflicting versions in commons-beanutils and commons-digester3 and swagger-parser -->
+                <groupId>commons-logging</groupId>
+                <artifactId>commons-logging</artifactId>
+                <version>1.4.0</version>
+            </dependency>
+            <dependency>
+                <!-- Conflicting versions in swagger-parser -->
+                <groupId>org.yaml</groupId>
+                <artifactId>snakeyaml</artifactId>
+                <version>2.7</version>
+            </dependency>
+            <!-- WASM (chicory pure-Java interpreter) -->
+            <dependency>
+                <groupId>com.dylibso.chicory</groupId>
+                <artifactId>runtime</artifactId>
+                <version>${chicory.version}</version>
+            </dependency>
+
+            <!-- CLI (picocli — used for the Main entry point) -->
+            <dependency>
+                <groupId>info.picocli</groupId>
+                <artifactId>picocli</artifactId>
+                <version>${picocli.version}</version>
+            </dependency>
+
+            <!-- HdrHistogram (zero-transitive-dependency latency histogram for load-scenario percentiles) -->
+            <dependency>
+                <groupId>org.hdrhistogram</groupId>
+                <artifactId>HdrHistogram</artifactId>
+                <version>${hdrhistogram.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <profiles>
+        <profile>
+            <id>kill_mockserver_instances</id>
+            <activation>
+                <file>
+                    <exists>/usr/bin/env</exists>
+                </file>
+            </activation>
+
+            <build>
+                <plugins>
+                    <!-- ensure no existing mock server instances running -->
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.6.4</version>
+                        <inherited>false</inherited>
+                        <configuration>
+                            <workingDirectory>${basedir}</workingDirectory>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>kill_mockserver_instances</id>
+                                <phase>clean</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <executable>../scripts/stop_MockServer.sh</executable>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!-- disable javadoc linting only in java 8 -->
+        <profile>
+            <id>disable-java8-doclint</id>
+            <activation>
+                <jdk>[1.8,)</jdk>
+            </activation>
+            <properties>
+                <additionalparam>-Xdoclint:none</additionalparam>
+            </properties>
+        </profile>
+        <profile>
+            <id>release</id>
+            <build>
+                <plugins>
+                    <!-- generate sources -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-source-plugin</artifactId>
+                        <version>3.4.0</version>
+                        <executions>
+                            <execution>
+                                <id>attach-sources</id>
+                                <goals>
+                                    <goal>jar-no-fork</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <!-- generate javadoc -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <version>3.12.0</version>
+                        <configuration>
+                            <failOnError>false</failOnError>
+                            <doclint>none</doclint>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>attach-javadocs</id>
+                                <goals>
+                                    <goal>jar</goal>
+                                </goals>
+                            </execution>
+                            <execution>
+                                <id>aggregate</id>
+                                <goals>
+                                    <goal>aggregate</goal>
+                                </goals>
+                                <phase>site</phase>
+                                <configuration>
+                                    <reportOutputDirectory>${basedir}/jekyll-www.mock-server.com/_site
+                                    </reportOutputDirectory>
+                                    <destDir>apidocs</destDir>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <!-- sign releases -->
+                    <!-- Error:
+                          gpg: signing failed: Inappropriate ioctl for device
+                         Fix:
+                          $ GPG_TTY=$(tty)
+                          $ export GPG_TTY -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>3.2.8</version>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>sign</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <!-- publish to Sonatype Central Portal -->
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>0.11.0</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>central-portal</publishingServerId>
+                            <autoPublish>false</autoPublish>
+                            <waitUntil>validated</waitUntil>
+                        </configuration>
+                    </plugin>
+                    <!-- perform releases -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-release-plugin</artifactId>
+                        <version>3.3.1</version>
+                        <configuration>
+                            <autoVersionSubmodules>true</autoVersionSubmodules>
+                            <useReleaseProfile>false</useReleaseProfile>
+                            <releaseProfiles>release</releaseProfiles>
+                            <goals>deploy</goals>
+                            <arguments>${release.arguments}</arguments>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <!-- Shared shade configuration for the six *-no-dependencies modules.
+                     Each module inherits this by declaring a bare maven-shade-plugin
+                     reference; the Automatic-Module-Name is derived per module from
+                     ${module.name}. mockserver-netty-no-dependencies overrides the
+                     transformers (to set the executable jar's Main-Class) and the
+                     filters (to strip the bundled netty-tcnative native libraries,
+                     which the other five modules deliberately keep). Child list
+                     elements replace rather than append in the pluginManagement merge,
+                     so those overrides use combine.self="override". A bundled package missing from
+                     the relocations below fails each module's assert-only-relocated-classes.sh. -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-shade-plugin</artifactId>
+                    <version>3.6.2</version>
+                    <configuration>
+                        <skip>${skipShade}</skip>
+                    </configuration>
+                    <executions>
+                        <execution>
+                            <id>shade-no-dependencies</id>
+                            <phase>package</phase>
+                            <goals>
+                                <goal>shade</goal>
+                            </goals>
+                            <configuration>
+                                <transformers>
+                                    <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheLicenseResourceTransformer"/>
+                                    <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                                    <transformer implementation="org.apache.maven.plugins.shade.resource.AppendingTransformer">
+                                        <resource>META-INF/LICENSE</resource>
+                                    </transformer>
+                                    <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                        <manifestEntries>
+                                            <Automatic-Module-Name>${module.name}</Automatic-Module-Name>
+                                        </manifestEntries>
+                                    </transformer>
+                                </transformers>
+                                <createSourcesJar>${mockserver.shadeSourcesJar}</createSourcesJar>
+                                <shadeSourcesContent>true</shadeSourcesContent>
+                                <shadedArtifactAttached>false</shadedArtifactAttached>
+                                <createDependencyReducedPom>false</createDependencyReducedPom>
+                                <keepDependenciesWithProvidedScope>false</keepDependenciesWithProvidedScope>
+                                <minimizeJar>false</minimizeJar>
+                                <relocations>
+                                    <relocation>
+                                        <pattern>com.dylibso</pattern>
+                                        <shadedPattern>shaded_package.com.dylibso</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>com.ethlo</pattern>
+                                        <shadedPattern>shaded_package.com.ethlo</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>com.fasterxml</pattern>
+                                        <shadedPattern>shaded_package.com.fasterxml</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>com.github</pattern>
+                                        <shadedPattern>shaded_package.com.github</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>com.google</pattern>
+                                        <shadedPattern>shaded_package.com.google</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>com.jayway</pattern>
+                                        <shadedPattern>shaded_package.com.jayway</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>com.jcraft</pattern>
+                                        <shadedPattern>shaded_package.com.jcraft</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>com.lmax</pattern>
+                                        <shadedPattern>shaded_package.com.lmax</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>com.networknt</pattern>
+                                        <shadedPattern>shaded_package.com.networknt</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>com.nimbusds</pattern>
+                                        <shadedPattern>shaded_package.com.nimbusds</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>com.rabbitmq</pattern>
+                                        <shadedPattern>shaded_package.com.rabbitmq</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>com.samskivert</pattern>
+                                        <shadedPattern>shaded_package.com.samskivert</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <!-- Third-party com.sun.* libraries (JNA, istack-commons, txw2) ARE bundled here
+                                             and must stay relocated. The excluded subpackages are JDK-owned, NOT bundled:
+                                             relocating a reference to a JDK class rewrites it to shaded_package.* which
+                                             never resolves at runtime, so an instanceof silently turns false and the
+                                             feature dies with no error. The excluded packages are the JDK ones MockServer
+                                             references. assert-jdk-com-sun-not-relocated.sh guards this over the shaded jar. -->
+                                        <pattern>com.sun</pattern>
+                                        <shadedPattern>shaded_package.com.sun</shadedPattern>
+                                        <excludes>
+                                            <exclude>com.sun.management.**</exclude>   <!-- jdk.management -->
+                                            <exclude>com.sun.net.httpserver.**</exclude> <!-- jdk.httpserver -->
+                                            <exclude>com.sun.nio.sctp.**</exclude>     <!-- jdk.sctp -->
+                                        </excludes>
+                                    </relocation>
+                                    <relocation>
+                                        <!-- A one-segment pattern also matches path strings: without the trailing dot
+                                             MockServer's "/graphql" endpoint literal became "/shaded_package/graphql". -->
+                                        <pattern>graphql.</pattern>
+                                        <shadedPattern>shaded_package.graphql.</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>io.github</pattern>
+                                        <shadedPattern>shaded_package.io.github</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>io.netty</pattern>
+                                        <shadedPattern>shaded_package.io.netty</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>io.swagger</pattern>
+                                        <shadedPattern>shaded_package.io.swagger</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>io.prometheus</pattern>
+                                        <shadedPattern>shaded_package.io.prometheus</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>io.opentelemetry</pattern>
+                                        <shadedPattern>shaded_package.io.opentelemetry</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>jakarta.activation</pattern>
+                                        <shadedPattern>shaded_package.jakarta.activation</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>jakarta.xml</pattern>
+                                        <shadedPattern>shaded_package.jakarta.xml</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>jakarta.annotation</pattern>
+                                        <shadedPattern>shaded_package.jakarta.annotation</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>javax.annotation</pattern>
+                                        <shadedPattern>shaded_package.javax.annotation</shadedPattern>
+                                        <excludes>
+                                            <exclude>javax.annotation.processing.**</exclude> <!-- java.compiler -->
+                                        </excludes>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>javax.mail</pattern>
+                                        <shadedPattern>shaded_package.javax.mail</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>javax.validation</pattern>
+                                        <shadedPattern>shaded_package.javax.validation</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>jakarta.servlet</pattern>
+                                        <shadedPattern>shaded_package.jakarta.servlet</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>jakarta.validation</pattern>
+                                        <shadedPattern>shaded_package.jakarta.validation</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>joptsimple.</pattern>
+                                        <shadedPattern>shaded_package.joptsimple.</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>net.datafaker</pattern>
+                                        <shadedPattern>shaded_package.net.datafaker</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>net.javacrumbs</pattern>
+                                        <shadedPattern>shaded_package.net.javacrumbs</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>net.jcip</pattern>
+                                        <shadedPattern>shaded_package.net.jcip</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>net.minidev</pattern>
+                                        <shadedPattern>shaded_package.net.minidev</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>nonapi.io</pattern>
+                                        <shadedPattern>shaded_package.nonapi.io</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.apache</pattern>
+                                        <shadedPattern>shaded_package.org.apache</shadedPattern>
+                                        <excludes>
+                                            <exclude>org.apache.velocity.**</exclude>
+                                        </excludes>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.bouncycastle</pattern>
+                                        <shadedPattern>shaded_package.org.bouncycastle</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.checkerframework</pattern>
+                                        <shadedPattern>shaded_package.org.checkerframework</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.dataloader</pattern>
+                                        <shadedPattern>shaded_package.org.dataloader</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.eclipse.angus</pattern>
+                                        <shadedPattern>shaded_package.org.eclipse.angus</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.eclipse.paho</pattern>
+                                        <shadedPattern>shaded_package.org.eclipse.paho</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <!-- the slf4j-jdk14 provider the netty jar bundles; the SLF4J API stays unrelocated
+                                             (MockServer logs through the user's provider). Slf4jProviderFallback names it. -->
+                                        <pattern>org.slf4j.jul</pattern>
+                                        <shadedPattern>shaded_package.org.slf4j.jul</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.glassfish</pattern>
+                                        <shadedPattern>shaded_package.org.glassfish</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.HdrHistogram</pattern>
+                                        <shadedPattern>shaded_package.org.HdrHistogram</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.hamcrest</pattern>
+                                        <shadedPattern>shaded_package.org.hamcrest</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.jspecify</pattern>
+                                        <shadedPattern>shaded_package.org.jspecify</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.joda</pattern>
+                                        <shadedPattern>shaded_package.org.joda</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.objectweb</pattern>
+                                        <shadedPattern>shaded_package.org.objectweb</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <!-- json-unit's Diff throws opentest4j's AssertionFailedError; MockServer only calls similar() -->
+                                        <pattern>org.opentest4j</pattern>
+                                        <shadedPattern>shaded_package.org.opentest4j</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.reactivestreams</pattern>
+                                        <shadedPattern>shaded_package.org.reactivestreams</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.xmlunit</pattern>
+                                        <shadedPattern>shaded_package.org.xmlunit</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>org.yaml</pattern>
+                                        <shadedPattern>shaded_package.org.yaml</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <pattern>picocli.</pattern>
+                                        <shadedPattern>shaded_package.picocli.</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <!-- Jackson 3.x (tools.jackson) used internally by json-schema-validator 3.x -->
+                                        <pattern>tools.jackson</pattern>
+                                        <shadedPattern>shaded_package.tools.jackson</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <!-- snakeyaml-engine used by json-schema-validator 3.x for YAML schema support -->
+                                        <pattern>org.snakeyaml</pattern>
+                                        <shadedPattern>shaded_package.org.snakeyaml</shadedPattern>
+                                    </relocation>
+                                    <relocation>
+                                        <!-- Relocated netty loads its JNI library by a package-mangled name
+                                             (shaded_package. -> shaded_1package_), so the epoll .so must be renamed
+                                             to match or Epoll.isAvailable() is false and the server silently runs NIO.
+                                             assert-shaded-epoll-natives.sh guards this over the shaded jar. -->
+                                        <pattern>META-INF/native/libnetty_transport_native_epoll_</pattern>
+                                        <shadedPattern>META-INF/native/libshaded_1package_netty_transport_native_epoll_</shadedPattern>
+                                    </relocation>
+                                </relocations>
+                                <filters>
+                                    <filter>
+                                        <artifact>*:*</artifact>
+                                        <excludes>
+                                            <exclude>META-INF/*.SF</exclude>
+                                            <exclude>META-INF/*.DSA</exclude>
+                                            <exclude>META-INF/*.RSA</exclude>
+                                        </excludes>
+                                    </filter>
+                                    <filter>
+                                        <artifact>com.github.java-json-tools:json-schema-validator</artifact>
+                                        <excludes>
+                                            <exclude>draftv3/**</exclude>
+                                            <exclude>draftv4/**</exclude>
+                                        </excludes>
+                                    </filter>
+                                    <filter>
+                                        <artifact>*:*</artifact>
+                                        <excludes>
+                                            <exclude>META-INF/*.txt</exclude>
+                                            <exclude>META-INF/*.md</exclude>
+                                            <exclude>META-INF/**/module-info.class</exclude>
+                                            <exclude>META-INF/io.netty.versions.properties</exclude>
+                                            <exclude>META-INF/**/pom.properties</exclude>
+                                            <exclude>META-INF/**/pom.xml</exclude>
+                                            <exclude>META-INF/MANIFEST.MF</exclude>
+                                            <exclude>META-INF/LICENSE</exclude>
+                                            <exclude>META-INF/NOTICE</exclude>
+                                            <exclude>META-INF/license/**</exclude>
+                                            <exclude>META-INF/DEPENDENCIES</exclude>
+                                            <exclude>META-INF/versions/**</exclude>
+                                            <exclude>module-info.java</exclude>
+                                            <exclude>LGPL-3.0.txt</exclude>
+                                            <exclude>LICENSE-ClassGraph.txt</exclude>
+                                            <exclude>hamcrest-core-is-deprecated.txt</exclude>
+                                            <exclude>THIRD-PARTY.txt</exclude>
+                                            <exclude>ASL-2.0.txt</exclude>
+                                            <exclude>samples/**</exclude>
+                                        </excludes>
+                                    </filter>
+                                </filters>
+                            </configuration>
+                        </execution>
+                    </executions>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+        <plugins>
+            <!-- flatten POM for consumers (BOM generation) -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <version>1.8.0</version>
+                <inherited>false</inherited>
+                <configuration>
+                    <flattenMode>bom</flattenMode>
+                    <pomElements>
+                        <dependencyManagement>expand</dependencyManagement>
+                    </pomElements>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>flatten</id>
+                        <phase>process-resources</phase>
+                        <goals>
+                            <goal>flatten</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>flatten-clean</id>
+                        <phase>clean</phase>
+                        <goals>
+                            <goal>clean</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- compile with correct warnings -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.16.0</version>
+                <configuration>
+                    <fork>false</fork>
+                    <source>${maven.compiler.source}</source>
+                    <target>${maven.compiler.target}</target>
+                    <parameters>true</parameters>
+                    <compilerArgs>
+                        <arg>-XDignore.symbol.file</arg>
+                        <arg>-Xlint:all</arg>
+                    </compilerArgs>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>testCompile</goal>
+                        </goals>
+                        <configuration>
+                            <fork>false</fork>
+                            <compilerArgs>
+                                <arg>-XDignore.symbol.file</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>templating-maven-plugin</artifactId>
+                <version>3.1.1</version>
+                <executions>
+                    <execution>
+                        <id>generate-version-class</id>
+                        <goals>
+                            <goal>filter-sources</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- output MANIFEST.MF file -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.5.1</version>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+                            <addDefaultSpecificationEntries>true</addDefaultSpecificationEntries>
+                        </manifest>
+                        <manifestEntries>
+                            <Automatic-Module-Name>${module.name}</Automatic-Module-Name>
+                        </manifestEntries>
+                    </archive>
+                </configuration>
+            </plugin>
+            <!-- clean up additional artifacts not generated by this build -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-clean-plugin</artifactId>
+                <version>3.5.0</version>
+                <configuration>
+                    <verbose>false</verbose>
+                    <filesets>
+                        <fileset>
+                            <directory>${basedir}</directory>
+                            <includes>
+                                <include>**/*.log</include>
+                                <include>**/keystore.jks</include>
+                                <include>**/mockserver_keystore_*_jks</include>
+                                <include>**/keystore.p12</include>
+                            </includes>
+                        </fileset>
+                        <fileset>
+                            <directory>${basedir}/mods</directory>
+                        </fileset>
+                        <!-- Tomcat baseDir scratch directories created by the WAR
+                             tests. The suffix varies per test (tomcat,
+                             tomcat_mockserver, tomcat_proxy,
+                             tomcat_control_plane_smoke,
+                             tomcat_root_default_servlet, ...) so match the whole
+                             family rather than enumerating it. -->
+                        <fileset>
+                            <directory>${basedir}</directory>
+                            <includes>
+                                <include>tomcat*/**</include>
+                            </includes>
+                        </fileset>
+                        <fileset>
+                            <directory>${basedir}/.extract</directory>
+                        </fileset>
+                        <fileset>
+                            <directory>${basedir}/jasmine/google</directory>
+                        </fileset>
+                    </filesets>
+                </configuration>
+                <executions>
+                    <!-- Failsafe leaves failsafe-summary.xml untouched when it executes no test, so
+                         verify would read the previous run's result. Remove it before each run. -->
+                    <execution>
+                        <id>delete-stale-failsafe-summary</id>
+                        <phase>pre-integration-test</phase>
+                        <goals>
+                            <goal>clean</goal>
+                        </goals>
+                        <configuration>
+                            <excludeDefaultDirectories>true</excludeDefaultDirectories>
+                            <filesets combine.self="override">
+                                <fileset>
+                                    <directory>${project.build.directory}/failsafe-reports</directory>
+                                    <includes>
+                                        <include>failsafe-summary.xml</include>
+                                    </includes>
+                                </fileset>
+                            </filesets>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- code coverage -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco-maven-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>prepare-agent-integration</id>
+                        <goals>
+                            <goal>prepare-agent-integration</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report-integration</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>report-integration</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- testing -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>${maven-surefire-plugin.version}</version>
+                <configuration>
+                    <!-- allow debugging tests -->
+                    <!--<forkCount>0</forkCount>-->
+                    <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                    <includes>
+                        <include>**/*Test.java</include>
+                    </includes>
+                    <excludes>
+                        <exclude>**/*IntegrationTest.java</exclude>
+                    </excludes>
+                    <systemPropertyVariables>
+                        <mockserver.logLevel>${mockserver.testLogLevel}</mockserver.logLevel>
+                    </systemPropertyVariables>
+                    <!-- maxLogEntries=1000 keeps each test event log small: a fork creates many, and
+                         the heap-derived default exhausted the heap. It is a -D here, not a
+                         systemPropertyVariables entry, because surefire sets those inside the fork
+                         after start-up, overriding the command line; here ${mockserver.testArgLine}
+                         comes later, so its -Dmockserver.maxLogEntries wins (the last -D wins). -->
+                    <argLine>@{argLine} -Duser.language=en -Duser.country=GB -Dmockserver.testOutput=${mockserver.testOutput} -Dmockserver.maxLogEntries=1000 ${mockserver.leakArgLine} ${mockserver.testArgLine}</argLine>
+                    <disableXmlReport>${disableXmlReport}</disableXmlReport>
+                    <redirectTestOutputToFile>${redirectTestOutputToFile}</redirectTestOutputToFile>
+                    <properties>
+                        <property>
+                            <name>listener</name>
+                            <value>org.mockserver.test.PrintOutCurrentTestRunListener</value>
+                        </property>
+                    </properties>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-surefire-plugin.version}</version>
+                <configuration>
+                    <!-- allow debugging tests -->
+                    <!--<forkCount>0</forkCount>-->
+                    <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                    <includes>
+                        <include>**/*IntegrationTest.java</include>
+                    </includes>
+                    <systemPropertyVariables>
+                        <mockserver.logLevel>${mockserver.testLogLevel}</mockserver.logLevel>
+                        <project.version>${project.version}</project.version>
+                        <project.basedir>${project.basedir}</project.basedir>
+                    </systemPropertyVariables>
+                    <!-- See the surefire argLine above for why maxLogEntries is a -D before testArgLine. -->
+                    <argLine>@{argLine} -Duser.language=en -Duser.country=GB -Dmockserver.testOutput=${mockserver.testOutput} -Dmockserver.maxLogEntries=1000 ${mockserver.leakArgLine} ${mockserver.testArgLine}</argLine>
+                    <failIfNoTests>${mockserver.failIfNoIntegrationTests}</failIfNoTests>
+                    <disableXmlReport>${disableXmlReport}</disableXmlReport>
+                    <redirectTestOutputToFile>${redirectTestOutputToFile}</redirectTestOutputToFile>
+                    <properties>
+                        <property>
+                            <name>listener</name>
+                            <value>org.mockserver.test.PrintOutCurrentTestRunListener</value>
+                        </property>
+                    </properties>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- Netty ByteBuf leak gate, active in modules that set mockserver.leakArgLine. The detector
+                 (org.mockserver.test.FailOnLeakResourceLeakDetector) writes an empty installed-<pid>.marker
+                 per fork and one leak-<pid>.txt per leaking fork to ${mockserver.leakReportDir}. A file is
+                 used because throwing from a JUnit RunListener does not fail surefire, and a leak is
+                 logged on an arbitrary thread long after the test that caused it. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.2.0</version>
+                <executions>
+                    <!-- empty the directory before the tests run, and stamp the start so the check can
+                         tell whether any test fork ran in this build -->
+                    <execution>
+                        <id>clean-netty-leaks</id>
+                        <phase>process-test-classes</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target xmlns:if="ant:if" xmlns:unless="ant:unless">
+                                <condition property="netty.leak.gate.on">
+                                    <not>
+                                        <equals arg1="${mockserver.leakArgLine}" arg2=""/>
+                                    </not>
+                                </condition>
+                                <delete dir="${mockserver.leakReportDir}" quiet="true" if:set="netty.leak.gate.on"/>
+                                <mkdir dir="${mockserver.leakReportDir}" if:set="netty.leak.gate.on"/>
+                                <tstamp if:set="netty.leak.gate.on">
+                                    <format property="netty.leak.started" pattern="yyyyMMddHHmmssSSS"/>
+                                </tstamp>
+                                <echo file="${mockserver.leakReportDir}/tests-started.properties" message="netty.leak.started=${netty.leak.started}" if:set="netty.leak.gate.on"/>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <!-- print the records once both test phases have run: a failed integration test stops
+                         the build at failsafe:verify, before check-netty-leaks. Never fails the build. -->
+                    <execution>
+                        <id>print-netty-leaks</id>
+                        <phase>post-integration-test</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target>
+                                <concat>
+                                    <header>Netty ByteBuf leak records in ${mockserver.leakReportDir}:${line.separator}</header>
+                                    <fileset dir="${mockserver.leakReportDir}" includes="leak-*.txt" erroronmissingdir="false">
+                                        <size value="0" when="more"/>
+                                    </fileset>
+                                </concat>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <!-- after surefire AND failsafe: fail on any recorded leak, and fail if a test fork ran
+                         (a surefire or failsafe report written after clean-netty-leaks) but no fork
+                         installed the detector, which would otherwise pass having checked nothing -->
+                    <execution>
+                        <id>check-netty-leaks</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target xmlns:if="ant:if">
+                                <condition property="netty.leak.gate.on">
+                                    <not>
+                                        <equals arg1="${mockserver.leakArgLine}" arg2=""/>
+                                    </not>
+                                </condition>
+                                <fileset id="netty.leak.files" dir="${mockserver.leakReportDir}" includes="leak-*.txt" erroronmissingdir="false">
+                                    <size value="0" when="more"/>
+                                </fileset>
+                                <resourcecount property="netty.leak.file.count" refid="netty.leak.files"/>
+                                <concat>
+                                    <resources refid="netty.leak.files"/>
+                                </concat>
+                                <fail message="Netty ByteBuf leak(s) detected during the ${project.artifactId} test run - a reference-counted buffer was allocated and never released (see the LEAK records above and ${mockserver.leakReportDir}). This is a real memory-leak / double-release hazard. To downgrade this gate to a warning while triaging pre-existing leaks, pass -Dmockserver.failOnNettyLeak=false.">
+                                    <condition>
+                                        <and>
+                                            <istrue value="${mockserver.failOnNettyLeak}"/>
+                                            <not>
+                                                <equals arg1="${netty.leak.file.count}" arg2="0"/>
+                                            </not>
+                                        </and>
+                                    </condition>
+                                </fail>
+                                <property file="${mockserver.leakReportDir}/tests-started.properties"/>
+                                <fail if:set="netty.leak.gate.on" unless="netty.leak.started" message="Netty leak gate has no start time in ${mockserver.leakReportDir}/tests-started.properties: clean-netty-leaks did not run before the tests."/>
+                                <resourcecount property="netty.leak.reports.since.start" if:set="netty.leak.gate.on">
+                                    <union>
+                                        <fileset dir="${project.build.directory}/surefire-reports" erroronmissingdir="false">
+                                            <date datetime="${netty.leak.started}" pattern="yyyyMMddHHmmssSSS" when="after" granularity="0"/>
+                                        </fileset>
+                                        <fileset dir="${project.build.directory}/failsafe-reports" erroronmissingdir="false">
+                                            <date datetime="${netty.leak.started}" pattern="yyyyMMddHHmmssSSS" when="after" granularity="0"/>
+                                        </fileset>
+                                    </union>
+                                </resourcecount>
+                                <resourcecount property="netty.leak.marker.count">
+                                    <fileset dir="${mockserver.leakReportDir}" includes="installed-*.marker" erroronmissingdir="false"/>
+                                </resourcecount>
+                                <fail message="Netty leak gate checked nothing: tests ran in ${project.artifactId} but no test fork installed the leak detector (no installed-*.marker in ${mockserver.leakReportDir}). Check that the surefire/failsafe argLine still carries the mockserver.leakArgLine property, or, for a narrowed run whose tests never allocate a Netty buffer, pass -Dmockserver.leakArgLine= to turn the detector and this gate off.">
+                                    <condition>
+                                        <and>
+                                            <isset property="netty.leak.gate.on"/>
+                                            <not>
+                                                <equals arg1="${netty.leak.reports.since.start}" arg2="0"/>
+                                            </not>
+                                            <equals arg1="${netty.leak.marker.count}" arg2="0"/>
+                                        </and>
+                                    </condition>
+                                </fail>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- code format -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-checkstyle-plugin</artifactId>
+                <version>3.6.0</version>
+                <dependencies>
+                    <dependency>
+                        <groupId>com.puppycrawl.tools</groupId>
+                        <artifactId>checkstyle</artifactId>
+                        <version>12.3.1</version>
+                    </dependency>
+                </dependencies>
+                <configuration>
+                    <linkXRef>false</linkXRef>
+                    <failsOnError>true</failsOnError>
+                    <consoleOutput>true</consoleOutput>
+                    <excludes>**\/HelpMojo.java</excludes>
+                    <configLocation>checkstyle.xml</configLocation>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>validate</id>
+                        <phase>validate</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- ensure no implicit transitive dependencies not at the same version -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <version>3.6.3</version>
+                <configuration>
+                    <rules>
+                        <dependencyConvergence/>
+                    </rules>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>enforce</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>

@@ -1,0 +1,34 @@
+name: Welcome first-time contributors
+
+on:
+  issues:
+    types: [opened]
+
+# Defence-in-depth: any new job added to this workflow starts from no
+# permissions by default rather than inheriting the repo-wide default.
+# The single existing job re-grants `issues: write` for itself below.
+permissions: {}
+
+jobs:
+  welcome:
+    name: Welcome
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/first-interaction@1c4688942c71f71d4f5502a26ea67c331730fa4d  # v3.1.0
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          issue_message: |
+            Thanks for opening your first issue! We appreciate your contribution to MockServer.
+
+            A maintainer will review this shortly. In the meantime:
+            - Check the [documentation](https://www.mock-server.com) for guides and configuration
+            - Review the [project board](https://github.com/orgs/mock-server/projects/1) for related issues
+          # actions/first-interaction@v3 requires pr_message even though this
+          # workflow only triggers on issues; without it the action fails with
+          # "Input required and not supplied: pr_message".
+          pr_message: |
+            Thanks for opening your first pull request! We appreciate your contribution to MockServer.
+
+            A maintainer will review it shortly. In the meantime, please make sure the build passes and that any behaviour change is covered by tests.

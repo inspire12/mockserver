@@ -1,452 +1,585 @@
 ---
-title: Scalability & Latency
-layout: default
-pageOrder: 6
-section: 'General'
+title: "MockServer Performance Benchmarks: Throughput & Latency"
+shortTitle: "Scalability & Latency"
+description: "MockServer benchmarks: a six-core instance serves about 144,000 requests/sec at a sub-millisecond median; p99 within 10 ms outside load-generator GC pauses."
+layout: page
+pageOrder: 3
+section: 'Performance Testing'
 subsection: true
 sitemap:
 priority: 0.8
 changefreq: 'monthly'
-lastmod: 2019-11-10T08:00:00+01:00
+lastmod: 2026-10-05T08:00:00+01:00
+keywords: mockserver performance, mockserver benchmark, mock server throughput, api mock latency
+schema_faq:
+  - question: "How fast is MockServer?"
+    answer: "On six CPU cores a single instance holds a sub-millisecond median up to a healthy ceiling of about 144,000 requests/sec, serving roughly 143,700 req/s there with no errors at a median around 0.11 ms and a p95 of 7.3 ms. Client-observed p95 stays under a millisecond to 120,000 requests/sec. At the ceiling its 99th-percentile latency is 9.7 ms, within the 10 ms the test allows, only when the seconds in which the load generators paused for their own garbage collection are left out; with every second counted it was 44.9 ms. In the six like-for-like runs behind this figure (five qualifying runs and the published one) the ceiling read 136,000 requests/sec in three and 144,000 in three, and the published figure is the higher of the two. At 144,000 requests/sec all six held a sub-millisecond median with no errors, three kept that p99 within 10 ms with load-generator garbage collection left out, and none did with every second counted. Tail latency, not median latency, is what degrades first, so provision against the lower rate, 136,000 requests/sec."
+  - question: "How many requests per second can MockServer handle?"
+    answer: "A single six-core instance served about 144,000 requests/sec (around 143,700 req/s achieved, no errors) at a sub-millisecond median, with a p99 within 10 ms once the load generators' own garbage-collection pauses are left out and 44.9 ms with every second counted. In the six like-for-like runs behind this figure (five qualifying runs and the published one) the ceiling read 136,000 requests/sec in three and 144,000 in three, so provision against the lower of the two, 136,000 requests/sec. Beyond one instance, run several behind a load balancer — serving capacity scales horizontally."
+  - question: "Does MockServer slow down with many expectations?"
+    answer: "No. MockServer indexes expectations so each request is compared only against a small candidate set rather than scanning every expectation. At 5,000 expectations matching is up to 177× faster than a naive linear scan, keeping matching cost nearly flat as expectations grow."
+  - question: "How do I tune MockServer for high throughput?"
+    answer: "The most impactful lever is the in-memory request log: lower maxLogEntries, or set maxEventLogBytes, so fewer recorded requests are retained on the heap. Note that disableLogging and disableSystemOut only silence console output — they do not stop requests being recorded, so neither reduces heap or GC pressure. Additional levers include the native epoll transport on Linux, thread-pool sizes, and forward-proxy connection pooling. See the Scalability Configuration section for details."
 ---
 
-<div class="header">
-    <h1>Scalability & Latency</h1>
+<!--
+  All numbers on this page are produced by the automated performance pipeline and
+  regenerated for each measurement run — they are not hand-picked. The figures in
+  the throughput table and the provenance block are rendered from the committed
+  data file _data/perf_figures.json; the charts are rendered from the pipeline's
+  JSON output by images/perf-charts/render_perf_charts.py.
 
-    <h2 itemprop="headline">average of 1.58ms and p99 of 4ms for 150 parallel clients sending 95,228 requests per second</h2>
-</div>
+  Closing the loop (performance-programme items 19 and 44): each perf run writes a dated,
+  self-describing result to S3, and .buildkite/scripts/steps/perf-website-publish.sh regenerates
+  _data/perf_figures.json from it and ATTACHES A PATCH to the build when the committed figures
+  are >30 days old or a headline metric has moved >10%. It never publishes the internal-only
+  regression detectors (see the plan's publish-versus-gate section).
 
-<p>MockServer is build to support massive scale from a single instance:</p>
+  THE PAGE HAS TWO STATES, chosen by the data file (the "if rule" blocks below; Liquid is parsed even inside this comment):
+    * no .headline_rule: every figure is the daily single-load-generator run's (perf queue);
+    * .headline_rule present: the HEADLINE (top level: source, headline, headline_rule,
+      throughput_ladder) is the multi-load-generator run's (perf-xl queue, a manual
+      PERF_XL=true build), and .single_k6, the charts, the "Latency by action" table and the
+      hardware-size table stay the daily run's.
+  Only the publish step's patch moves the page from the first state to the second. Keep both
+  branches of each "if rule" block in step when editing either.
+
+  GENERATED regions (rendered from _data/perf_figures.json — a refresh patch rewrites the data
+  file, so do NOT hand-edit their numbers):
+    * the itemprop headline, the "at a glance" throughput bullet, and the
+      per-instance paragraph below (throughput numbers only);
+    * the Measurement provenance block;
+    * the "Throughput vs latency" table + its caption;
+    * the "Latency by action" table (shown only for a post-fix run);
+    * the "Throughput by hardware size" table, chart and sizing notes (from a
+      manual hardware-matrix run; "not yet measured" until one exists, and carried
+      forward unchanged by other refreshes).
+  HUMAN-MAINTAINED regions a refresh does NOT touch — reconcile these by hand when a refresh
+  moves the headline or switches the page's state (the build annotation lists them): the page `description` and the JSON-LD
+  `schema_faq` answers in the front matter (Jekyll does not render Liquid in front matter, and
+  Google surfaces the FAQ), the performance line in /llms.txt, the `ceiling_spread` and
+  `ceiling_spread_detail` sentences below (how many like-for-like runs read which rate; they
+  render only while the published ceiling is one of those rates, and the tally changes with
+  every run published, even at the same ceiling), and the matcher-scaling figures (a separate
+  JMH source, not in the perf result).
+-->
+
+{% assign figures = site.data.perf_figures %}
+{% assign rule = figures.headline_rule %}
+{% if rule %}{% assign sk = figures.single_k6 %}{% else %}{% assign sk = figures %}{% endif %}
+{% assign hc = figures.headline.healthy_ceiling_rps %}
+{% assign spread_side = "" %}{% if rule %}{% if hc == 144000 %}{% assign spread_side = "higher" %}{% elsif hc == 136000 %}{% assign spread_side = "lower" %}{% endif %}{% endif %}
+{% capture ceiling_spread %}{% if spread_side != "" %} In the six like-for-like runs behind this figure (five qualifying runs and the published one) the ceiling read 136,000&nbsp;req/s in three and 144,000&nbsp;req/s in three; the figure published here is the {{ spread_side }} of those two rates.{% endif %}{% endcapture %}
+{% capture ceiling_spread_detail %}{% if spread_side != "" %} At 144,000&nbsp;req/s all six held a sub-millisecond median with no errors; three kept the p99 within 10&nbsp;ms with load-generator garbage collection left out, and none did with every second counted.{% endif %}{% endcapture %}
+{% if rule %}
+<p itemprop="headline">A single MockServer instance holds a sub-millisecond median up to a healthy ceiling of {% if figures.headline.lower_bound %}at least {% endif %}{{ figures.headline.healthy_ceiling_rps_display | default: "144,000" }} requests/sec on six CPU cores, with 99th-percentile latency within {{ figures.headline.p99_max_ms | default: 10 }}&nbsp;ms outside the load generators' own garbage-collection pauses{% if figures.headline.healthy_ceiling_p99_whole_rung_ms %} ({{ figures.headline.healthy_ceiling_p99_whole_rung_ms }}&nbsp;ms with every second counted){% endif %}, and request matching stays flat &mdash; up to 177&times; faster than a linear scan &mdash; as you scale to thousands of expectations.</p>
+{% else %}
+<p itemprop="headline">A single MockServer instance holds sub-millisecond median latency up to a healthy ceiling of {% if figures.headline.lower_bound %}at least {% endif %}{{ figures.headline.healthy_ceiling_rps_display | default: "60,000" }} requests/sec on six CPU cores, and request matching stays flat &mdash; up to 177&times; faster than a linear scan &mdash; as you scale to thousands of expectations.</p>
+{% endif %}
+
+<table class="table-standard">
+    <thead>
+        <tr>
+            <th>Page</th>
+            <th>Question it answers</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><a href="/mock_server/performance.html">Scalability &amp; Latency</a></td>
+            <td>How much traffic can one instance <strong>serve</strong> as a mock?</td>
+        </tr>
+        <tr>
+            <td><a href="/mock_server/load_injection.html">Load Injection</a></td>
+            <td>How do I <strong>drive</strong> load from MockServer?</td>
+        </tr>
+        <tr>
+            <td><a href="/mock_server/load_injection_performance.html">Load Injection Performance</a></td>
+            <td>How much load can MockServer <strong>inject</strong>, and how does it scale?</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>MockServer is built for high throughput and low, <em>predictable</em> latency from a single instance. The figures below come from an automated performance suite that runs on a dedicated, core-pinned CI machine; every chart is regenerated from the measured data on each run, so what you see is reproducible. Jump to <a href="#how_tested">how MockServer is performance tested</a> for the methodology, or run the suite yourself from <span class="inline_code">mockserver-performance-test/</span>.</p>
+
 <ul>
-    <li><a href="#apache_bench">Apache Benchmark</a> tested up to <strong>6,000 parallel clients</strong> and shows MockServer has an <strong>average of 1.58ms and p99 of 4ms for 150 parallel clients sending 95,228 requests per
-        second</strong></li>
-    <li><a href="#locust">Locust</a> tested up to <strong>3,000 parallel clients</strong> and shows MockServer has a <strong>p99 of 4ms for 150 parallel clients</strong></li>
+{% if rule %}
+    <li><strong>Throughput &amp; latency:</strong> on six CPU cores a single instance holds a <strong>sub-millisecond median</strong>{% if figures.headline.sub_ms_p95_through_rps_display %} and a <strong>sub-millisecond client-observed p95</strong> all the way to <strong>{{ figures.headline.sub_ms_p95_through_rps_display }} requests/sec</strong>{% endif %}, and its median stays sub-millisecond up to a <strong>healthy ceiling of {% if figures.headline.lower_bound %}at least{% else %}about{% endif %} {{ figures.headline.healthy_ceiling_rps_display | default: "144,000" }} requests/sec</strong> (median {{ figures.headline.healthy_ceiling_p50_ms }}&nbsp;ms, p95 {{ figures.headline.healthy_ceiling_p95_ms }}&nbsp;ms). Its <strong>p99 there is within {{ figures.headline.p99_max_ms | default: 10 }}&nbsp;ms only with the load generators' own garbage-collection pauses left out</strong>: {{ figures.headline.healthy_ceiling_p99_ms }}&nbsp;ms over the seconds in which none of them was collecting, and {{ figures.headline.healthy_ceiling_p99_whole_rung_ms }}&nbsp;ms with every second counted (<a href="#p99_columns">why</a>).{{ ceiling_spread }}{% if spread_side == "higher" %} Provision against the lower of those two rates (136,000&nbsp;req/s).{% endif %}{% if figures.headline.no_measured_overload %}{% if figures.headline.lower_bound %} Higher rates were not measured reliably, so this is a floor rather than the instance's limit{% else %} No higher rate was measured reliably{% endif %}{% elsif figures.headline.peak_offered_rps > figures.headline.healthy_ceiling_rps %} Offered {{ figures.headline.peak_offered_rps_display }} req/s it still served {{ figures.headline.peak_achieved_rps_display }}, but past the ceiling it no longer met every healthy criterion, so that is a point on the overload curve, not an operating target{% endif %} (see the <a href="#throughput_table">throughput vs latency</a> table).</li>
+{% else %}
+    <li><strong>Throughput &amp; latency:</strong> on six CPU cores a single instance holds a <strong>sub-millisecond median</strong> and a <strong>sub-millisecond client-observed p95</strong> all the way to <strong>36,000 requests/sec</strong>, and serves every request it is offered up to a <strong>healthy ceiling of {% if figures.headline.lower_bound %}at least{% else %}about{% endif %} {{ figures.headline.healthy_ceiling_rps_display | default: "60,000" }} requests/sec</strong> (p95 about {{ figures.headline.healthy_ceiling_p95_ms | default: 22 | round }}&nbsp;ms).{% if figures.headline.no_measured_overload %}{% if figures.headline.lower_bound %} Higher rates were not measured reliably, so this is a floor rather than the instance's limit{% else %} No higher rate was measured reliably{% endif %}{% else %} Pushed past that it can still <em>achieve</em> around {{ figures.headline.peak_achieved_rps_display | default: "59,905" }} req/s with the median still sub-millisecond, but it no longer keeps up with the offered rate and tail latency grows, so that peak is a point on the overload curve, not an operating target{% endif %} (see the <a href="#chart_throughput">throughput vs latency</a> chart).</li>
+{% endif %}
+    <li><strong>Scales with expectations:</strong> request matching cost stays <strong>nearly flat</strong> as the number of registered expectations grows &mdash; <strong>up to 177&times; faster than a naive linear scan at 5,000 expectations</strong> &mdash; thanks to MockServer's candidate-matching index (see the <a href="#chart_matching">matcher scaling</a> chart).</li>
+    <li><strong>Protocol coverage:</strong> HTTP/1.1, HTTPS and HTTP/2 are all served with low overhead, measured side by side on every run (see <a href="#chart_protocols">latency by action</a>).</li>
 </ul>
 
-<p>Both performance testing frameworks show similar results up to 2,000 parallel clients at which point Locust reports warnings and the figures are no longer consistent with Apache Benchmark.</p>
+<h2>Performance at a glance</h2>
 
-<p>The following frameworks & techniques are used to maximise scalability:</p>
+{% if rule %}
+<p><strong>The charts in this section plot the daily run</strong>{% if sk.source.instance_type %} on a smaller machine ({{ sk.source.instance_type }}){% endif %}, driven by a single load generator. That load generator runs out{% if sk.headline.healthy_ceiling_rps_display %} at about {{ sk.headline.healthy_ceiling_rps_display }} requests/sec{% endif %}, well before a six-core MockServer does, so the charts show the shape of the curve at lower rates; the headline figures above come from the multi-generator run in the <a href="#throughput_table">throughput vs latency</a> table.</p>
+
+<a id="chart_throughput" class="anchor" href="#chart_throughput">&nbsp;</a>
+<p>As offered load increases, achieved throughput tracks it almost exactly while the median stays flat &mdash; right up to the highest rate this run's single load generator can deliver. That flat region is the headroom you can rely on; beyond it, latency rises predictably rather than collapsing.</p>
+<img class="ui_image" src="/images/perf_throughput_latency.png" alt="MockServer throughput vs latency in the single-load-generator run: latency stays flat as throughput increases, and achieved throughput tracks offered load">
+
+{% else %}
+<a id="chart_throughput" class="anchor" href="#chart_throughput">&nbsp;</a>
+<p>As offered load increases, achieved throughput tracks it almost exactly while latency percentiles stay flat &mdash; right up to the point the single instance saturates. That flat region is the headroom you can rely on; beyond it, latency rises predictably rather than collapsing.</p>
+<img class="ui_image" src="/images/perf_throughput_latency.png" alt="MockServer throughput vs latency: latency stays flat as throughput increases until the instance saturates, and achieved throughput tracks offered load">
+
+{% endif %}
+<a id="chart_matching" class="anchor" href="#chart_matching">&nbsp;</a>
+<p>Mock servers are often run with hundreds or thousands of expectations. MockServer keeps matching cheap at scale by narrowing each request to a small set of <em>candidate</em> expectations instead of testing every one. The difference grows with the number of expectations:</p>
+<img class="ui_image" src="/images/perf_matching_scaling.png" alt="Request matching time per request stays flat with MockServer's candidate index as the number of expectations grows, versus a steeply rising linear scan">
+
+{% if rule %}
+<a id="chart_percentiles" class="anchor" href="#chart_percentiles">&nbsp;</a>
+<p>At the highest rate that single load generator delivered cleanly &mdash; around {{ sk.headline.healthy_ceiling_rps_display | default: "60,000" }} requests/sec &mdash; the median stays sub-millisecond at <strong>{{ sk.headline.healthy_ceiling_p50_ms | default: "0.179" }}&nbsp;ms</strong> and the client-observed p95 is <strong>{{ sk.headline.healthy_ceiling_p95_ms | default: "21.893" }}&nbsp;ms</strong>. {% if figures.headline.sub_ms_p95_through_rps > sk.headline.healthy_ceiling_rps %}Most of that tail is the single load generator's own: driven by {{ figures.source.k6_processes | default: "several" }} load generators, the p95 stays under a millisecond to {{ figures.headline.sub_ms_p95_through_rps_display }} requests/sec (see the <a href="#throughput_table">table</a>). {% endif %}The p95 and p99 figures are client-observed end-to-end &mdash; see the note under that table for what they mean.</p>
+<img class="ui_image" src="/images/perf_latency_percentiles.png" alt="MockServer response latency distribution at the highest rate of the single-load-generator run, showing p50, p90, p95, p99 and p99.9">
+
+{% else %}
+<a id="chart_percentiles" class="anchor" href="#chart_percentiles">&nbsp;</a>
+<p>At the {% if figures.headline.lower_bound %}highest measured healthy rate{% else %}knee{% endif %} &mdash; {% if figures.headline.lower_bound %}{{ figures.headline.healthy_ceiling_rps_display }}{% else %}around {{ figures.headline.healthy_ceiling_rps_display | default: "60,000" }}{% endif %} requests/sec &mdash; the median stays sub-millisecond at <strong>{{ figures.headline.healthy_ceiling_p50_ms | default: "0.179" }}&nbsp;ms</strong> and the client-observed p95 is <strong>{{ figures.headline.healthy_ceiling_p95_ms | default: "21.893" }}&nbsp;ms</strong>. The p95 and p99 columns in the table below are client-observed end-to-end figures &mdash; they differ substantially from the server&rsquo;s own measurement; see the note under that table for what they mean.</p>
+<img class="ui_image" src="/images/perf_latency_percentiles.png" alt="MockServer response latency distribution at the throughput knee showing p50, p90, p95, p99 and p99.9">
+
+{% endif %}
+<a id="chart_protocols" class="anchor" href="#chart_protocols">&nbsp;</a>
+<p>The same actions measured over HTTP/1.1 and over HTTPS with HTTP/2 show that TLS and HTTP/2 add only a fraction of a millisecond &mdash; even a forwarded request or a large templated response stays within single-digit milliseconds:</p>
+<img class="ui_image" src="/images/perf_http_vs_h2.png" alt="Median latency by action (match, forward, template, large body) over HTTP/1.1 versus HTTPS with HTTP/2">
+
+<h2>What makes MockServer scale</h2>
+
+<p>The throughput and latency above come from a few deliberate design choices:</p>
 <ul>
-    <li><a target="_blank" href="https://netty.io">Netty</a> an asynchronous event-driven network application framework to maximise the scalability of HTTP and TLS</li>
-    <li><a target="_blank" href="https://lmax-exchange.github.io/disruptor">LMAX Disruptor</a> a high performance inter-thread messaging library to maximise the scalability of recording events (i.e. state) and logging</li>
-    <li><a target="_blank" href="https://docs.oracle.com/javase/8/docs/api/java/util/concurrent/ScheduledThreadPoolExecutor.html">ScheduledThreadPoolExecutor</a> a thread pool that can scheduled delayed tasks is used to execute delay response to avoid
-        blocking threads
+    <li><a target="_blank" href="https://netty.io" rel="noopener noreferrer">Netty</a> &mdash; an asynchronous, event-driven network framework. A small pool of event-loop threads handles many thousands of concurrent connections without a thread per request, which is what keeps latency flat as load rises. Where the OS supports it, MockServer uses Netty's <strong>native epoll transport</strong> for lower per-request overhead than the portable NIO transport.</li>
+    <li><strong>Candidate-matching index</strong> &mdash; instead of testing a request against every expectation in turn (an O(<em>n</em>) scan), MockServer indexes expectations so each request is compared only against a small candidate set. This is why matching cost stays nearly flat as expectations grow (chart above). It falls back to a scan only for expectations that cannot be indexed (for example, fully regex-based paths).</li>
+    <li><a target="_blank" href="https://lmax-exchange.github.io/disruptor" rel="noopener noreferrer">LMAX Disruptor</a> &mdash; a high-performance inter-thread messaging library used to record events (request log, recorded requests) and logging off the request path, so capturing state does not block responses.</li>
+    <li><strong>Forward-proxy connection pooling</strong> &mdash; when MockServer forwards or proxies requests upstream, connections are pooled and reused, avoiding per-request connection setup and ephemeral-port exhaustion under sustained forward load.</li>
+    <li><strong>Fail-fast matchers</strong> &mdash; request matching short-circuits on the first non-match, so non-matching expectations are rejected as cheaply as possible.</li>
+    <li><strong>Bounded in-memory log</strong> &mdash; the request/event log is a fixed-size ring buffer (<span class="inline_code">maxLogEntries</span>), so memory stays bounded under sustained load. For long-running, high-throughput instances this is the most important thing to tune &mdash; see <a href="#troubleshooting_performance">memory &amp; troubleshooting</a> below.</li>
+    <li><a target="_blank" href="https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/util/concurrent/ScheduledThreadPoolExecutor.html" rel="noopener noreferrer">ScheduledThreadPoolExecutor</a> &mdash; response delays are scheduled rather than blocking a thread, so simulated latency does not consume the event-loop threads.</li>
+</ul>
+
+<p>Most of these are configurable &mdash; thread-pool sizes, native transport, and matcher behaviour are covered under <a href="#scalability_configuration">scalability configuration</a> below.</p>
+
+<a id="how_tested" class="anchor" href="#how_tested">&nbsp;</a>
+<h2>How MockServer is performance tested</h2>
+
+<p>The numbers on this page are produced by a performance suite (<span class="inline_code">mockserver-performance-test/</span>) built around <a target="_blank" href="https://k6.io" rel="noopener noreferrer">k6</a> for load generation and the <a target="_blank" href="https://github.com/openjdk/jmh" rel="noopener noreferrer">JMH</a> microbenchmark harness for component-level measurement. A few principles make the results trustworthy:</p>
+
+<ul>
+    <li><strong>Open-model load (no coordinated omission).</strong> Load is generated at a fixed <em>arrival rate</em> rather than by a fixed number of looping clients. This avoids <a target="_blank" href="https://www.scylladb.com/2021/04/22/on-coordinated-omission/" rel="noopener noreferrer">coordinated omission</a> &mdash; the measurement artefact where slow responses hide further slow responses &mdash; so the reported latency is what a real caller would experience under that offered load.</li>
+    <li><strong>A ladder of test types,</strong> each answering a different question:
+        <ul>
+            <li><strong>load</strong> &mdash; steady throughput at a target rate; the CI pass/fail gate.</li>
+            <li><strong>sweep</strong> &mdash; steps the arrival rate up a ladder to find the throughput/latency knee (the <a href="#chart_throughput">first chart</a>).</li>
+            <li><strong>regression / growth</strong> &mdash; fixed-rate latency per behaviour (match, forward, template, large body) over HTTP and HTTPS+HTTP/2, plus a check that latency and memory do not creep upward over a run.</li>
+            <li><strong>microbenchmarks</strong> &mdash; JMH measurement of matching time and allocation per request, including the candidate-index <a href="#chart_matching">scaling sweep</a>.</li>
+            <li><strong>stress</strong> and <strong>soak</strong> &mdash; scenarios included in the suite for you to run on demand: stress pushes past the knee to find the breaking point, soak holds sustained load to surface memory growth and leaks. The figures on this page come from the load, sweep, regression/growth and microbenchmark runs above.</li>
+        </ul>
     </li>
+    <li><strong>Reproducible and core-pinned.</strong> Measurement runs on a dedicated CI machine with the server, upstream and load generator pinned to separate CPU cores so they do not steal cycles from each other &mdash; the single biggest factor in number quality. Every chart is regenerated from the pipeline's JSON output.</li>
+{% if rule %}
+    <li><strong>Enough load generators.</strong> One k6 process cannot drive a six-core MockServer to its limit{% if sk.headline.healthy_ceiling_rps_display %} &mdash; on its own it runs out at about {{ sk.headline.healthy_ceiling_rps_display }} requests/sec{% endif %}. The headline run therefore drives one MockServer from {{ figures.source.k6_processes | default: "four" }} k6 processes on the machine's other CPU socket and merges their measurements, so the ceiling is no longer set by one load generator running out.</li>
+{% endif %}
+    <li><strong>Automated regression detection.</strong> Each run is stored and compared against a rolling baseline using a robust median + MAD test, so a real slowdown is flagged without false alarms from run-to-run noise.</li>
 </ul>
 
-<h2>Performance Tests</h2>
+<a id="measurement_provenance" class="anchor" href="#measurement_provenance">&nbsp;</a>
+{% if rule %}
+{% if figures and figures.source %}
+{% assign prov = figures.source %}
+<p><strong>Measurement provenance for the headline figures on this page.</strong> Every number below is dated and tied to the run that produced it &mdash; a figure without that context is how these claims went stale before:</p>
+<table class="results">
+    <tbody>
+    <tr><td>measured</td><td>{{ prov.run_timestamp_utc }}{% if prov.build_number %} &middot; build&nbsp;#{{ prov.build_number }}{% endif %}{% if prov.commit %} &middot; commit&nbsp;{{ prov.commit }}{% endif %}</td></tr>
+    <tr><td>MockServer version</td><td>{{ prov.mockserver_version | default: "not recorded" }}</td></tr>
+    <tr><td>hardware</td><td>{% if prov.instance_type and prov.instance_type != "not recorded" %}AWS {{ prov.instance_type }}, {% endif %}server pinned to {% if prov.server_physical_cores %}{{ prov.server_physical_cores }} physical cores (CPUs {{ prov.server_cpus }}){% else %}{{ prov.server_cpus }}{% endif %}; {% if prov.k6_processes %}{{ prov.k6_processes }} k6 load generators{% if prov.k6_cpus_per_process %}, each pinned to {{ prov.k6_cpus_per_process }} CPUs{% endif %}{% if prov.placement == "numa_split" %} on the other CPU socket{% endif %}{% else %}load generator on separate cores{% endif %}</td></tr>
+    <tr><td>JVM / GC / heap</td><td>{% if prov.config_recorded %}JDK {{ prov.jdk }}, {{ prov.gc }}{% if prov.heap_max_mib %}, {{ prov.heap_max_mib }}&nbsp;MiB max heap{% endif %}{% if prov.jvm_diagnostics == "gc" %}, with the JVM writing a GC log to a file{% endif %}{% else %}<em>not recorded in this run's artefact</em> (predates the self-describing result schema){% endif %}</td></tr>
+    <tr><td>log level</td><td>{{ prov.log_level }}{% if prov.disable_system_out %}, system-out disabled{% endif %} &mdash; reduced below the shipped <span class="inline_code">INFO</span> default for measurement, so these are <strong>not</strong> default-configuration figures</td></tr>
+    {% if rule %}<tr><td>healthy ceiling rule</td><td>achieved within 5&thinsp;% of offered, no errors, median flat, and p99 within {{ rule.p99_max_ms }}&nbsp;ms over the seconds with no load-generator garbage collection (at least {{ rule.min_quiet_s }} such seconds per rate)</td></tr>{% endif %}
+    </tbody>
+</table>
+<p style="font-size:0.9em">{{ prov.note }}{% if sk.source %} The charts and the latency-by-action table come from the daily single-load-generator run: {{ sk.source.run_timestamp_utc }}{% if sk.source.build_number %} &middot; build&nbsp;#{{ sk.source.build_number }}{% endif %}{% if sk.source.instance_type %} &middot; {{ sk.source.instance_type }}{% endif %}{% if sk.source.heap_max_mib %} &middot; {{ sk.source.heap_max_mib }}&nbsp;MiB max heap{% endif %}.{% endif %}</p>
+{% endif %}
+{% else %}
+{% assign figures = site.data.perf_figures %}
+{% if figures and figures.source %}
+{% assign prov = figures.source %}
+<p><strong>Measurement provenance for the figures on this page.</strong> Every number below is dated and tied to the run that produced it &mdash; a figure without that context is how these claims went stale before:</p>
+<table class="results">
+    <tbody>
+    <tr><td>measured</td><td>{{ prov.run_timestamp_utc }}{% if prov.build_number %} &middot; build&nbsp;#{{ prov.build_number }}{% endif %}{% if prov.commit %} &middot; commit&nbsp;{{ prov.commit }}{% endif %}</td></tr>
+    <tr><td>MockServer version</td><td>{{ prov.mockserver_version | default: "not recorded" }}</td></tr>
+    <tr><td>hardware</td><td>{% if prov.instance_type and prov.instance_type != "not recorded" %}{{ prov.instance_type }}, {% endif %}server pinned to {{ prov.server_cpus }}; load generator on separate cores</td></tr>
+    <tr><td>JVM / GC / heap</td><td>{% if prov.config_recorded %}JDK {{ prov.jdk }}, {{ prov.gc }}{% if prov.heap_max_mib %}, {{ prov.heap_max_mib }}&nbsp;MiB max heap{% endif %}{% else %}<em>not recorded in this run's artefact</em> (predates the self-describing result schema){% endif %}</td></tr>
+    <tr><td>log level</td><td>{{ prov.log_level }}{% if prov.disable_system_out %}, system-out disabled{% endif %} &mdash; reduced below the shipped <span class="inline_code">INFO</span> default for measurement, so these are <strong>not</strong> default-configuration figures</td></tr>
+    </tbody>
+</table>
+<p style="font-size:0.9em">{{ prov.note }}</p>
+{% endif %}
+{% endif %}
+<p>Real-world throughput and latency depend on your hardware, core count, payload size, expectation complexity and JVM/configuration tuning &mdash; more CPU cores raise peak throughput, and reducing what the request log retains (<span class="inline_code">logLevel</span> or <span class="inline_code">maxLogEntries</span>) frees heap and cuts allocation on the matching path, while <span class="inline_code">disableSystemOut</span> and <span class="inline_code">disableLogging</span> only silence console output and change neither &mdash; so treat these as a solid, dated reference and benchmark your own workload.</p>
 
-<p>MockServer has been performance tested using <a href="#apache_bench">Apache Benchmark</a> and <a href="#locust">Locust</a> with the following scenario:</p>
+<h2>Detailed results</h2>
+
+{% if rule %}
+<a id="throughput_table" class="anchor" href="#throughput_table">&nbsp;</a>
+<h3>Throughput vs latency</h3>
+<p>Offered request rate against achieved throughput and response-latency percentiles for a single instance matching a simple expectation. The <strong>healthy ceiling</strong> is the highest offered rate where the instance kept up (achieved within 5&thinsp;% of offered, with no errors), its median stayed flat <em>and</em> its p99 with load-generator garbage collection left out (the second p99 column, <a href="#p99_columns">explained below</a>) stayed within {{ figures.headline.p99_max_ms | default: 10 }}&nbsp;ms, at that rate and at every rate tested below it; rows past it are shaded &mdash; they are the overload curve, published for honesty rather than as an operating target.</p>
+{% else %}
+<h3>Throughput vs latency</h3>
+<p>Offered request rate against achieved throughput and response-latency percentiles for a single instance matching a simple expectation. The <strong>healthy ceiling</strong> is the highest offered rate where the instance kept up (achieved within 5&thinsp;% of offered) <em>and</em> latency stayed flat, at that rate and at every rate below it; rows past it are shaded &mdash; they are the overload curve, published for honesty rather than as an operating target.</p>
+{% endif %}
+{% if figures and figures.throughput_ladder %}
+{% if rule %}
+<table class="results">
+    <thead>
+    <tr><td>offered req/s</td><td>achieved req/s</td><td>p50</td><td>p95</td><td>p99</td><td>p99, generator GC left out</td><td>seconds counted</td><td>errors</td><td>state</td></tr>
+    </thead>
+    <tbody>
+    {% for rung in figures.throughput_ladder %}
+    <tr{% if rung.degraded %} style="opacity:0.6"{% endif %}>
+        <td>{{ rung.offered_display }}</td>
+        <td>{{ rung.achieved_display }}</td>
+        <td>{{ rung.p50_ms }}</td>
+        <td>{{ rung.p95_ms }}</td>
+        <td>{{ rung.p99_ms }}</td>
+        <td>{% if rung.p99_gc_masked_ms %}{{ rung.p99_gc_masked_ms }}{% else %}&mdash;{% endif %}</td>
+        <td>{% if rung.quiet_s %}{{ rung.quiet_s }} of {{ rung.measured_s }}{% else %}&mdash;{% endif %}</td>
+        <td>{{ rung.error_pct }}%</td>
+        <td>{% if rung.degraded %}past the ceiling{% else %}healthy{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% if figures.source.sweep_latency_settle_s > 0 %}<p>Each rate is held for a fixed step. The first {{ figures.source.sweep_latency_settle_s }}&nbsp;seconds after each step up are left out of the latency percentiles, because they capture the load generator starting up at the new rate rather than the server; throughput and errors still count the whole step.</p>{% else %}<p>These latency figures still include the first seconds after each step up in rate, while the load generator starts up at the new rate, so at moderate load the p95 and p99 overstate steady-state latency (see below).</p>{% endif %}
+<p>Latencies are in milliseconds. Achieved throughput tracks the offered rate up to the <strong>healthy ceiling of {% if figures.headline.lower_bound %}&ge;&nbsp;{% endif %}{{ figures.headline.healthy_ceiling_rps_display }}&nbsp;req/s</strong> (median {{ figures.headline.healthy_ceiling_p50_ms }}&nbsp;ms, p95 {{ figures.headline.healthy_ceiling_p95_ms }}&nbsp;ms, p99 {{ figures.headline.healthy_ceiling_p99_ms }}&nbsp;ms with load-generator garbage collection left out and {{ figures.headline.healthy_ceiling_p99_whole_rung_ms }}&nbsp;ms over the whole step, on {{ figures.headline.server_cores }} cores).{% if rule.first_failure and rule.first_failure.p99_gc_masked_ms %} The next rate tested, {{ rule.first_failure.offered_display }}&nbsp;req/s, is the first past the ceiling: its p99 with load-generator garbage collection left out was {{ rule.first_failure.p99_gc_masked_ms }}&nbsp;ms.{% endif %}{% unless figures.headline.no_measured_overload %}{% if figures.headline.peak_offered_rps > figures.headline.healthy_ceiling_rps %} The most the instance served at any rate tested was about {{ figures.headline.peak_achieved_rps_display }}&nbsp;req/s, at {{ figures.headline.peak_offered_rps_display }} offered &mdash; a point on the overload curve, not a rate to size a deployment for.{% endif %}{% endunless %}{% if figures.headline.ladder_step_rps_display %} Rates near the ceiling are tested in steps of {{ figures.headline.ladder_step_rps_display }}&nbsp;req/s, so the ceiling is accurate to about one step and can land one step {% if spread_side == "higher" %}lower{% elsif spread_side == "lower" %}higher{% else %}either way{% endif %} from run to run.{% endif %}{{ ceiling_spread }}{{ ceiling_spread_detail }}{% if spread_side == "higher" %} Provision against the lower of those two rates (136,000&nbsp;req/s).{% else %} Provision against the healthy ceiling.{% endif %} (More CPU cores raise it; this run pins the server to {{ figures.headline.server_cores }}.){% if figures.headline.lower_bound %} <strong>This ceiling is a lower bound</strong> &mdash; {{ figures.headline.lower_bound_reason }}.{% endif %}</p>
+
+<a id="p99_columns" class="anchor" href="#p99_columns">&nbsp;</a>
+<p><strong>Why there are two p99 columns.</strong> The load generator, k6, is a Go program and pauses briefly for its own garbage collection. A request that completes around such a pause is timed late by the client even when MockServer answered on time, and at high rates those pauses set most of the client-observed tail. The first p99 column counts every second of the step. The second leaves out each second in which any of the load generators was collecting, and the second after it; the &ldquo;seconds counted&rdquo; column says how many seconds remain. The {{ figures.headline.p99_max_ms | default: 10 }}&nbsp;ms bound reads the second column.{% if rule.unmasked_ceiling_rps_display %} Judged on the first column, this run's ceiling would be {{ rule.unmasked_ceiling_rps_display }}&nbsp;req/s.{% endif %} It is still a client-observed figure and a sample of the step, not a measurement of MockServer free of every outside effect: MockServer still served the burst that follows each pause. The second column still rises as the rate nears the ceiling, and this test does not show how much of that remaining tail is MockServer's.</p>
+
+{% else %}
+<table class="results">
+    <thead>
+    <tr><td>offered req/s</td><td>achieved req/s</td><td>p50</td><td>p95</td><td>p99</td><td>errors</td><td>state</td></tr>
+    </thead>
+    <tbody>
+    {% for rung in figures.throughput_ladder %}
+    <tr{% if rung.degraded %} style="opacity:0.6"{% endif %}>
+        <td>{{ rung.offered_display }}</td>
+        <td>{{ rung.achieved_display }}</td>
+        <td>{{ rung.p50_ms }}</td>
+        <td>{{ rung.p95_ms }}</td>
+        <td>{{ rung.p99_ms }}</td>
+        <td>{{ rung.error_pct }}%</td>
+        <td>{% if rung.degraded %}degraded{% else %}healthy{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% if figures.source.sweep_latency_settle_s > 0 %}<p>Each rate is held for a fixed step. The first {{ figures.source.sweep_latency_settle_s }}&nbsp;seconds after each step up are left out of the latency percentiles, because they capture the load generator starting up at the new rate rather than the server; throughput and errors still count the whole step.</p>{% else %}<p>These latency figures still include the first seconds after each step up in rate, while the load generator starts up at the new rate, so at moderate load the p95 and p99 overstate steady-state latency (see below).</p>{% endif %}
+<p>Latencies are in milliseconds. Achieved throughput tracks the offered rate up to the <strong>healthy ceiling of {% if figures.headline.lower_bound %}&ge;&nbsp;{% endif %}{{ figures.headline.healthy_ceiling_rps_display }}&nbsp;req/s</strong> (median {{ figures.headline.healthy_ceiling_p50_ms }}&nbsp;ms, p95 {{ figures.headline.healthy_ceiling_p95_ms }}&nbsp;ms on {{ figures.headline.server_cores }} cores).{% unless figures.headline.no_measured_overload %} Beyond it the instance is in overload: the highest throughput it ever <em>achieves</em> is about {{ figures.headline.peak_achieved_rps_display }}&nbsp;req/s, but by then the median has climbed to {{ figures.headline.peak_p50_ms }}&nbsp;ms &mdash; that peak is a point on the curve on its way down, not a rate to size a deployment for.{% endunless %} Provision against the healthy ceiling. (More CPU cores raise it; this run pins the server to {{ figures.headline.server_cores }}.){% if figures.headline.lower_bound %} <strong>This ceiling is a lower bound</strong> &mdash; {{ figures.headline.lower_bound_reason }}.{% endif %}</p>
+
+{% endif %}
+<p><strong>What the p95 and p99 figures mean.</strong> These are client-observed, end-to-end latencies &mdash; every millisecond between the client dispatching the request and receiving the first byte of the response.</p>
+
+{% if rule %}
+<p>When those first seconds are counted, the slower tail at moderate load comes from the load rig, not MockServer: a transient at the start of each rate step, while the load generator starts up at the new rate. In a separate test on the single-load-generator rig, held at a steady 24,000&nbsp;req/s, the client measured p99 0.343&nbsp;ms and p99.9 1.43&nbsp;ms, and none of the 7.25&nbsp;million requests took the server more than 5&nbsp;ms. {% if figures.source.sweep_latency_settle_s > 0 %}That start-of-step transient is left out of the table above.{% else %}The table above still includes that start-of-step transient.{% endif %}</p>
+{% else %}
+<p>When those first seconds are counted, the slower tail at moderate load comes from the load rig, not MockServer: a transient at the start of each rate step, while the load generator starts up at the new rate. Held at a steady 24,000&nbsp;req/s, the client measured p99 0.343&nbsp;ms and p99.9 1.43&nbsp;ms, and none of the 7.25&nbsp;million requests took the server more than 5&nbsp;ms. {% if figures.source.sweep_latency_settle_s > 0 %}That start-of-step transient is left out of the table above.{% else %}The table above still includes that start-of-step transient.{% endif %}</p>
+{% endif %}
+
+<p><strong>The recorded-request store is not application logging.</strong> The received-request and response entries it holds &mdash; the ones a <span class="inline_code">verify</span> reads &mdash; are stored whatever the log level, so lowering the level does not shrink them. It does drop the per-expectation match/did-not-match diagnostics, which are only produced at <span class="inline_code">INFO</span> or finer, so on a workload with many expectations a lower level still helps. It is the store behind request verification (<span class="inline_code">verify</span>), the <span class="inline_code">retrieveRecordedRequests</span> API, and the dashboard &mdash; it fills regardless of log level, and reaching for <span class="inline_code">disableLogging=true</span> when you see latency spikes will not help.</p>
+
+{% if rule %}
+<p><strong>This measurement uses a small heap.</strong> The server ran with a maximum heap of {% if figures.source.heap_max_mib %}{{ figures.source.heap_max_mib }}&nbsp;MiB{% else %}about 1&nbsp;GB{% endif %}, so its own garbage collection is exercised throughout. A deployment with a larger heap collects far less often.</p>
+{% else %}
+<p><strong>This measurement uses a deliberately constrained heap.</strong> The server ran with 1.2&nbsp;GB specifically to exercise garbage collection. A deployment with a larger heap collects far less often.</p>
+{% endif %}
+
+<p><strong>Levers for heap use:</strong></p>
 <ul>
-    <li>four basic expectations, including method, path and headers</li>
-    <li>basic GET request matching third expectation (i.e. three matches are attempted for each request)</li>
+    <li><strong>Bound the recorded-request store</strong> &mdash; lower <a href="/mock_server/configuration_properties.html#button_configuration_request_log_size"><span class="inline_code">maxLogEntries</span></a> or set a byte budget with <a href="/mock_server/configuration_properties.html#button_configuration_max_event_log_size_in_bytes"><span class="inline_code">maxEventLogSizeInBytes</span></a> if you do not need the full verification history. This directly reduces the heap pinned by the store. The trade-off: fewer entries available for <span class="inline_code">verify</span> calls and the dashboard history.</li>
+    <li><strong>Give the JVM more heap</strong> &mdash; a larger <span class="inline_code">-Xmx</span> means the same number of entries consumes a smaller fraction of available heap, reducing collection frequency. The trade-off: higher memory commitment for the container or host.</li>
+</ul>
+{% else %}
+<p><em>Live throughput figures are being refreshed; see the charts above.</em></p>
+{% endif %}
+
+<p><strong>These figures are per instance.</strong> The {% if figures.headline.lower_bound %}&ge;&nbsp;{% else %}~{% endif %}{{ figures.headline.healthy_ceiling_rps_display | default: "60,000" }}&nbsp;req/s healthy ceiling is what a <em>single</em> six-core instance served within the healthy criteria in this run &mdash; you scale beyond it by adding instances.{{ ceiling_spread }} <strong>Scaling beyond one instance:</strong> for more <em>serving</em> capacity (handling more inbound mock traffic) or high availability, run several instances as a <a href="#clustering_mockserver">cluster behind a load balancer</a> &mdash; see <a href="/mock_server/centralized_deployment.html">Centralised Deployment</a>. To drive more <em>load injection</em> (generating more outbound traffic with <a href="/mock_server/load_injection.html">Load Scenarios</a>), run injector instances in parallel &mdash; see <a href="/mock_server/load_injection_performance.html">Load Injection Performance</a>, which measures how injected throughput scales near-linearly with the number of instances. To choose a container size for one instance, see <a href="#throughput_by_hardware">throughput by hardware size</a>.</p>
+
+<a id="throughput_by_hardware" class="anchor" href="#throughput_by_hardware">&nbsp;</a>
+<h3>Throughput by hardware size</h3>
+{% assign hw = site.data.perf_figures.hw_matrix %}
+{% if hw and hw.points and hw.points.size > 0 %}
+{% if rule %}
+<p>To help you choose a container size, the same test was run against single MockServer containers of different sizes, each limited to that many CPU cores and that much memory and using the Docker image's default memory settings (no <span class="inline_code">-Xmx</span>). {% assign hw_lower = hw.points | where: "lower_bound", true %}This is a separate run from the headline figures above{% if hw.source.instance_type and figures.source.instance_type and hw.source.instance_type != figures.source.instance_type %}, on a different machine ({{ hw.source.instance_type }} rather than {{ figures.source.instance_type }}){% endif %}, so its 6-core row can differ from them{% if hw_lower.size > 0 %}; its rows marked &ge; are lower bounds and can sit well below the headline{% endif %}.</p>
+{% else %}
+<p>To help you choose a container size, the same test was run against single MockServer containers of different sizes, each limited to that many CPU cores and that much memory and using the Docker image's default memory settings (no <span class="inline_code">-Xmx</span>). This is a separate run from the headline figures above, so its 6-core row can differ from them.</p>
+{% endif %}
+<p><strong>Healthy ceiling:</strong> the highest offered rate MockServer served at &ge;95% with no errors and median latency within 3&times; of its median at the lowest rates tested, at that rate and at every rate tested below it. Measured on {% if hw.source.instance_type %}an AWS {{ hw.source.instance_type }}{% else %}the performance test machine{% endif %}{% if hw.source.host_physical_cores %} ({{ hw.source.host_physical_cores }} physical cores){% endif %}; each size is a fresh container pinned to its own {% if hw.source.cpus_physically_verified %}physical {% endif %}CPU cores{% if hw.source.k6_processes %}; {{ hw.source.k6_processes }} k6 load generators run on {% if hw.source.k6_physical_cores %}{{ hw.source.k6_physical_cores }} {% endif %}other cores{% else %}; the load generator runs on other cores{% endif %}. Rows marked &ge; may have been limited by the load generator, by the highest rate tested, or by something other than MockServer's CPU &mdash; MockServer handled at least that much.</p>
+<p><strong>Per core</strong> is the healthy ceiling divided by the cores; <strong>vs 1 core</strong> compares it with the 1-core row, so 1.00 would be perfectly linear scaling. <strong>Peak</strong> is the most MockServer served on any rate the load generator could deliver cleanly, which can be above the healthy ceiling once latency has started to rise. The latency columns are measured at the healthy ceiling. Rates are tested in steps, so each ceiling is accurate to about one step.</p>
+<table class="results">
+    <thead>
+    <tr><td>CPU cores</td><td>memory</td><td>healthy ceiling req/s</td><td>per core</td><td>vs 1 core</td><td>peak req/s</td><td>median (p50)</td><td>p95</td><td>notes</td></tr>
+    </thead>
+    <tbody>
+    {% for p in hw.points %}
+    <tr{% if p.lower_bound or p.status != "measured" %} style="opacity:0.75"{% endif %}>
+        <td>{{ p.cores }}</td>
+        <td>{{ p.memory_display }}</td>
+        <td>{% if p.healthy_ceiling_rps_display %}{% if p.lower_bound %}&ge;&nbsp;{% endif %}{{ p.healthy_ceiling_rps_display }}{% else %}&mdash;{% endif %}</td>
+        <td>{% if p.rps_per_core_display %}{% if p.lower_bound %}&ge;&nbsp;{% endif %}{{ p.rps_per_core_display }}{% else %}&mdash;{% endif %}</td>
+        <td>{% if p.scaling_vs_1core_display %}{% if p.lower_bound %}&ge;&nbsp;{% endif %}{{ p.scaling_vs_1core_display }}{% else %}&mdash;{% endif %}</td>
+        <td>{% if p.peak_display %}{% if p.lower_bound %}&ge;&nbsp;{% endif %}{{ p.peak_display }}{% else %}&mdash;{% endif %}</td>
+        <td>{% if p.healthy_ceiling_p50_ms %}{{ p.healthy_ceiling_p50_ms }}&nbsp;ms{% else %}&mdash;{% endif %}</td>
+        <td>{% if p.healthy_ceiling_p95_ms %}{{ p.healthy_ceiling_p95_ms }}&nbsp;ms{% else %}&mdash;{% endif %}</td>
+        <td>{{ p.note }}</td>
+    </tr>
+    {% endfor %}
+    {% for s in hw.skipped %}
+    <tr style="opacity:0.6">
+        <td>{{ s.cores }}</td>
+        <td>{{ s.memory_display }}</td>
+        <td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td>
+        <td>not measured: {% if s.oom_killed %}ran out of memory while starting{% elsif s.type == "infeasible" %}the test machine cannot fit this size alongside the load generator{% elsif s.status == "invalid_measurement" %}the measurement failed its own consistency checks{% else %}the test did not complete for this size{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% assign hw_chart = site.static_files | where: "path", "/images/perf_hw_matrix.png" | first %}
+{% if hw_chart %}<img class="ui_image" src="/images/perf_hw_matrix.png" alt="Healthy ceiling in requests per second for each container size, from the smallest to the largest number of CPU cores, with a dashed line for ideal linear scaling from the 1-core size">{% endif %}
+<p><strong>What this run shows:</strong></p>
+<ul>
+    {% if hw.per_core %}{% assign pc = hw.per_core %}
+    {% if pc.scaling == "linear" %}
+    <li>On the sizes where MockServer itself was the limit ({{ pc.smallest_cores }} to {{ pc.largest_cores }} cores), throughput grew roughly in step with cores: about {{ pc.min_display }}{% if pc.max_display != pc.min_display %}&ndash;{{ pc.max_display }}{% endif %} requests/sec per core at the healthy ceiling.</li>
+    {% elsif pc.scaling == "falling" %}
+    <li>On the sizes where MockServer itself was the limit, throughput grew with cores but less than proportionally: about {{ pc.smallest_display }} requests/sec per core at {{ pc.smallest_cores }} core{% if pc.smallest_cores != 1 %}s{% endif %}, falling to about {{ pc.largest_display }} per core at {{ pc.largest_cores }} cores.</li>
+    {% elsif pc.scaling == "rising" %}
+    <li>On the sizes where MockServer itself was the limit, per-core throughput rose with size: about {{ pc.smallest_display }} requests/sec per core at {{ pc.smallest_cores }} core{% if pc.smallest_cores != 1 %}s{% endif %}, rising to about {{ pc.largest_display }} per core at {{ pc.largest_cores }} cores, so the smallest size does proportionally less.</li>
+    {% elsif pc.scaling == "mixed" %}
+    <li>On the sizes where MockServer itself was the limit, throughput per core ranged from about {{ pc.min_display }} to {{ pc.max_display }} requests/sec, without a consistent trend across sizes.</li>
+    {% else %}
+    <li>Only one size ({{ pc.smallest_cores }} core{% if pc.smallest_cores != 1 %}s{% endif %}) was limited by MockServer itself; it served about {{ pc.smallest_display }} requests/sec per core at the healthy ceiling.</li>
+    {% endif %}
+    {% elsif hw.per_core_unavailable == "only_control" %}
+    <li>Only the control size produced a healthy ceiling in this run, so a per-core rate cannot be stated yet.</li>
+    {% else %}
+    <li>Every size with a healthy ceiling may have been limited by the load generator or the top of the tested range rather than MockServer, so each ceiling is a minimum and a per-core rate cannot be stated yet.</li>
+    {% endif %}
+    {% if hw.memory_effect %}{% assign me = hw.memory_effect %}
+    {% if me.verdict == "no_difference" %}
+    <li>In this run, at {{ me.cores }} cores, going from {{ me.base_memory_display }} to {{ me.control_memory_display }} did not change the healthy ceiling ({{ me.base_rps_display }} req/s both times, to within one test step{% if me.ladder_step_pct %} of about {{ me.ladder_step_pct }}%{% endif %}).</li>
+    {% elsif me.verdict == "memory_helps" %}
+    <li>In this run, at {{ me.cores }} cores, going from {{ me.base_memory_display }} to {{ me.control_memory_display }} raised the healthy ceiling from {{ me.base_rps_display }} to {{ me.control_rps_display }} req/s.</li>
+    {% else %}
+    <li>In this run, at {{ me.cores }} cores, the memory comparison ({{ me.base_memory_display }}: {% if me.base_rps_display %}{{ me.base_rps_display }} req/s{% else %}no healthy ceiling{% endif %}, {{ me.control_memory_display }}: {% if me.control_rps_display %}{{ me.control_rps_display }} req/s{% else %}no healthy ceiling{% endif %}) is inconclusive{% if me.inconclusive_reason == "within_ladder_resolution" %}: the two ceilings are within the run-to-run variation of the test steps{% elsif me.inconclusive_reason == "lower_bound" %}: the load generator or the tested range, not MockServer, may have limited at least one of them{% elsif me.inconclusive_reason == "not_measured" %}: at least one of them did not complete{% endif %}.</li>
+    {% endif %}
+    {% if me.base_history.log_cap_mb and me.control_history.log_cap_mb and me.control_history.log_cap_mb > me.base_history.log_cap_mb %}
+    <li>What the extra memory did change in this run is how much request history MockServer keeps for verification and the dashboard: the request log's cap grew from about {{ me.base_history.log_cap_mb }}&nbsp;MB (at most {{ me.base_history.entry_cap_display }} entries) to about {{ me.control_history.log_cap_mb }}&nbsp;MB (at most {{ me.control_history.entry_cap_display }}).{% if me.history_both_filled %} With this test's {{ me.base_history.body_bytes }}-byte responses the log held about {{ me.base_history.entries_peak_display }} versus {{ me.control_history.entries_peak_display }} entries when full; larger requests and responses mean fewer.{% else %} How many requests fit depends on their size: larger requests and responses mean fewer.{% endif %}</li>
+    {% endif %}
+    {% endif %}
+    {% assign hw_lb = hw.points | where: "lower_bound", true %}{% if hw_lb.size > 0 %}
+    <li>Rows marked <strong>lower bound</strong> (shown with &ge;) may have been limited by the load generator, by the highest rate tested, or by something other than MockServer's CPU, so that size can handle at least that much; its per-core and scaling figures are minimums too.</li>
+    {% endif %}
+    <li>Leave headroom. These are the highest rates at which latency was still flat, measured with logging reduced below the default, so plan to run below them &mdash; and see <a href="#troubleshooting_performance">memory &amp; troubleshooting</a> if you keep a large request history.</li>
+</ul>
+<p style="font-size:0.9em">{{ hw.source.note }} Measured {{ hw.source.run_timestamp_utc }}{% if hw.source.build_number %} &middot; build&nbsp;#{{ hw.source.build_number }}{% endif %}{% if hw.source.mockserver_version %} &middot; MockServer {{ hw.source.mockserver_version }}{% endif %}{% if hw.source.instance_type %} &middot; {{ hw.source.instance_type }}{% endif %}{% if hw.source.assembly == "offline" %} &middot; re-assembled offline from the run's work files{% if hw.source.inputs %}, some inputs reconstructed from the run log{% endif %}{% endif %}.</p>
+{% else %}
+<p><em>Not yet measured.</em> A table of throughput for different container sizes &mdash; from 1 CPU core with 512&nbsp;MB of memory up to 6 cores with 2&nbsp;GB &mdash; will appear here once it has been measured on the performance test machine. Until then, size against the single-instance figures above and benchmark your own workload.</p>
+{% endif %}
+
+<h3>Matcher scaling (time per request match)</h3>
+<p>Microbenchmark of a single request match against a growing set of literal expectations, worst case (no match, so every candidate is examined): MockServer's candidate index versus a naive linear scan.</p>
+<table class="results">
+    <thead>
+    <tr><td>expectations</td><td>linear scan</td><td>candidate index (default)</td><td>speed-up</td></tr>
+    </thead>
+    <tbody>
+    <tr><td>1</td><td>0.34 &micro;s</td><td>0.35 &micro;s</td><td>&mdash;</td></tr>
+    <tr><td>10</td><td>2.3 &micro;s</td><td>0.21 &micro;s</td><td>~11&times;</td></tr>
+    <tr><td>100</td><td>21 &micro;s</td><td>0.32 &micro;s</td><td>~67&times;</td></tr>
+    <tr><td>1,000</td><td>218 &micro;s</td><td>1.5 &micro;s</td><td>~147&times;</td></tr>
+    <tr><td>5,000</td><td>1,378 &micro;s</td><td>7.8 &micro;s</td><td>~177&times;</td></tr>
+    </tbody>
+</table>
+<p>Times are microseconds per match. At one expectation the index adds negligible overhead; as expectations grow it keeps matching cheap where a linear scan grows roughly linearly with the number of expectations.</p>
+
+{% if figures.behaviours %}
+<h3>Latency by action</h3>
+{% if rule %}
+<p>Fixed-rate latency per behaviour &mdash; a simple match, a forwarded request, a templated response and a large body &mdash; over HTTP/1.1 and over HTTPS with HTTP/2, from the daily single-load-generator run{% if sk.source.build_number %} (build&nbsp;#{{ sk.source.build_number }}{% if sk.source.instance_type %}, {{ sk.source.instance_type }}{% endif %}){% endif %}:</p>
+{% else %}
+<p>Fixed-rate latency per behaviour &mdash; a simple match, a forwarded request, a templated response and a large body &mdash; over HTTP/1.1 and over HTTPS with HTTP/2, from the same run as the figures above:</p>
+{% endif %}
+<table class="results">
+    <thead>
+    <tr><td>action</td><td>protocol</td><td>p50</td><td>p95</td><td>p99</td></tr>
+    </thead>
+    <tbody>
+    {% for b in figures.behaviours %}
+    <tr><td>{{ b.op }}</td><td>{{ b.proto }}</td><td>{{ b.p50_ms }}</td><td>{{ b.p95_ms }}</td><td>{{ b.p99_ms }}</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% if rule %}
+<p>Latencies are in milliseconds, measured at a fixed arrival rate on a six-core instance.</p>
+{% else %}
+<p>Latencies are in milliseconds, measured at a fixed arrival rate on the same six-core instance.</p>
+{% endif %}
+{% endif %}
+
+<h2>Tuning for your workload</h2>
+<p>The defaults are tuned for general use. For sustained high throughput, large payloads, or long-running instances, the most effective levers are memory/log sizing and a few scalability settings &mdash; covered in detail below. The single most common cause of an instance slowing down over time is the in-memory request log filling the heap; see <a href="#troubleshooting_performance">memory &amp; troubleshooting</a>.</p>
+
+<a id="connection_limits" class="anchor" href="#connection_limits">&nbsp;</a>
+<h3>Concurrent connection limits are set by the OS and the JVM, not by MockServer</h3>
+
+<p>If you are load-testing MockServer, or running it in front of many long-lived keep-alive clients, the ceiling you hit first is almost never MockServer's. It is one of two operating-system limits, and on macOS the first of them is <strong>invisible</strong> &mdash; the JVM quietly overrides what you set. Both apply to the <strong>machine running MockServer and the machine driving load at it</strong>, independently: whichever hits its limit first is the one that fails.</p>
+
+<h4>1. File descriptors &mdash; one per connection</h4>
+
+<p>Every established TCP connection consumes a file descriptor. <strong>The JVM does not simply inherit the limit your shell reports</strong>, and what it does instead is the opposite on the two platforms:</p>
+
+<table class="table-standard">
+    <thead>
+    <tr><th>Platform</th><th>What the JVM does by default</th><th>With <span class="inline_code">-XX:-MaxFDLimit</span></th></tr>
+    </thead>
+    <tbody>
+    <tr>
+        <td><strong>macOS</strong></td>
+        <td>Caps the limit at <strong>10,240</strong> (the BSD <span class="inline_code">OPEN_MAX</span>), <em>however high</em> <span class="inline_code">ulimit -n</span> reads. A shell reporting 60,000 still gives a JVM 10,240. It also raises a <em>lower</em> limit up to 10,240.</td>
+        <td>Uses the shell's soft limit unchanged &mdash; 60,000 stays 60,000, and 2,048 stays 2,048.</td>
+    </tr>
+    <tr>
+        <td><strong>Linux</strong></td>
+        <td>Raises the soft limit to the <strong>hard</strong> limit automatically. A service started with a soft limit of 1,024 and a hard limit of 1,048,576 gets 1,048,576 &mdash; no flag needed.</td>
+        <td><strong>Makes things worse.</strong> Disables that automatic raise, leaving the soft limit: 1,024.</td>
+    </tr>
+    </tbody>
+</table>
+
+<p>So the correct action is different on each platform, and the flag is <strong>not</strong> a portable "more file descriptors" switch:</p>
+
+<ul>
+    <li><strong>macOS</strong> &mdash; you need <em>both</em>. Raise the shell limit <span class="inline_code">ulimit -n 65536</span> <em>and</em> start the JVM with <span class="inline_code">-XX:-MaxFDLimit</span>. The flag alone gives you whatever the shell had; the shell alone is ignored above 10,240.</li>
+    <li><strong>Linux</strong> &mdash; do <em>not</em> pass the flag. Make sure the <em>hard</em> limit is high and the JVM will take it: <span class="inline_code">LimitNOFILE=1048576</span> in a systemd unit, <span class="inline_code">--ulimit nofile=1048576:1048576</span> for <span class="inline_code">docker run</span>, or the container runtime's default in Kubernetes (usually already high).</li>
 </ul>
 
-<p>During the test MockServer was run on a Java 13 JVM, with the following command:</p>
+<p><strong>How the limit announces itself:</strong> the JVM cannot create the socket at all, so you see <span class="inline_code">Too many open files</span>, or from Netty <span class="inline_code">ChannelException: Unable to create Channel from class ... NioSocketChannel</span>. That is a resource limit on the machine reporting it &mdash; not MockServer refusing the connection, and not the network.</p>
 
-<pre class="prettyprint lang-bash code"><code class="code">java -Xmx500m -Dmockserver.logLevel=WARN -Dmockserver.disableLogging=true -jar ~/.m2/repository/org/mock-server/mockserver-netty/{{ site.mockserver_version }}/mockserver-netty-{{ site.mockserver_version }}-no-dependencies.jar -serverPort 1080</code></pre>
+<h4>2. Ephemeral ports &mdash; a limit on the <em>client</em> side only</h4>
 
-<p>The following graph shows how the p99 increases as the number of parallel clients increase.</p>
+<p>A connection is identified by (source IP, source port, destination IP, destination port). A load generator opening many connections <em>to one MockServer</em> draws a source port from the ephemeral range for each, so the range size caps how many it can hold at once:</p>
 
-<img class="ui_image" src="/images/p99vsparallelclients.png" alt="p99 as parallel clients increase">
-
-<a id="apache_bench" class="anchor" href="#apache_bench">&nbsp;</a>
-
-<h3>Apache Bench Performance Test Results</h3>
-
-<p><a target="_blank" href="https://httpd.apache.org/docs/2.4/programs/ab.html">Apache Benchmark</a> was executed as follows:</p>
-
-<pre class="prettyprint lang-bash code"><code class="code">ab -k -n 10000000 -c &lt;parallel clients&gt; http://127.0.0.1:1080/simple</code></pre>
-
-<p>The test results are:</p>
-
-<table class="results">
+<table class="table-standard">
     <thead>
-    <tr>
-        <td>parallel clients</td>
-        <td>50%</td>
-        <td>66%</td>
-        <td>75%</td>
-        <td>80%</td>
-        <td>90%</td>
-        <td>95%</td>
-        <td>98%</td>
-        <td>99%</td>
-        <td>requests/s</td>
-        <td>mean</td>
-    </tr>
+    <tr><th>Platform</th><th>Default range</th><th>Usable connections</th><th>How to widen it</th></tr>
     </thead>
     <tbody>
     <tr>
-        <td>10</td>
-        <td>0</td>
-        <td>0</td>
-        <td>0</td>
-        <td>0</td>
-        <td>0</td>
-        <td>0</td>
-        <td>0</td>
-        <td>0</td>
-        <td>77,122</td>
-        <td>0.13</td>
+        <td><strong>macOS</strong></td>
+        <td>49152&ndash;65535</td>
+        <td>~16,000</td>
+        <td><span class="inline_code">sudo sysctl -w net.inet.ip.portrange.first=32768</span> (about 32,700 ports, matching Linux's default start)</td>
     </tr>
     <tr>
-        <td>50</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>85,765</td>
-        <td>0.58</td>
-    </tr>
-    <tr>
-        <td>100</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>2</td>
-        <td>2</td>
-        <td>3</td>
-        <td>92,846</td>
-        <td>1.08</td>
-    </tr>
-    <tr>
-        <td>150</td>
-        <td>1</td>
-        <td>2</td>
-        <td>2</td>
-        <td>2</td>
-        <td>2</td>
-        <td>2</td>
-        <td>3</td>
-        <td>4</td>
-        <td>95,228</td>
-        <td>1.58</td>
-    </tr>
-    <tr>
-        <td>250</td>
-        <td>3</td>
-        <td>3</td>
-        <td>3</td>
-        <td>3</td>
-        <td>4</td>
-        <td>5</td>
-        <td>7</td>
-        <td>8</td>
-        <td>86,470</td>
-        <td>2.89</td>
-    </tr>
-    <tr>
-        <td>500</td>
-        <td>6</td>
-        <td>6</td>
-        <td>6</td>
-        <td>6</td>
-        <td>7</td>
-        <td>7</td>
-        <td>8</td>
-        <td>9</td>
-        <td>83,209</td>
-        <td>6.01</td>
-    </tr>
-    <tr>
-        <td>750</td>
-        <td>9</td>
-        <td>9</td>
-        <td>10</td>
-        <td>10</td>
-        <td>11</td>
-        <td>11</td>
-        <td>12</td>
-        <td>15</td>
-        <td>75,554</td>
-        <td>9.93</td>
-    </tr>
-    <tr>
-        <td>1000</td>
-        <td>11</td>
-        <td>12</td>
-        <td>13</td>
-        <td>13</td>
-        <td>14</td>
-        <td>16</td>
-        <td>17</td>
-        <td>21</td>
-        <td>75,423</td>
-        <td>13.26</td>
-    </tr>
-    <tr>
-        <td>2000</td>
-        <td>24</td>
-        <td>24</td>
-        <td>25</td>
-        <td>26</td>
-        <td>27</td>
-        <td>29</td>
-        <td>31</td>
-        <td>35</td>
-        <td>82,191</td>
-        <td>24.33</td>
-    </tr>
-    <tr>
-        <td>3000</td>
-        <td>37</td>
-        <td>39</td>
-        <td>40</td>
-        <td>40</td>
-        <td>43</td>
-        <td>46</td>
-        <td>51</td>
-        <td>58</td>
-        <td>78,171</td>
-        <td>38.38</td>
-        <td></td>
-    </tr>
-    <tr>
-        <td>4000</td>
-        <td>52</td>
-        <td>55</td>
-        <td>57</td>
-        <td>59</td>
-        <td>64</td>
-        <td>70</td>
-        <td>82</td>
-        <td>91</td>
-        <td>73,552</td>
-        <td>54.38</td>
-    </tr>
-    <tr>
-        <td>5000</td>
-        <td>65</td>
-        <td>67</td>
-        <td>70</td>
-        <td>71</td>
-        <td>75</td>
-        <td>79</td>
-        <td>90</td>
-        <td>102</td>
-        <td>74,065</td>
-        <td>67.51</td>
-    </tr>
-    <tr>
-        <td>6000</td>
-        <td>80</td>
-        <td>84</td>
-        <td>88</td>
-        <td>90</td>
-        <td>97</td>
-        <td>104</td>
-        <td>122</td>
-        <td>137</td>
-        <td>70,432</td>
-        <td>85.19</td>
+        <td><strong>Linux</strong></td>
+        <td>32768&ndash;60999</td>
+        <td>~28,000</td>
+        <td><span class="inline_code">sysctl -w net.ipv4.ip_local_port_range="10000 65535"</span>, or <span class="inline_code">docker run --sysctl net.ipv4.ip_local_port_range="10000 65535"</span></td>
     </tr>
     </tbody>
 </table>
 
-<a id="locust" class="anchor" href="#locust">&nbsp;</a>
+<p><strong>Do not lower the start of the range too far.</strong> Ports below it are where fixed services bind, and an ephemeral connection that happens to take one can stop a service binding it later. Starting at 32768 matches Linux's own default and stays clear of the registered-port range.</p>
 
-<h3>Locust Performance Test Results</h3>
+<p><strong>These <span class="inline_code">sysctl -w</span> changes do not survive a reboot.</strong> To make one permanent, add it to <span class="inline_code">/etc/sysctl.conf</span> on macOS, or a file under <span class="inline_code">/etc/sysctl.d/</span> on Linux. A <span class="inline_code">docker run --sysctl</span> flag applies to that container only, and needs repeating for each run.</p>
 
-<p><a target="_blank" href="https://httpd.apache.org/docs/2.4/programs/ab.html">Apache Benchmark</a> was executed as follows:</p>
+<p><strong>Which of these we verified:</strong> the file-descriptor behaviour in the table above was measured on both platforms, as were the default port ranges and the connection counts below. The Linux <span class="inline_code">sysctl</span>/<span class="inline_code">--sysctl</span> change was tested and takes effect. The macOS <span class="inline_code">sysctl</span> change is the documented mechanism but we have not measured it, because it is a system-wide change to a developer machine.</p>
 
-<pre class="prettyprint lang-bash code"><code class="code">locust --loglevel=WARNING --headless --only-summary -u &lt;parallel clients&gt; -r 100 -t 180 --host=http://127.0.0.1:1080</code></pre>
+<p><strong>Giving MockServer more ports does not help.</strong> It is tempting to assume that spreading connections over several server ports gives each its own source-port space. On macOS it does not &mdash; the range is global to the client, and measurement confirms it: 15,511 connections to one server port, 15,609 spread over four, a difference of 1%. To exceed the range you need more client <em>source addresses</em> (extra loopback aliases, or more load-generator machines), not more server ports &mdash; and that is measured, not predicted: driving from two source addresses carried <strong>16,000</strong> connections, past the 15,511 single-address wall. Capacity is per source address even though the ephemeral port <em>counter</em> is global, so each address contributes its own range.</p>
 
-<p>The test results are:</p>
+<p><strong>Connections arriving in a burst need accept-queue room.</strong> A third OS limit sits beside
+file descriptors and ephemeral ports, and it announces itself differently from both. While MockServer
+accepts connections, the kernel parks completed handshakes in a queue whose depth is
+<code class="inline code">mockserver.soBacklog</code> (default 1024), capped by
+<code class="inline code">net.core.somaxconn</code> on Linux or <code class="inline code">kern.ipc.somaxconn</code>
+on macOS. When that queue fills, the kernel does not refuse the connection &mdash; it silently drops the
+handshake packet and the client retransmits after its initial timeout, about one second on Linux. The
+symptom is therefore a <em>median latency of roughly a second with zero errors</em>, which looks like a
+slow server rather than a limit being hit. Raise both the property and the OS value together; in Docker
+the container has its own <code class="inline code">somaxconn</code>, so
+<code class="inline code">--sysctl net.core.somaxconn=16384</code> is needed as well as the host setting.
+This only affects connection <em>establishment</em>: traffic over existing keep-alive connections never
+touches the queue.</p>
 
-<table class="results">
-    <thead>
-    <tr>
-        <td>parallel clients</td>
-        <td>50%</td>
-        <td>66%</td>
-        <td>75%</td>
-        <td>80%</td>
-        <td>90%</td>
-        <td>95%</td>
-        <td>98%</td>
-        <td>99%</td>
-        <td>99.90%</td>
-        <td>99.99%</td>
-        <td>requests/s</td>
-        <td>mean</td>
-    </tr>
-    </thead>
-    <tbody>
-    <tr>
-        <td>10</td>
-        <td>0</td>
-        <td>0</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>2</td>
-        <td>5</td>
-        <td>5</td>
-        <td>11</td>
-        <td>0</td>
-    </tr>
-    <tr>
-        <td>50</td>
-        <td>0</td>
-        <td>0</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>2</td>
-        <td>3</td>
-        <td>5</td>
-        <td>50</td>
-        <td>0</td>
-    </tr>
-    <tr>
-        <td>100</td>
-        <td>0</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>2</td>
-        <td>2</td>
-        <td>3</td>
-        <td>4</td>
-        <td>8</td>
-        <td>100</td>
-        <td>0</td>
-    </tr>
-    <tr>
-        <td>150</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>1</td>
-        <td>2</td>
-        <td>3</td>
-        <td>3</td>
-        <td>4</td>
-        <td>5</td>
-        <td>6</td>
-        <td>149</td>
-        <td>0</td>
-    </tr>
-    <tr>
-        <td>250</td>
-        <td>2</td>
-        <td>3</td>
-        <td>3</td>
-        <td>4</td>
-        <td>5</td>
-        <td>6</td>
-        <td>7</td>
-        <td>8</td>
-        <td>15</td>
-        <td>46</td>
-        <td>245</td>
-        <td>2</td>
-    </tr>
-    <tr>
-        <td>500</td>
-        <td>2</td>
-        <td>2</td>
-        <td>3</td>
-        <td>3</td>
-        <td>4</td>
-        <td>5</td>
-        <td>6</td>
-        <td>7</td>
-        <td>9</td>
-        <td>46</td>
-        <td>479</td>
-        <td>2</td>
-    </tr>
-    <tr>
-        <td>750</td>
-        <td>3</td>
-        <td>4</td>
-        <td>5</td>
-        <td>6</td>
-        <td>8</td>
-        <td>10</td>
-        <td>12</td>
-        <td>14</td>
-        <td>29</td>
-        <td>34</td>
-        <td>699</td>
-        <td>3</td>
-    </tr>
-    <tr>
-        <td>1000</td>
-        <td>3</td>
-        <td>4</td>
-        <td>6</td>
-        <td>6</td>
-        <td>8</td>
-        <td>10</td>
-        <td>13</td>
-        <td>16</td>
-        <td>36</td>
-        <td>52</td>
-        <td>909</td>
-        <td>3</td>
-    </tr>
-    <tr>
-        <td>2000</td>
-        <td>4</td>
-        <td>7</td>
-        <td>10</td>
-        <td>12</td>
-        <td>22</td>
-        <td>34</td>
-        <td>49</td>
-        <td>59</td>
-        <td>87</td>
-        <td>110</td>
-        <td>1626.14</td>
-        <td>8</td>
-    </tr>
-    <tr>
-        <td>3000</td>
-        <td>51</td>
-        <td>78</td>
-        <td>99</td>
-        <td>110</td>
-        <td>160</td>
-        <td>180</td>
-        <td>220</td>
-        <td>240</td>
-        <td>290</td>
-        <td>310</td>
-        <td>2629.92</td>
-        <td>54</td>
-    </tr>
-    </tbody>
-</table>
+<p><strong>Closed connections keep their port for a while.</strong> A socket you close sits in <span class="inline_code">TIME_WAIT</span> holding its source port &mdash; 30 seconds on macOS (twice the 15-second <span class="inline_code">net.inet.tcp.msl</span>), 60 seconds on Linux by default. So a test that opens 10,000 connections, closes them, and immediately opens 10,000 more is asking for 20,000 ports. Linux can reuse those sockets for new outbound connections: <span class="inline_code">net.ipv4.tcp_tw_reuse</span> defaults to <span class="inline_code">2</span>, which enables reuse for <em>loopback traffic only</em> &mdash; set it to <span class="inline_code">1</span> to enable it for all traffic. macOS has no equivalent, so there you simply wait it out between runs.</p>
 
-<p>The following <strong>locustfile.py</strong> was used</p>
+<p><strong>How this limit announces itself:</strong> <span class="inline_code">Can't assign requested address</span> / <span class="inline_code">BindException</span>. Note that it looks nothing like the file-descriptor error above, and the fix is entirely different &mdash; if you see one and apply the other's remedy, nothing will change.</p>
 
-<pre class="prettyprint lang-python code"><code class="code">import locust.stats
-from locust import task, between
-locust.stats.CONSOLE_STATS_INTERVAL_SEC = 60
-from locust.contrib.fasthttp import FastHttpLocust
+<h4>What we measured</h4>
 
-class UserBehavior(FastHttpUser):
-    wait_time = between(1, 1)
-
-    @task
-    def request(self):
-        self.client.get("/simple", verify=False)
-</code></pre>
+<p>On an Apple M3 Max laptop (macOS, Zulu JDK 21), driving a MockServer in a second JVM on the same machine: with the JVM's default file-descriptor behaviour the driver stopped at <strong>9,977</strong> connections &mdash; the 10,240 cap, not MockServer. (The few hundred missing are the descriptors the JVM and the OS already hold for their own use, so the usable ceiling always sits a little below the raw limit.) With <span class="inline_code">-XX:-MaxFDLimit</span> on both JVMs it reached <strong>15,511</strong>, stopping at the ephemeral port range instead. Holding <strong>16,000</strong> idle keep-alive connections &mdash; reached by spreading them over two source addresses &mdash; request latency on a separate connection was indistinguishable from the same measurement with no connections held &mdash; run-to-run variation exceeded any effect of the held connections. <strong>MockServer itself was not the limiting factor at any point</strong>; both ceilings belonged to the machine.</p>
 
 {% include_subpage _includes/clustering.html %}
 
 {% include_subpage _includes/performance_configuration.html %}
+
+<h2>Historical benchmarks (Apache Bench &amp; Locust, Java 13)</h2>
+
+<p>The results below are from an earlier benchmarking exercise and are kept for reference. <strong>They are historical and indicative</strong> &mdash; measured on an older Java 13 JVM on specific hardware using a closed-model client-count load (which is subject to coordinated omission), so they are not directly comparable with the open-model figures above. They showed an average of 1.58&nbsp;ms and a p99 of 4&nbsp;ms for 150 parallel clients sending 95,228 requests per second.</p>
+
+<p>The scenario was four basic expectations (method, path and headers), with a GET request matching the third expectation. MockServer was run on a Java 13 JVM with:</p>
+
+<pre class="prettyprint lang-bash code"><code class="code">java -Xmx500m -Dmockserver.logLevel=WARN -Dmockserver.disableLogging=true -jar ~/.m2/repository/org/mock-server/mockserver-netty/{{ site.mockserver_version }}/mockserver-netty-{{ site.mockserver_version }}-no-dependencies.jar -serverPort 1080</code></pre>
+
+<p><strong>Note:</strong> the benchmark used <span class="inline_code">-Dmockserver.disableLogging=true</span> and <span class="inline_code">-Dmockserver.logLevel=WARN</span> to keep console output off the measurement. Neither setting stops requests being recorded into the in-memory request log — that is bounded by <span class="inline_code">maxLogEntries</span> and <span class="inline_code">maxEventLogBytes</span>, not by the logging switches.</p>
+
+<a id="apache_bench" class="anchor" href="#apache_bench">&nbsp;</a>
+<h3>Apache Bench results</h3>
+<p><a target="_blank" href="https://httpd.apache.org/docs/2.4/programs/ab.html" rel="noopener noreferrer">Apache Benchmark</a> was executed as:</p>
+<pre class="prettyprint lang-bash code"><code class="code">ab -k -n 10000000 -c &lt;parallel clients&gt; http://127.0.0.1:1080/simple</code></pre>
+<table class="results">
+    <thead>
+    <tr><td>parallel clients</td><td>50%</td><td>66%</td><td>75%</td><td>80%</td><td>90%</td><td>95%</td><td>98%</td><td>99%</td><td>requests/s</td><td>mean</td></tr>
+    </thead>
+    <tbody>
+    <tr><td>10</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>77,122</td><td>0.13</td></tr>
+    <tr><td>50</td><td>1</td><td>1</td><td>1</td><td>1</td><td>1</td><td>1</td><td>1</td><td>1</td><td>85,765</td><td>0.58</td></tr>
+    <tr><td>100</td><td>1</td><td>1</td><td>1</td><td>1</td><td>1</td><td>2</td><td>2</td><td>3</td><td>92,846</td><td>1.08</td></tr>
+    <tr><td>150</td><td>1</td><td>2</td><td>2</td><td>2</td><td>2</td><td>2</td><td>3</td><td>4</td><td>95,228</td><td>1.58</td></tr>
+    <tr><td>250</td><td>3</td><td>3</td><td>3</td><td>3</td><td>4</td><td>5</td><td>7</td><td>8</td><td>86,470</td><td>2.89</td></tr>
+    <tr><td>500</td><td>6</td><td>6</td><td>6</td><td>6</td><td>7</td><td>7</td><td>8</td><td>9</td><td>83,209</td><td>6.01</td></tr>
+    <tr><td>750</td><td>9</td><td>9</td><td>10</td><td>10</td><td>11</td><td>11</td><td>12</td><td>15</td><td>75,554</td><td>9.93</td></tr>
+    <tr><td>1000</td><td>11</td><td>12</td><td>13</td><td>13</td><td>14</td><td>16</td><td>17</td><td>21</td><td>75,423</td><td>13.26</td></tr>
+    <tr><td>2000</td><td>24</td><td>24</td><td>25</td><td>26</td><td>27</td><td>29</td><td>31</td><td>35</td><td>82,191</td><td>24.33</td></tr>
+    <tr><td>3000</td><td>37</td><td>39</td><td>40</td><td>40</td><td>43</td><td>46</td><td>51</td><td>58</td><td>78,171</td><td>38.38</td></tr>
+    <tr><td>4000</td><td>52</td><td>55</td><td>57</td><td>59</td><td>64</td><td>70</td><td>82</td><td>91</td><td>73,552</td><td>54.38</td></tr>
+    <tr><td>5000</td><td>65</td><td>67</td><td>70</td><td>71</td><td>75</td><td>79</td><td>90</td><td>102</td><td>74,065</td><td>67.51</td></tr>
+    <tr><td>6000</td><td>80</td><td>84</td><td>88</td><td>90</td><td>97</td><td>104</td><td>122</td><td>137</td><td>70,432</td><td>85.19</td></tr>
+    </tbody>
+</table>
+
+<a id="locust" class="anchor" href="#locust">&nbsp;</a>
+<h3>Locust results</h3>
+<p><a target="_blank" href="https://docs.locust.io/" rel="noopener noreferrer">Locust</a> was executed as:</p>
+<pre class="prettyprint lang-bash code"><code class="code">locust --loglevel=WARNING --headless --only-summary -u &lt;parallel clients&gt; -r 100 -t 180 --host=http://127.0.0.1:1080</code></pre>
+<table class="results">
+    <thead>
+    <tr><td>parallel clients</td><td>50%</td><td>66%</td><td>75%</td><td>80%</td><td>90%</td><td>95%</td><td>98%</td><td>99%</td><td>99.90%</td><td>99.99%</td><td>requests/s</td><td>mean</td></tr>
+    </thead>
+    <tbody>
+    <tr><td>10</td><td>0</td><td>0</td><td>1</td><td>1</td><td>1</td><td>1</td><td>1</td><td>2</td><td>5</td><td>5</td><td>11</td><td>0</td></tr>
+    <tr><td>50</td><td>0</td><td>0</td><td>1</td><td>1</td><td>1</td><td>1</td><td>1</td><td>2</td><td>3</td><td>5</td><td>50</td><td>0</td></tr>
+    <tr><td>100</td><td>0</td><td>1</td><td>1</td><td>1</td><td>1</td><td>2</td><td>2</td><td>3</td><td>4</td><td>8</td><td>100</td><td>0</td></tr>
+    <tr><td>150</td><td>1</td><td>1</td><td>1</td><td>1</td><td>2</td><td>3</td><td>3</td><td>4</td><td>5</td><td>6</td><td>149</td><td>0</td></tr>
+    <tr><td>250</td><td>2</td><td>3</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>15</td><td>46</td><td>245</td><td>2</td></tr>
+    <tr><td>500</td><td>2</td><td>2</td><td>3</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>9</td><td>46</td><td>479</td><td>2</td></tr>
+    <tr><td>750</td><td>3</td><td>4</td><td>5</td><td>6</td><td>8</td><td>10</td><td>12</td><td>14</td><td>29</td><td>34</td><td>699</td><td>3</td></tr>
+    <tr><td>1000</td><td>3</td><td>4</td><td>6</td><td>6</td><td>8</td><td>10</td><td>13</td><td>16</td><td>36</td><td>52</td><td>909</td><td>3</td></tr>
+    <tr><td>2000</td><td>4</td><td>7</td><td>10</td><td>12</td><td>22</td><td>34</td><td>49</td><td>59</td><td>87</td><td>110</td><td>1626.14</td><td>8</td></tr>
+    <tr><td>3000</td><td>51</td><td>78</td><td>99</td><td>110</td><td>160</td><td>180</td><td>220</td><td>240</td><td>290</td><td>310</td><td>2629.92</td><td>54</td></tr>
+    </tbody>
+</table>

@@ -1,8 +1,9 @@
 ---
 title: Isolate Single Service
+description: Use MockServer as a reverse proxy to route one service to a local debug instance while forwarding all other requests to the real environment.
 layout: page
 pageOrder: 10
-section: 'Proxy'
+section: 'Proxying'
 subsection: true
 sitemap:
   priority: 0.7
@@ -33,9 +34,9 @@ sitemap:
     "mockserver-node": "{{ site.mockserver_version }}",
     "mockserver-client": "{{ site.mockserver_version }}"
   }
-}</code><</pre>
+}</code></pre>
 
-<p>Then create the <strong>server.js</strong> file that starts MockServer and sets up the forwarding rules as different expectations, as follows:</p>
+<p>Then create the <strong>server.js</strong> file that starts (and cleanly stops) an embedded MockServer, and creates the two forwarding expectations, as follows:</p>
 
 <pre class="prettyprint lang-javascript code"><code class="code">var mockserver = require('mockserver-node');
 var mockServerClient = require('mockserver-client').mockServerClient;
@@ -46,54 +47,9 @@ mockserver
         serverPort: HTTP_PORT
     })
     .then(function () {
-        // forward backend REST API request to local machine
-        mockServerClient("localhost", HTTP_PORT)
-            .mockAnyResponse({
-                "httpRequest": {
-                    "path": "/rest.*"
-                },
-                "httpForward": { // local machine Tomcat instance
-                    "host": "127.0.0.1",
-                    "port": 8080,
-                    "scheme": "HTTP"
-                },
-                "times": {
-                    "unlimited": true
-                }
-            })
-            .then(
-                function () {
-                    // forward all other request to QA environment
-                    mockServerClient("localhost", HTTP_PORT)
-                        .mockAnyResponse({
-                            "httpRequest": {
-                                "path": "/.*"
-                            },
-                            "httpForward": { // QA environment load balancer
-                                "host": "192.168.50.10",
-                                "port": 443,
-                                "scheme": "HTTPS"
-                            },
-                            "times": {
-                                "unlimited": true
-                            }
-                        })
-                        .then(
-                            function () {
-                                console.log("created expectations");
-                            },
-                            function (error) {
-                                console.log(error);
-                            }
-                        );
-                },
-                function (error) {
-                    console.log(error);
-                }
-            );
+        // now create the two forwarding expectations (see the client examples below)
+        console.log("started on port: " + HTTP_PORT);
     });
-
-console.log("started on port: " + HTTP_PORT);
 
 // stop MockServer if Node exist abnormally
 process.on('uncaughtException', function (err) {
@@ -122,7 +78,398 @@ process.on('SIGTERM', function () {
     process.exit(0);
 });</code></pre>
 
-<p>To start the process install the npm module and launch Node.js, as follows:</p>
+<p>Starting and stopping an embedded MockServer this way is specific to Node.js (using the <span class="inline_code">mockserver-node</span> package). The forwarding rules themselves &mdash; two <span class="inline_code">httpForward</span> expectations &mdash; are just regular expectations, so they can be created from any MockServer client against a running MockServer. Both route by request path: requests matching <span class="inline_code string_literal">"/rest.*"</span> are forwarded to the local debug instance on <strong>127.0.0.1:8080</strong> over <strong>HTTP</strong>, and all other requests (matching <span class="inline_code string_literal">"/.*"</span>) are forwarded to the QA load balancer on <strong>192.168.50.10:443</strong> over <strong>HTTPS</strong>:</p>
+
+<button id="button_isolate_service_forward" class="accordion">forward requests to isolate a single service</button>
+<div class="panel">
+    <button class="accordion inner">Java</button>
+    <div class="panel">
+        <pre class="prettyprint lang-java code"><code class="code">MockServerClient client = new MockServerClient("localhost", 1080);
+
+// forward backend REST API request to local machine
+client
+    .when(
+        request()
+            .withPath("/rest.*")
+    )
+    .forward(
+        forward()
+            .withHost("127.0.0.1")
+            .withPort(8080)
+            .withScheme(HttpForward.Scheme.HTTP)
+    );
+
+// forward all other requests to QA environment
+client
+    .when(
+        request()
+            .withPath("/.*")
+    )
+    .forward(
+        forward()
+            .withHost("192.168.50.10")
+            .withPort(443)
+            .withScheme(HttpForward.Scheme.HTTPS)
+    );</code></pre>
+    </div>
+    <button class="accordion inner">JavaScript</button>
+    <div class="panel">
+        <pre class="prettyprint lang-javascript code"><code class="code">var mockServerClient = require('mockserver-client').mockServerClient;
+var client = mockServerClient("localhost", 1080);
+
+// forward backend REST API request to local machine
+client.mockAnyResponse({
+    "httpRequest": {
+        "path": "/rest.*"
+    },
+    "httpForward": {
+        "host": "127.0.0.1",
+        "port": 8080,
+        "scheme": "HTTP"
+    },
+    "times": {
+        "unlimited": true
+    }
+}).then(
+    function () {
+        // forward all other requests to QA environment
+        client.mockAnyResponse({
+            "httpRequest": {
+                "path": "/.*"
+            },
+            "httpForward": {
+                "host": "192.168.50.10",
+                "port": 443,
+                "scheme": "HTTPS"
+            },
+            "times": {
+                "unlimited": true
+            }
+        });
+    },
+    function (error) {
+        console.log(error);
+    }
+);</code></pre>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/expectation/put_expectation" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+    <button class="accordion inner">Python</button>
+    <div class="panel">
+        <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
+from mockserver.models import HttpForward, HttpRequest
+
+client = MockServerClient("localhost", 1080)
+
+# forward backend REST API request to local machine
+client.when(
+    HttpRequest.request("/rest.*")
+).forward(
+    HttpForward(host="127.0.0.1", port=8080, scheme="HTTP")
+)
+
+# forward all other requests to QA environment
+client.when(
+    HttpRequest.request("/.*")
+).forward(
+    HttpForward(host="192.168.50.10", port=443, scheme="HTTPS")
+)</code></pre>
+    </div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel">
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+
+client = MockServer::Client.new('localhost', 1080)
+
+# forward backend REST API request to local machine
+client.when(
+    MockServer::HttpRequest.new(path: '/rest.*')
+).forward(
+    MockServer::HttpForward.new(host: '127.0.0.1', port: 8080, scheme: 'HTTP')
+)
+
+# forward all other requests to QA environment
+client.when(
+    MockServer::HttpRequest.new(path: '/.*')
+).forward(
+    MockServer::HttpForward.new(host: '192.168.50.10', port: 443, scheme: 'HTTPS')
+)</code></pre>
+    </div>
+    <button class="accordion inner">Go</button>
+    <div class="panel">
+        <pre class="prettyprint lang-go code"><code class="code">import mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+
+client := mockserver.New("localhost", 1080)
+
+// forward backend REST API request to local machine
+client.When(
+    mockserver.Request().Path("/rest.*"),
+).Forward(
+    mockserver.Forward().Host("127.0.0.1").Port(8080).Scheme("HTTP"),
+)
+
+// forward all other requests to QA environment
+client.When(
+    mockserver.Request().Path("/.*"),
+).Forward(
+    mockserver.Forward().Host("192.168.50.10").Port(443).Scheme("HTTPS"),
+)</code></pre>
+    </div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel">
+        <pre class="prettyprint lang-csharp code"><code class="code">using MockServer.Client;
+using MockServer.Client.Models;
+
+using var client = new MockServerClient("localhost", 1080);
+
+// forward backend REST API request to local machine
+client.When(
+    HttpRequest.Request().WithPath("/rest.*")
+).Forward(
+    HttpForward.Forward().WithHost("127.0.0.1").WithPort(8080).WithScheme("HTTP")
+);
+
+// forward all other requests to QA environment
+client.When(
+    HttpRequest.Request().WithPath("/.*")
+).Forward(
+    HttpForward.Forward().WithHost("192.168.50.10").WithPort(443).WithScheme("HTTPS")
+);</code></pre>
+    </div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel">
+        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpForward};
+
+let client = ClientBuilder::new("localhost", 1080).build().unwrap();
+
+// forward backend REST API request to local machine
+client.when(HttpRequest::new().path("/rest.*"))
+    .forward(HttpForward::new("127.0.0.1", 8080).scheme("HTTP"))
+    .unwrap();
+
+// forward all other requests to QA environment
+client.when(HttpRequest::new().path("/.*"))
+    .forward(HttpForward::new("192.168.50.10", 443).scheme("HTTPS"))
+    .unwrap();</code></pre>
+    </div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel">
+        <pre class="prettyprint lang-php code"><code class="code">use MockServer\MockServerClient;
+use MockServer\HttpRequest;
+use MockServer\HttpForward;
+
+$client = new MockServerClient('localhost', 1080);
+
+// forward backend REST API request to local machine
+$client-&gt;when(
+    HttpRequest::request()
+        -&gt;path('/rest.*')
+)-&gt;forward(
+    HttpForward::forward()
+        -&gt;host('127.0.0.1')
+        -&gt;port(8080)
+        -&gt;scheme('HTTP')
+);
+
+// forward all other requests to QA environment
+$client-&gt;when(
+    HttpRequest::request()
+        -&gt;path('/.*')
+)-&gt;forward(
+    HttpForward::forward()
+        -&gt;host('192.168.50.10')
+        -&gt;port(443)
+        -&gt;scheme('HTTPS')
+);</code></pre>
+    </div>
+    <button class="accordion inner">REST API</button>
+    <div class="panel">
+        <pre class="prettyprint code"><code class="code"># forward backend REST API request to local machine
+curl -v -X PUT "http://localhost:1080/mockserver/expectation" -d '{
+    "httpRequest": {
+        "path": "/rest.*"
+    },
+    "httpForward": {
+        "host": "127.0.0.1",
+        "port": 8080,
+        "scheme": "HTTP"
+    },
+    "times": {
+        "unlimited": true
+    }
+}'
+
+# forward all other requests to QA environment
+curl -v -X PUT "http://localhost:1080/mockserver/expectation" -d '{
+    "httpRequest": {
+        "path": "/.*"
+    },
+    "httpForward": {
+        "host": "192.168.50.10",
+        "port": 443,
+        "scheme": "HTTPS"
+    },
+    "times": {
+        "unlimited": true
+    }
+}'</code></pre>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/expectation/put_expectation" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+</div>
+
+<p>To start the Node.js process install the npm module and launch Node.js, as follows:</p>
 
 <pre class="prettyprint code"><code class="code">npm i
 node server.js</code></pre>
+
+<p>The example above isolates a service by writing an explicit <span class="inline_code">httpForward</span> expectation per route. When you instead want unmatched routes to fall through to the real upstream automatically — without defining a catch-all forward expectation — switch MockServer into one of the operating modes below: in <strong>SPY</strong> or <strong>CAPTURE</strong> mode any request that matches no expectation is forwarded to the real service and recorded, so you only need to write expectations for the calls you want to override locally.</p>
+
+<a id="mock_mode" class="anchor" href="#mock_mode">&nbsp;</a>
+
+<h2>Operating Mode (SIMULATE / SPY / CAPTURE)</h2>
+
+<p>MockServer supports three operating modes that control how unmatched requests are handled. Switch between them at runtime without restarting the server.</p>
+
+<table class="table-standard">
+    <thead>
+        <tr>
+            <th>Mode</th>
+            <th>Matched requests</th>
+            <th>Unmatched requests</th>
+            <th>Use case</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><span class="inline_code">SIMULATE</span></td>
+            <td>Return mock response</td>
+            <td>Return 404 (default)</td>
+            <td>Pure mock — test against a fully controlled set of expectations</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">SPY</span></td>
+            <td>Return mock response</td>
+            <td>Forward to real upstream &amp; record</td>
+            <td>Selective mocking — stub specific calls, pass the rest through to a real service</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">CAPTURE</span></td>
+            <td>Return mock response</td>
+            <td>Forward to real upstream &amp; record</td>
+            <td>Traffic capture — no expectations needed; record all real traffic for later replay</td>
+        </tr>
+    </tbody>
+</table>
+
+<p><strong>SIMULATE</strong> is the default. <strong>SPY</strong> and <strong>CAPTURE</strong> are <strong>behaviourally identical</strong> — both enable the same proxy-on-no-match behaviour (matched requests return their mock; unmatched requests are forwarded to the real upstream and recorded), so the distinction between them is one of intent only, not of runtime behaviour. (Internally they share the same flag, so the server reports either as <span class="inline_code">SPY</span>.) Use SPY when you have expectations for some calls and want to pass the rest through; use CAPTURE when you want to record all traffic first, typically with no expectations defined.</p>
+
+<p>Recorded interactions are retrieved via the existing retrieve endpoints — for example <span class="inline_code">PUT /mockserver/retrieve?type=RECORDED_EXPECTATIONS</span> returns the recorded traffic as expectations ready for replay. See <a href="/mock_server/debugging_issues.html#retrieving_recorded_expectations">Retrieving Recorded Expectations</a> for details.</p>
+
+<a id="mock_mode_set" class="anchor" href="#mock_mode_set">&nbsp;</a>
+
+<h3>Setting the Mode</h3>
+
+<button id="button_set_mode" class="accordion">set operating mode</button>
+<div class="panel">
+    <button class="accordion inner">Java</button>
+    <div class="panel">
+        <pre class="prettyprint lang-java code"><code class="code">import org.mockserver.client.MockServerClient;
+import org.mockserver.mock.MockMode;
+
+// switch mode by passing MockMode.SPY, MockMode.CAPTURE or MockMode.SIMULATE
+new MockServerClient("localhost", 1080)
+    .setMode(MockMode.SPY);</code></pre>
+    </div>
+    <button class="accordion inner">JavaScript</button>
+    <div class="panel">
+        <pre class="prettyprint lang-javascript code"><code class="code">var mockServerClient = require('mockserver-client').mockServerClient;
+var MockMode = require('mockserver-client').MockMode;
+
+// switch mode by passing MockMode.SPY, MockMode.CAPTURE or MockMode.SIMULATE
+// (the equivalent "SPY"/"CAPTURE"/"SIMULATE" strings are accepted too)
+mockServerClient("localhost", 1080)
+    .setMode(MockMode.SPY)
+    .then(function () {
+        console.log("operating mode set");
+    });</code></pre>
+    </div>
+    <button class="accordion inner">Python</button>
+    <div class="panel">
+        <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
+from mockserver.models import MockMode
+
+# switch mode by passing MockMode.SPY, MockMode.CAPTURE or MockMode.SIMULATE
+client = MockServerClient("localhost", 1080)
+client.set_mode(MockMode.SPY)</code></pre>
+    </div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel">
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+
+# switch mode with the MODE_SPY / MODE_CAPTURE / MODE_SIMULATE constants
+# (the :spy / :capture / :simulate symbols are accepted too)
+client = MockServer::Client.new('localhost', 1080)
+client.set_mode(MockServer::Client::MODE_SPY)</code></pre>
+    </div>
+    <button class="accordion inner">Go</button>
+    <div class="panel">
+        <pre class="prettyprint lang-go code"><code class="code">import mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+
+// switch mode by passing mockserver.ModeSpy, mockserver.ModeCapture or mockserver.ModeSimulate
+client := mockserver.New("localhost", 1080)
+client.SetMode(mockserver.ModeSpy)</code></pre>
+    </div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel">
+        <pre class="prettyprint lang-csharp code"><code class="code">using MockServer.Client;
+using MockServer.Client.Models;
+
+// switch mode by passing MockMode.Spy, MockMode.Capture or MockMode.Simulate
+using var client = new MockServerClient("localhost", 1080);
+client.SetMode(MockMode.Spy);</code></pre>
+    </div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel">
+        <pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, MockMode};
+
+// switch mode by passing MockMode::Spy, MockMode::Capture or MockMode::Simulate
+let client = ClientBuilder::new("localhost", 1080).build().unwrap();
+client.set_mode(MockMode::Spy).unwrap();</code></pre>
+    </div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel">
+        <pre class="prettyprint lang-php code"><code class="code">use MockServer\MockServerClient;
+
+// switch mode with the MODE_SPY / MODE_CAPTURE / MODE_SIMULATE constants
+$client = new MockServerClient('localhost', 1080);
+$client-&gt;setMode(MockServerClient::MODE_SPY);</code></pre>
+    </div>
+    <button class="accordion inner">REST API &mdash; set SPY mode</button>
+    <div class="panel">
+        <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/mode?mode=SPY"</code></pre>
+    </div>
+    <button class="accordion inner">REST API &mdash; set CAPTURE mode</button>
+    <div class="panel">
+        <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/mode?mode=CAPTURE"</code></pre>
+    </div>
+    <button class="accordion inner">REST API &mdash; reset to SIMULATE (default)</button>
+    <div class="panel">
+        <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/mode?mode=SIMULATE"</code></pre>
+    </div>
+</div>
+
+<a id="mock_mode_get" class="anchor" href="#mock_mode_get">&nbsp;</a>
+
+<h3>Reading the Current Mode</h3>
+
+<p>Query the current mode at any time:</p>
+
+<pre class="prettyprint code"><code class="code">curl -s "http://localhost:1080/mockserver/mode"</code></pre>
+
+<p>Response:</p>
+
+<pre class="prettyprint code"><code class="code">{
+  "mode": "SPY",
+  "proxyUnmatchedRequests": true
+}</code></pre>
+
+<p>The <span class="inline_code">proxyUnmatchedRequests</span> field reflects whether unmatched requests will be forwarded (<span class="inline_code">true</span> for SPY and CAPTURE, <span class="inline_code">false</span> for SIMULATE).</p>

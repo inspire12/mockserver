@@ -1,0 +1,332 @@
+package org.mockserver.netty.unification;
+
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelInitializer;
+import io.netty.channel.ChannelPipeline;
+import io.netty.handler.codec.http.HttpObjectAggregator;
+import io.netty.handler.codec.http2.Http2StreamChannel;
+import io.netty.handler.codec.http2.Http2StreamFrameToHttpObjectCodec;
+import io.netty.util.Attribute;
+import io.netty.util.AttributeKey;
+import org.mockserver.codec.HttpObjectAggregators;
+import org.mockserver.codec.MockServerHttpContentDecompressor;
+import org.mockserver.codec.MockServerHttpServerCodec;
+import org.mockserver.codec.PreserveHeadersNettyRemoves;
+import org.mockserver.configuration.Configuration;
+import org.mockserver.dashboard.DashboardWebSocketHandler;
+import org.mockserver.grpc.GrpcProtoDescriptorStore;
+import org.mockserver.lifecycle.LifeCycle;
+import org.mockserver.logging.MockServerLogger;
+import org.mockserver.mappers.FullHttpRequestToMockServerHttpRequest;
+import org.mockserver.mappers.MockServerHttpResponseToFullHttpResponse;
+import org.mockserver.mock.HttpState;
+import org.mockserver.mock.action.http.HttpActionHandler;
+import org.mockserver.netty.HttpRequestHandler;
+import org.mockserver.netty.connection.Http2StreamTransportTimer;
+import org.mockserver.netty.grpc.GrpcBidiRouterHandler;
+import org.mockserver.netty.grpc.GrpcToHttpRequestHandler;
+import org.mockserver.netty.grpc.GrpcToHttpResponseHandler;
+import org.mockserver.netty.mcp.McpStreamableHttpHandler;
+import org.mockserver.netty.websocketregistry.CallbackWebSocketServerHandler;
+import org.mockserver.socket.NettyAllocator;
+
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
+import java.security.cert.Certificate;
+
+/**
+ * Per-stream child initializer used with {@link io.netty.handler.codec.http2.Http2MultiplexHandler}
+ * to build the pipeline for <strong>every</strong> HTTP/2 stream. Since issue #2669 the multiplex
+ * pipeline is the only HTTP/2 server pipeline (h2 and h2c alike), so this initializer runs for all
+ * HTTP/2 traffic — ordinary HTTP GET/POST/SSE, the dashboard, MCP, proxying, and gRPC — not just
+ * when gRPC bidi streaming is enabled.
+ * <p>
+ * <strong>Per-stream routing.</strong> {@link #initChannel} installs {@link GrpcBidiRouterHandler}
+ * as the first handler <em>only</em> when {@code grpcBidiStreamingEnabled()} is on AND the gRPC
+ * descriptor store has services — the only configuration under which a stream can be a true gRPC
+ * bidi method that needs a dedicated streaming handler. In that case the router inspects the first
+ * HEADERS frame and either installs the bidi streaming handler (for a matched bidi method) or the
+ * re-aggregating chain (for everything else). When bidi routing is not possible the router would
+ * always fall through to the re-aggregating chain, so this initializer skips it entirely and
+ * installs the re-aggregating chain directly — a pointless per-stream handler avoided on the common
+ * path.
+ * <p>
+ * The re-aggregating chain ({@link Http2StreamFrameToHttpObjectCodec} +
+ * {@link HttpObjectAggregator} + downstream handlers) is factored into the static
+ * {@link #installReAggregatingChain} method so both this initializer and the router can install it.
+ */
+public class Http2MultiplexChildInitializer extends ChannelInitializer<Http2StreamChannel> {
+
+    private static final AttributeKey<ConnectionMappers> CONNECTION_MAPPERS = AttributeKey.valueOf("HTTP2_CONNECTION_MAPPERS");
+
+    private final Configuration configuration;
+    private final LifeCycle server;
+    private final HttpState httpState;
+    private final HttpActionHandler actionHandler;
+    private final MockServerLogger mockServerLogger;
+    private final boolean sslEnabled;
+    private final Certificate[] clientCertificates;
+    private final boolean timeTransport;
+
+    // Sharable handler instances -- reused across child channels (same as the existing h2 branch)
+    private final CallbackWebSocketServerHandler callbackWebSocketServerHandler;
+    private final DashboardWebSocketHandler dashboardWebSocketHandler;
+    private final TraceContextHandler traceContextHandler;
+    private final AltSvcHeaderHandler altSvcHeaderHandler;
+    private final GrpcToHttpResponseHandler grpcToHttpResponseHandler;
+    private final GrpcToHttpRequestHandler grpcToHttpRequestHandler;
+    private final HttpRequestHandler httpRequestHandler;
+    private final McpStreamableHttpHandler mcpStreamableHttpHandler;
+
+    // Descriptor store for bidi routing
+    private final GrpcProtoDescriptorStore descriptorStore;
+
+    public Http2MultiplexChildInitializer(
+        Configuration configuration,
+        LifeCycle server,
+        HttpState httpState,
+        HttpActionHandler actionHandler,
+        MockServerLogger mockServerLogger,
+        McpStreamableHttpHandler mcpStreamableHttpHandler,
+        boolean sslEnabled,
+        Certificate[] clientCertificates
+    ) {
+        this.configuration = configuration;
+        this.server = server;
+        this.httpState = httpState;
+        this.actionHandler = actionHandler;
+        this.mockServerLogger = mockServerLogger;
+        // Shared server-wide instance (null when MCP is disabled), owned by the caller.
+        this.mcpStreamableHttpHandler = mcpStreamableHttpHandler;
+        this.sslEnabled = sslEnabled;
+        this.clientCertificates = clientCertificates;
+        this.timeTransport = Boolean.TRUE.equals(configuration.metricsEnabled());
+
+        // Pre-build sharable handlers -- mirrors the instances created in switchToHttp2/switchToH2c
+        this.callbackWebSocketServerHandler = new CallbackWebSocketServerHandler(httpState);
+        this.dashboardWebSocketHandler = new DashboardWebSocketHandler(httpState, sslEnabled, false);
+        this.traceContextHandler = new TraceContextHandler(configuration);
+        int h3Port = configuration.http3Port();
+        if (h3Port > 0 && configuration.http3AdvertiseAltSvc()) {
+            this.altSvcHeaderHandler = new AltSvcHeaderHandler(h3Port, configuration.http3AltSvcMaxAge());
+        } else {
+            this.altSvcHeaderHandler = null;
+        }
+        this.httpRequestHandler = new HttpRequestHandler(configuration, server, httpState, actionHandler);
+
+        this.descriptorStore = httpState.getGrpcDescriptorStore();
+        if (descriptorStore != null && descriptorStore.hasServices()) {
+            this.grpcToHttpResponseHandler = new GrpcToHttpResponseHandler(mockServerLogger, descriptorStore);
+            // Pass the live Configuration (the config-aware constructor): GrpcFrameCodec falls back to
+            // the STATIC ConfigurationProperties when it is null, so a maxGrpcMessageSize set on a
+            // Configuration instance - or via PUT /mockserver/config - would silently have no effect.
+            // Since issue #2669 this pipeline serves ALL gRPC-over-HTTP/2, including the default
+            // bidi-off path that the deleted connection-adapter branch used to serve with the
+            // config-aware form; dropping it here would re-introduce a bug that was already fixed once
+            // and would diverge from HTTP/1.1 gRPC-Web, which still passes it.
+            this.grpcToHttpRequestHandler = new GrpcToHttpRequestHandler(configuration, mockServerLogger, descriptorStore);
+        } else {
+            this.grpcToHttpResponseHandler = null;
+            this.grpcToHttpRequestHandler = null;
+        }
+    }
+
+    @Override
+    protected void initChannel(Http2StreamChannel ch) {
+        // stream child channels get Netty's default (adaptive) allocator, not the parent's
+        NettyAllocator.pin(ch);
+        ChannelPipeline pipeline = ch.pipeline();
+
+        // HTTP/2 child channels do NOT inherit parent-channel attributes (AbstractHttp2StreamChannel
+        // delegates localAddress()/remoteAddress() to the parent but not the attribute map). Install
+        // ConnectionScopeHandler as the FIRST handler so it copies ALL connection-scoped attributes
+        // (protocol negotiation, TLS state, client certificates, proxying flag, local-host set, ...)
+        // from the parent connection channel onto this child stream channel before any downstream
+        // handler reads them. It copies once and removes itself. See ConnectionScopeHandler for the
+        // full list and rationale; without it protocol detection, WebSocket-501, mTLS control-plane
+        // auth, and proxy routing all misbehave on multiplexed HTTP/2 streams.
+        pipeline.addLast("connectionScope", ConnectionScopeHandler.INSTANCE);
+        if (timeTransport) {
+            // ahead of the codec, so it sees the stream's own HEADERS/DATA frames and their endStream flag
+            pipeline.addLast(new Http2StreamTransportTimer());
+        }
+
+        if (configuration.grpcBidiStreamingEnabled()
+            && descriptorStore != null
+            && descriptorStore.hasServices()) {
+            // Only here can a stream be a true gRPC bidi method needing a dedicated streaming handler.
+            // Install the router, which inspects the first HEADERS frame per stream and decides
+            // whether to use the bidi streaming path or the re-aggregating path. The router passes all
+            // sharable handler references so it can install the re-aggregating chain for non-bidi streams.
+            pipeline.addLast("grpcBidiRouter", new GrpcBidiRouterHandler(
+                configuration,
+                descriptorStore,
+                mockServerLogger,
+                sslEnabled,
+                clientCertificates,
+                callbackWebSocketServerHandler,
+                dashboardWebSocketHandler,
+                mcpStreamableHttpHandler,
+                traceContextHandler,
+                altSvcHeaderHandler,
+                grpcToHttpResponseHandler,
+                grpcToHttpRequestHandler,
+                httpRequestHandler,
+                httpState
+            ));
+        } else {
+            // No bidi routing possible on this connection, so every stream takes the re-aggregating
+            // chain; install it directly rather than routing each stream through a no-op router.
+            installReAggregatingChain(
+                pipeline,
+                configuration,
+                mockServerLogger,
+                sslEnabled,
+                clientCertificates,
+                ch,
+                callbackWebSocketServerHandler,
+                dashboardWebSocketHandler,
+                mcpStreamableHttpHandler,
+                traceContextHandler,
+                altSvcHeaderHandler,
+                grpcToHttpResponseHandler,
+                grpcToHttpRequestHandler,
+                httpRequestHandler
+            );
+        }
+    }
+
+    /**
+     * Installs the re-aggregating chain into the given pipeline: converts HTTP/2 stream frames back
+     * into {@code FullHttpRequest}/{@code FullHttpResponse} and adds the downstream handler chain
+     * (WebSocket, MCP, gRPC codec, request handler). This is the pipeline every ordinary HTTP/2
+     * stream uses.
+     * <p>
+     * It is a static method so both {@link #initChannel} (when no bidi routing is possible) and
+     * {@link GrpcBidiRouterHandler} (for non-bidi streams on a bidi-enabled connection) can install
+     * it. {@code public} because {@link GrpcBidiRouterHandler} lives in a different package.
+     *
+     * @param pipeline                      the child channel's pipeline
+     * @param configuration                 server configuration
+     * @param mockServerLogger              logger
+     * @param sslEnabled                    whether TLS is enabled
+     * @param clientCertificates            client certificates (may be null)
+     * @param channel                       the child channel; its connection (parent) scopes the shared codec mappers
+     * @param callbackWebSocketServerHandler sharable WebSocket callback handler
+     * @param dashboardWebSocketHandler     sharable dashboard WebSocket handler
+     * @param mcpStreamableHttpHandler      sharable MCP handler (may be null)
+     * @param traceContextHandler           sharable trace context handler
+     * @param altSvcHeaderHandler           sharable Alt-Svc header handler (may be null)
+     * @param grpcToHttpResponseHandler     sharable gRPC response handler (may be null)
+     * @param grpcToHttpRequestHandler      sharable gRPC request handler (may be null)
+     * @param httpRequestHandler            sharable HTTP request handler
+     */
+    public static void installReAggregatingChain(
+        ChannelPipeline pipeline,
+        Configuration configuration,
+        MockServerLogger mockServerLogger,
+        boolean sslEnabled,
+        Certificate[] clientCertificates,
+        Channel channel,
+        CallbackWebSocketServerHandler callbackWebSocketServerHandler,
+        DashboardWebSocketHandler dashboardWebSocketHandler,
+        McpStreamableHttpHandler mcpStreamableHttpHandler,
+        TraceContextHandler traceContextHandler,
+        AltSvcHeaderHandler altSvcHeaderHandler,
+        GrpcToHttpResponseHandler grpcToHttpResponseHandler,
+        GrpcToHttpRequestHandler grpcToHttpRequestHandler,
+        HttpRequestHandler httpRequestHandler
+    ) {
+        // Re-aggregate stream frames into FullHttpRequest/FullHttpResponse. Netty's single
+        // validateHeaders flag governs BOTH directions of the codec's conversion, but we need them to
+        // differ: lenient INBOUND (so a request header value that the connection-adapter path accepts --
+        // leading space, embedded DEL/control character -- reaches the matchers instead of being
+        // RST_STREAM'd as PROTOCOL_ERROR before matching, mirroring
+        // InboundHttp2ToHttpAdapterBuilder.validateHttpHeaders(false)) yet STRICT OUTBOUND (response and
+        // trailer header NAMES validated exactly as the connection-adapter path does, whose
+        // AbstractHttp2ConnectionHandlerBuilder.isValidateHeaders() defaults to true). A plain
+        // Http2StreamFrameToHttpObjectCodec(true, false) would relax both; the subclass keeps inbound
+        // lenient and re-asserts the strict outbound name check. See LenientInboundHttp2StreamFrameCodec.
+        // Note: only header NAMES are validated outbound, never values -- the codec builds outbound
+        // headers with the 2-arg DefaultHttp2Headers(validate, arraySizeHint) constructor, which installs
+        // a name validator (when validate) and no value validator either way. (The 3-arg
+        // DefaultHttp2Headers(validate, validateValues, arraySizeHint) constructor CAN install a value
+        // validator, but this codec does not use it.)
+        pipeline.addLast(new LenientInboundHttp2StreamFrameCodec());
+        // Sits between the aggregator and the codec on the OUTBOUND path (addLast is head->tail,
+        // outbound writes travel tail->head, so a handler added immediately after the codec
+        // intercepts writes before the codec does; HttpObjectAggregator is inbound-only so this does
+        // not disturb inbound aggregation). Streaming responses (SSE/NDJSON/AWS-event-stream, and so
+        // all LLM streaming) are written as StreamAddressedHttpContent because getStreamId() is
+        // non-null on the multiplex path. Without this translation the terminal frame's
+        // endStream=true is silently discarded by Http2StreamFrameToHttpObjectCodec (its bare
+        // HttpContent branch hard-codes endStream=false), the stream never closes, and the client
+        // hangs until it times out with nothing logged. See StreamAddressedContentHandler.
+        pipeline.addLast(StreamAddressedContentHandler.INSTANCE);
+        // Decompress a content-encoding request body as the HTTP/1.1 path does (PortUnificationHandler.switchToHttp:
+        // codec -> PreserveHeadersNettyRemoves -> MockServerHttpContentDecompressor -> aggregator), or a gzip body
+        // reaches the matchers compressed. After StreamAddressedContentHandler, which must stay next to the codec for
+        // outbound writes (the decompressor is inbound-only), and before the aggregator. Inert for gRPC (grpc-encoding).
+        // PreserveHeadersNettyRemoves MUST precede the decompressor, which strips content-encoding once it decodes; it
+        // also keeps the compressed bytes. A fresh instance per stream: it holds per-channel state.
+        pipeline.addLast(new PreserveHeadersNettyRemoves());
+        pipeline.addLast(new MockServerHttpContentDecompressor(configuration.maxRequestBodySize()));
+        pipeline.addLast(HttpObjectAggregators.streamHttpObjectAggregator(configuration.maxRequestBodySize()));
+
+        // Downstream chain -- identical to the existing switchToHttp2/switchToH2c post-adapter chain
+        pipeline.addLast(callbackWebSocketServerHandler);
+        pipeline.addLast(dashboardWebSocketHandler);
+        if (mcpStreamableHttpHandler != null) {
+            pipeline.addLast(mcpStreamableHttpHandler);
+        }
+        pipeline.addLast(serverCodec(channel, configuration, mockServerLogger, sslEnabled, clientCertificates));
+        pipeline.addLast(traceContextHandler);
+        if (altSvcHeaderHandler != null) {
+            pipeline.addLast(altSvcHeaderHandler);
+        }
+        if (grpcToHttpResponseHandler != null) {
+            pipeline.addLast(grpcToHttpResponseHandler);
+            pipeline.addLast(grpcToHttpRequestHandler);
+        }
+        pipeline.addLast(httpRequestHandler);
+    }
+
+    /**
+     * MockServerHttpServerCodec is NOT @Sharable, so every stream gets its own; but its request and response
+     * mappers are stateless apart from the request mapper's memos (the connection's address strings, the fields
+     * extracted from its client certificate chain, and the previous request's header wrappers), so one pair is
+     * built per HTTP/2 connection and reused by all its streams. Stream child channels always run on their
+     * connection's event loop, which is what makes those unsynchronised memos safe to share.
+     */
+    private static MockServerHttpServerCodec serverCodec(Channel channel, Configuration configuration, MockServerLogger mockServerLogger, boolean sslEnabled, Certificate[] clientCertificates) {
+        if (!(channel instanceof Http2StreamChannel)) {
+            SocketAddress localAddress = channel.parent() != null ? channel.parent().localAddress() : channel.localAddress();
+            return new MockServerHttpServerCodec(configuration, mockServerLogger, sslEnabled, clientCertificates, localAddress);
+        }
+        Attribute<ConnectionMappers> attribute = channel.parent().attr(CONNECTION_MAPPERS);
+        ConnectionMappers mappers = attribute.get();
+        if (mappers == null) {
+            SocketAddress localAddress = channel.parent().localAddress();
+            mappers = new ConnectionMappers(
+                new FullHttpRequestToMockServerHttpRequest(configuration, mockServerLogger, sslEnabled, clientCertificates,
+                    localAddress instanceof InetSocketAddress ? ((InetSocketAddress) localAddress).getPort() : null),
+                new MockServerHttpResponseToFullHttpResponse(mockServerLogger)
+            );
+            ConnectionMappers existing = attribute.setIfAbsent(mappers);
+            if (existing != null) {
+                mappers = existing;
+            }
+        }
+        return new MockServerHttpServerCodec(mockServerLogger, mappers.requestMapper, mappers.responseMapper);
+    }
+
+    private static final class ConnectionMappers {
+        private final FullHttpRequestToMockServerHttpRequest requestMapper;
+        private final MockServerHttpResponseToFullHttpResponse responseMapper;
+
+        private ConnectionMappers(FullHttpRequestToMockServerHttpRequest requestMapper, MockServerHttpResponseToFullHttpResponse responseMapper) {
+            this.requestMapper = requestMapper;
+            this.responseMapper = responseMapper;
+        }
+    }
+}

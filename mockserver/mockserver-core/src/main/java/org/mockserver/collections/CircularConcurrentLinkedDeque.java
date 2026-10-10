@@ -1,0 +1,346 @@
+package org.mockserver.collections;
+
+import java.util.Collection;
+import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
+import java.util.function.ToLongFunction;
+
+/**
+ * A bounded {@link ConcurrentLinkedDeque} that evicts the oldest element(s) once it reaches
+ * {@code maxSize}, invoking an optional callback on each evicted element.
+ * <p>
+ * <strong>Why the explicit size counter:</strong> {@link ConcurrentLinkedDeque#size()} is
+ * documented as an <em>O(n)</em> operation (it walks the whole list). The eviction check runs
+ * on every {@link #add}/{@link #offer}, so relying on {@code super.size()} made each insertion
+ * O(n) once the deque was full — the hot path for MockServer's request/event log. Under a
+ * sustained request load this manifested as CPU usage that climbed as the log filled and stayed
+ * high (GitHub issue #2329). An {@link AtomicInteger} maintained by every mutating method makes
+ * {@link #size()} and the eviction check O(1).
+ * <p>
+ * The counter is kept consistent by every size-changing method on this class
+ * ({@link #add}, {@link #offer}, {@link #addAll} (via {@code add}), {@link #remove},
+ * {@link #removeItem}, {@link #clear}, and the internal eviction). Callers must mutate the deque
+ * only through these methods (MockServer's {@code MockServerEventLog} does); direct use of other
+ * inherited bulk mutators is not supported by this subclass.
+ * <p>
+ * <strong>Optional byte budget:</strong> in addition to the element-count bound, an optional
+ * {@code maxBytes} budget can be supplied together with a {@code weigher} (via the 4-arg
+ * constructor). Each element's weight is measured by the weigher on insertion and accumulated into
+ * {@link #totalBytes}; whenever an insertion would push the running total over {@code maxBytes} the
+ * oldest elements are evicted first until it fits (or the deque is empty). This caps the heap held
+ * by the event log when individual entries are large (e.g. big LLM-capture bodies) rather than only
+ * by entry count. A single element whose weight alone exceeds {@code maxBytes} is still retained —
+ * the byte-eviction loop stops once the deque is empty so we never reject the incoming element. The
+ * budget is disabled when {@code maxBytes <= 0} or the weigher is {@code null}, in which case the
+ * deque behaves exactly as the count-bounded version.
+ * <p>
+ * <strong>Eviction accounting:</strong> {@link #getEvictedCount()} reports how many elements this
+ * deque has silently discarded to stay within its bounds. This deque is the only layer that can
+ * distinguish an <em>eviction</em> (evidence lost because the buffer was full) from an intentional
+ * {@link #clear()} or a targeted {@link #removeItem(Object)} — both of which invoke the same
+ * eviction callback but are deliberate, not lossy. Only {@link #pollAndEvict()} increments the
+ * counter; {@link #clear()} resets it, because after an explicit clear the caller has declared the
+ * previous contents irrelevant. MockServer's event log surfaces this count so a verification can
+ * tell "this never happened" apart from "the evidence was discarded".
+ *
+ * @author jamesdbloom
+ */
+public class CircularConcurrentLinkedDeque<E> extends ConcurrentLinkedDeque<E> {
+
+    private static final long serialVersionUID = 1L;
+
+    // volatile: mutated cross-thread by setMaxSize/setMaxBytes (a control-plane configuration update)
+    // and read both on the single mutating thread (the eviction checks) and, for the ceiling gauges,
+    // on the Prometheus scrape thread. volatile makes the 64-bit maxBytes read atomic (a plain long
+    // read is not JMM-guaranteed atomic) and publishes a live resize to the reader without a lock.
+    private volatile int maxSize;
+    private volatile long maxBytes;
+    private final ToLongFunction<E> weigher;
+    private final Consumer<E> onEvictCallback;
+    // O(1) element count — see class javadoc. Updated by every mutating method below.
+    private final AtomicInteger count = new AtomicInteger(0);
+    // Running total of element weights (per the weigher), kept consistent alongside count so the
+    // byte-budget check is O(1). Zero/unused when the budget is disabled.
+    private final AtomicLong totalBytes = new AtomicLong(0);
+    // Number of elements discarded to stay within maxSize/maxBytes — see class javadoc. Incremented
+    // ONLY by pollAndEvict (real eviction), never by clear() or removeItem() (deliberate removal).
+    private final AtomicLong evictedCount = new AtomicLong(0);
+    // Subset of evictedCount attributable to the BYTE budget (maxBytes) rather than the element-count
+    // bound (maxSize) — incremented only in the byte-eviction paths (the byte loop of
+    // evictExcessElements and a byte-budget shrink). Lets a caller tell which bound is doing the
+    // evicting so it can name the right property in an operator warning, without threading a reason
+    // through the shared pollAndEvict. Reset alongside evictedCount by clear() and resetEvictedCount().
+    private final AtomicLong byteEvictedCount = new AtomicLong(0);
+
+    public CircularConcurrentLinkedDeque(int maxSize, Consumer<E> onEvictCallback) {
+        this(maxSize, 0, null, onEvictCallback);
+    }
+
+    public CircularConcurrentLinkedDeque(int maxSize, long maxBytes, ToLongFunction<E> weigher, Consumer<E> onEvictCallback) {
+        this.maxSize = maxSize;
+        this.maxBytes = maxBytes;
+        this.weigher = weigher;
+        this.onEvictCallback = onEvictCallback;
+    }
+
+    /**
+     * Resize the element-count bound. A SHRINK takes effect immediately: the oldest elements are
+     * evicted (firing the eviction callback, exactly as an overflow eviction would) until the deque
+     * fits the new bound, rather than waiting for the next {@link #add}. This is what makes a live
+     * {@code maxLogEntries} change via {@code PUT /mockserver/configuration} release memory at once
+     * instead of only after further traffic.
+     */
+    public void setMaxSize(int maxSize) {
+        this.maxSize = maxSize;
+        while (count.get() > maxSize) {
+            if (!pollAndEvict()) {
+                break;
+            }
+        }
+    }
+
+    /**
+     * Resize the optional byte budget. Like {@link #setMaxSize(int)} a shrink takes effect
+     * immediately, evicting the oldest elements until the running byte total fits the new budget.
+     * No-op accounting when the budget is disabled ({@code maxBytes <= 0} or no weigher).
+     */
+    public void setMaxBytes(long maxBytes) {
+        this.maxBytes = maxBytes;
+        if (maxBytes > 0 && weigher != null) {
+            while (totalBytes.get() > maxBytes && count.get() > 0) {
+                if (pollAndEvict()) {
+                    byteEvictedCount.incrementAndGet();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    /**
+     * O(1) size, backed by an internal counter (unlike {@link ConcurrentLinkedDeque#size()}
+     * which is O(n)).
+     */
+    @Override
+    public int size() {
+        return count.get();
+    }
+
+    @Override
+    public boolean isEmpty() {
+        return count.get() == 0;
+    }
+
+    @Override
+    public boolean add(E element) {
+        if (maxSize > 0) {
+            long weight = weigher != null ? weigher.applyAsLong(element) : 0;
+            evictExcessElements(weight);
+            if (super.add(element)) {
+                count.incrementAndGet();
+                totalBytes.addAndGet(weight);
+                return true;
+            }
+            return false;
+        } else {
+            return false;
+        }
+    }
+
+    @Override
+    public boolean addAll(Collection<? extends E> collection) {
+        if (maxSize > 0) {
+            boolean result = false;
+            for (E element : collection) {
+                if (add(element)) {
+                    result = true;
+                }
+            }
+            return result;
+        } else {
+            return false;
+        }
+    }
+
+    @Override
+    public boolean offer(E element) {
+        if (maxSize > 0) {
+            long weight = weigher != null ? weigher.applyAsLong(element) : 0;
+            evictExcessElements(weight);
+            if (super.offer(element)) {
+                count.incrementAndGet();
+                totalBytes.addAndGet(weight);
+                return true;
+            }
+            return false;
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * Evict the oldest elements to make room for an incoming element of the given weight: first to
+     * satisfy the element-count bound, then (when a byte budget is configured) to keep the running
+     * byte total plus the incoming weight within {@code maxBytes}. The byte loop stops once the deque
+     * is empty so a single element larger than the whole budget is still admitted by the caller.
+     */
+    private void evictExcessElements(long incomingWeight) {
+        while (count.get() >= maxSize) {
+            if (!pollAndEvict()) {
+                // deque already empty (defensive — should not happen while count >= maxSize > 0)
+                break;
+            }
+        }
+        if (maxBytes > 0 && weigher != null) {
+            while (totalBytes.get() + incomingWeight > maxBytes && count.get() > 0) {
+                if (pollAndEvict()) {
+                    byteEvictedCount.incrementAndGet();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    /**
+     * Remove and return the oldest element, keeping {@link #count} and {@link #totalBytes} consistent
+     * and invoking the eviction callback. The weight is subtracted BEFORE the callback runs because
+     * the callback may clear/reset the element (and hence its weigher input). Returns {@code false}
+     * when the deque was already empty.
+     */
+    private boolean pollAndEvict() {
+        E evicted = super.poll();
+        if (evicted == null) {
+            return false;
+        }
+        count.decrementAndGet();
+        evictedCount.incrementAndGet();
+        if (weigher != null) {
+            totalBytes.addAndGet(-weigher.applyAsLong(evicted));
+        }
+        if (onEvictCallback != null) {
+            onEvictCallback.accept(evicted);
+        }
+        return true;
+    }
+
+    /**
+     * Number of elements silently discarded to stay within {@code maxSize}/{@code maxBytes} since
+     * construction or the last {@link #clear()}. A non-zero value means this deque no longer holds
+     * a complete record of what was added to it — any consumer that reasons about absence (e.g. a
+     * "this never happened" verification) must treat its answer as unreliable.
+     */
+    public long getEvictedCount() {
+        return evictedCount.get();
+    }
+
+    /**
+     * Of the {@link #getEvictedCount()} evictions, how many were driven by the BYTE budget
+     * ({@code maxBytes}) rather than the element-count bound ({@code maxSize}). Zero when the byte
+     * budget is disabled or every eviction so far was count-driven. A caller can compare this with
+     * {@link #getEvictedCount()} to tell which bound is doing the evicting and name the property that
+     * raises it. Reset to zero by {@link #clear()} and {@link #resetEvictedCount()} alongside the
+     * total.
+     */
+    public long getByteEvictedCount() {
+        return byteEvictedCount.get();
+    }
+
+    /**
+     * The current summed weight (per the weigher) of the elements this deque still holds — the
+     * RETAINED, post-processing heap it is accounting for, as distinct from any in-flight figure a
+     * caller tracks separately (e.g. MockServerEventLog's ring in-flight bytes). This is the running
+     * total the byte budget is enforced against; it rises as weighed elements are added and falls as
+     * they are evicted, removed, or the deque is cleared.
+     * <p>
+     * MEASUREMENT IS INDEPENDENT OF THE BUDGET. Weights are accumulated whenever a weigher is
+     * configured, whether or not {@code maxBytes > 0}: a disabled byte budget skips the byte EVICTION
+     * loop in {@link #evictExcessElements(long)}, not the accounting. So this reads a real, growing
+     * figure with the budget disabled — which is exactly when it matters most, because nothing is then
+     * bounding what the deque retains. It is zero only when the deque was built with no weigher (the
+     * 2-arg constructor), which opts out of weight tracking altogether.
+     */
+    public long getTotalBytes() {
+        return totalBytes.get();
+    }
+
+    /**
+     * The byte budget currently in force ({@code maxBytes}); {@code <= 0} means the byte bound is
+     * disabled and only the element-count bound applies. This is the ceiling {@link #getTotalBytes()}
+     * (the RETAINED weight) is held under, not any in-flight ceiling a caller tracks separately.
+     */
+    public long getMaxBytes() {
+        return maxBytes;
+    }
+
+    /**
+     * The element-count bound currently in force ({@code maxSize}) — the maximum number of elements
+     * this deque retains before evicting the oldest.
+     */
+    public int getMaxSize() {
+        return maxSize;
+    }
+
+    /**
+     * Forget past evictions without touching the contents. Used when a caller declares everything
+     * recorded so far irrelevant but does not (or cannot) physically empty the deque — e.g.
+     * MockServer's "clear everything" path, which tombstones entries rather than removing them.
+     * Without this, one rollover would taint every later query for the lifetime of the process.
+     */
+    public void resetEvictedCount() {
+        evictedCount.set(0);
+        byteEvictedCount.set(0);
+    }
+
+    @Override
+    public void clear() {
+        E evicted;
+        while ((evicted = super.poll()) != null) {
+            count.decrementAndGet();
+            if (onEvictCallback != null) {
+                onEvictCallback.accept(evicted);
+            }
+        }
+        // drained — reset the byte accounting in one shot (avoids relying on per-element weights of
+        // elements the callback may already have cleared).
+        totalBytes.set(0);
+        // An explicit clear declares the previous contents irrelevant, so past evictions no longer
+        // taint anything a caller asks about the (now empty) deque. Resetting here is what keeps a
+        // per-test `reset()` from permanently poisoning every later verification in a long-running
+        // server — see MockServerEventLog.
+        evictedCount.set(0);
+        byteEvictedCount.set(0);
+    }
+
+    /**
+     * @deprecated use removeItem instead
+     */
+    @Deprecated
+    @Override
+    public boolean remove(Object o) {
+        // Deprecated path: the element weight is not subtracted from totalBytes (the weigher is typed
+        // on E and this takes Object), so the byte total may remain approximate — biased high, never
+        // negative — after this call. removeItem(E) keeps the byte total exact; prefer it.
+        if (super.remove(o)) {
+            count.decrementAndGet();
+            return true;
+        }
+        return false;
+    }
+
+    public boolean removeItem(E e) {
+        // capture the weight before the callback (which may clear the element) and before removal
+        long weight = weigher != null ? weigher.applyAsLong(e) : 0;
+        if (onEvictCallback != null) {
+            onEvictCallback.accept(e);
+        }
+        if (super.remove(e)) {
+            count.decrementAndGet();
+            totalBytes.addAndGet(-weight);
+            return true;
+        }
+        return false;
+    }
+}

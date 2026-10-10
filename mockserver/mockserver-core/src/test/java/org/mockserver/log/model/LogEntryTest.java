@@ -1,0 +1,529 @@
+package org.mockserver.log.model;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.Test;
+import org.mockserver.matchers.TimeToLive;
+import org.mockserver.matchers.Times;
+import org.mockserver.mock.Expectation;
+import org.mockserver.model.HttpResponse;
+import org.mockserver.model.JsonBody;
+import org.mockserver.model.RequestDefinition;
+import org.mockserver.serialization.ObjectMapperFactory;
+
+import java.nio.charset.StandardCharsets;
+
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.arrayWithSize;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.Matchers.sameInstance;
+import static org.hamcrest.core.Is.is;
+import static org.mockserver.matchers.MatchType.ONLY_MATCHING_FIELDS;
+import static org.mockserver.model.HttpRequest.request;
+import static org.mockserver.model.HttpResponse.response;
+
+/**
+ * Tests that the lazily-materialized cached fields of {@link LogEntry}
+ * ({@code message} and the cached {@code hashCode}) are invalidated by {@link LogEntry#clear()} and by
+ * the setters that feed them, and that the {@code getHttpUpdated*} display copies are recomputed on every
+ * call rather than retained on the entry.
+ * <p>
+ * This matters because {@link LogEntry} instances are reused via the Disruptor ring
+ * buffer ({@link LogEntry#translateTo(LogEntry, long)} reuses slots and calls
+ * {@code clear()}). Without invalidation, stale redacted/templated request/response
+ * data or a stale cached {@code hashCode} could bleed from a previous logical entry
+ * into a reused slot — and because {@link LogEntry#equals(Object)} short-circuits on
+ * {@link LogEntry#hashCode()}, a stale hash can make two equal entries compare unequal.
+ *
+ * @author jamesdbloom
+ */
+public class LogEntryTest {
+
+    @Test
+    public void shouldReturnFreshUpdatedRequestsAfterClearAndRepopulate() {
+        // given - a LogEntry whose updated-requests cache has been materialized
+        LogEntry logEntry = new LogEntry()
+            .setHttpRequest(request().withPath("/original").withBody("original-body"));
+        RequestDefinition[] firstUpdated = logEntry.getHttpUpdatedRequests();
+        assertThat(firstUpdated, is(arrayWithSize(1)));
+        assertThat(firstUpdated[0].toString(), containsString("/original"));
+
+        // when - the slot is cleared and repopulated with a different request
+        logEntry.clear();
+        logEntry.setHttpRequest(request().withPath("/replacement").withBody("replacement-body"));
+
+        // then - the getter returns the NEW value, not the stale cached one
+        RequestDefinition[] secondUpdated = logEntry.getHttpUpdatedRequests();
+        assertThat(secondUpdated, is(arrayWithSize(1)));
+        assertThat(secondUpdated[0].toString(), containsString("/replacement"));
+        assertThat(secondUpdated[0].toString(), not(containsString("/original")));
+    }
+
+    @Test
+    public void shouldReturnFreshUpdatedRequestsAfterSetterMutation() {
+        // given - cache materialized via getter
+        LogEntry logEntry = new LogEntry()
+            .setHttpRequest(request().withPath("/original"));
+        assertThat(logEntry.getHttpUpdatedRequests()[0].toString(), containsString("/original"));
+
+        // when - the underlying request is changed via the setter (no clear)
+        logEntry.setHttpRequest(request().withPath("/changed"));
+
+        // then - the setter invalidated the cache, so the new value is returned
+        assertThat(logEntry.getHttpUpdatedRequests()[0].toString(), containsString("/changed"));
+        assertThat(logEntry.getHttpUpdatedRequests()[0].toString(), not(containsString("/original")));
+    }
+
+    @Test
+    public void doesNotRetainDerivedUpdatedRequestsOnTheEntry() {
+        // The dashboard / JSON-log render path calls getHttpUpdatedRequests(config), which returns a clone
+        // whose body is a parsed LogEntryBody. That derived form must NOT be memoised onto the retained
+        // entry: a memo there outlived the render with no release path and, being excluded from
+        // estimatedHeapSize, made the byte budget silently under-count every entry a dashboard had rendered.
+        // Recomputing on every call is the observable signature of "nothing derived is retained": each call
+        // yields a fresh array and fresh cloned element while the rendered value is unchanged.
+        LogEntry logEntry = new LogEntry()
+            .setHttpRequest(request().withPath("/api").withBody("{\"x\":1}"));
+
+        RequestDefinition[] first = logEntry.getHttpUpdatedRequests(null);
+        RequestDefinition[] second = logEntry.getHttpUpdatedRequests(null);
+
+        assertThat(second, is(not(sameInstance(first))));
+        assertThat(second[0], is(not(sameInstance(first[0]))));
+        assertThat(second[0].toString(), is(first[0].toString()));
+    }
+
+    @Test
+    public void doesNotRetainDerivedUpdatedResponseOnTheEntry() {
+        // As doesNotRetainDerivedUpdatedRequestsOnTheEntry, for the response display copy.
+        LogEntry logEntry = new LogEntry()
+            .setHttpResponse(response().withBody("{\"ok\":true}"));
+
+        HttpResponse first = logEntry.getHttpUpdatedResponse(null);
+        HttpResponse second = logEntry.getHttpUpdatedResponse(null);
+
+        assertThat(second, is(not(sameInstance(first))));
+        assertThat(second.getBodyAsString(), is(first.getBodyAsString()));
+    }
+
+    @Test
+    public void shouldReturnFreshUpdatedResponseAfterClearAndRepopulate() {
+        // given - a LogEntry whose updated-response cache has been materialized
+        LogEntry logEntry = new LogEntry()
+            .setHttpResponse(response().withBody("original-response"));
+        HttpResponse firstUpdated = logEntry.getHttpUpdatedResponse();
+        assertThat(firstUpdated.getBodyAsString(), containsString("original-response"));
+
+        // when - the slot is cleared and repopulated with a different response
+        logEntry.clear();
+        logEntry.setHttpResponse(response().withBody("replacement-response"));
+
+        // then - the getter returns the NEW value, not the stale cached one
+        HttpResponse secondUpdated = logEntry.getHttpUpdatedResponse();
+        assertThat(secondUpdated.getBodyAsString(), containsString("replacement-response"));
+        assertThat(secondUpdated.getBodyAsString(), not(containsString("original-response")));
+    }
+
+    @Test
+    public void shouldReturnFreshUpdatedResponseAfterSetterMutation() {
+        // given - cache materialized via getter
+        LogEntry logEntry = new LogEntry()
+            .setHttpResponse(response().withBody("original-response"));
+        assertThat(logEntry.getHttpUpdatedResponse().getBodyAsString(), containsString("original-response"));
+
+        // when - the underlying response is changed via the setter (no clear)
+        logEntry.setHttpResponse(response().withBody("changed-response"));
+
+        // then - the setter invalidated the cache, so the new value is returned
+        assertThat(logEntry.getHttpUpdatedResponse().getBodyAsString(), containsString("changed-response"));
+        assertThat(logEntry.getHttpUpdatedResponse().getBodyAsString(), not(containsString("original-response")));
+    }
+
+    @Test
+    public void shouldReturnFreshMessageAfterClearAndRepopulate() {
+        // given - a LogEntry whose message cache has been materialized
+        LogEntry logEntry = new LogEntry().setMessageFormat("first message");
+        assertThat(logEntry.getMessage(), is("first message"));
+
+        // when - the slot is cleared and repopulated with a different message format
+        logEntry.clear();
+        logEntry.setMessageFormat("second message");
+
+        // then - the getter returns the NEW value, not the stale cached one
+        assertThat(logEntry.getMessage(), is("second message"));
+    }
+
+    @Test
+    public void shouldReturnFreshMessageAfterSetterMutation() {
+        // given - cache materialized via getter
+        LogEntry logEntry = new LogEntry().setMessageFormat("first message");
+        assertThat(logEntry.getMessage(), is("first message"));
+
+        // when - the message format is changed via the setter (no clear)
+        logEntry.setMessageFormat("updated message");
+
+        // then - the setter invalidated the cache, so the new value is returned
+        assertThat(logEntry.getMessage(), is("updated message"));
+    }
+
+    @Test
+    public void shouldRecomputeHashCodeAfterClearAndRepopulate() {
+        // given - two distinct logical entries
+        LogEntry first = new LogEntry()
+            .setEpochTime(1000L)
+            .setMessageFormat("first")
+            .setHttpRequest(request().withPath("/first"));
+        LogEntry second = new LogEntry()
+            .setEpochTime(2000L)
+            .setMessageFormat("second")
+            .setHttpRequest(request().withPath("/second"));
+
+        // and - a reusable slot whose hashCode is materialized as the first entry
+        LogEntry reused = new LogEntry()
+            .setEpochTime(1000L)
+            .setMessageFormat("first")
+            .setHttpRequest(request().withPath("/first"));
+        int firstHash = reused.hashCode();
+        assertThat(firstHash, is(first.hashCode()));
+
+        // when - the slot is cleared and repopulated to mirror the second entry
+        reused.clear();
+        reused
+            .setEpochTime(2000L)
+            .setMessageFormat("second")
+            .setHttpRequest(request().withPath("/second"));
+
+        // then - hashCode is recomputed for the new state (no stale hash)
+        assertThat(reused.hashCode(), is(second.hashCode()));
+        assertThat(reused.hashCode(), is(not(firstHash)));
+        // and - equals reflects the new state (equals short-circuits on hashCode)
+        assertThat(reused.equals(second), is(true));
+        assertThat(reused.equals(first), is(false));
+    }
+
+    @Test
+    public void shouldRecomputeHashCodeAfterSetterMutation() {
+        // given - an entry whose hashCode has been materialized
+        LogEntry logEntry = new LogEntry()
+            .setEpochTime(1000L)
+            .setMessageFormat("before");
+        int beforeHash = logEntry.hashCode();
+
+        // when - an equality-relevant field is mutated via a setter (no clear)
+        logEntry.setMessageFormat("after");
+
+        // then - hashCode is recomputed, matching a freshly-built equivalent entry
+        LogEntry equivalent = new LogEntry()
+            .setEpochTime(1000L)
+            .setMessageFormat("after");
+        assertThat(logEntry.hashCode(), is(equivalent.hashCode()));
+        assertThat(logEntry.hashCode(), is(not(beforeHash)));
+        assertThat(logEntry.equals(equivalent), is(true));
+    }
+
+    // The two-argument setExpectation(request, response) used on the serving path no longer allocates and
+    // retains a synthetic Expectation per entry; getExpectation() derives it lazily. These tests pin that
+    // (a) getExpectation() returns the same object the eager code used to build, (b) it is derived, not
+    // retained, until first read, (c) a real expectation supplied via the single-argument form is stored
+    // and returned as-is, and (d) equals/hashCode still distinguish synthetic / real / absent.
+
+    private static Expectation eagerSynthetic(RequestDefinition request, HttpResponse response) {
+        return new Expectation(request, Times.once(), TimeToLive.unlimited(), 0).thenRespond(response);
+    }
+
+    @Test
+    public void syntheticExpectationDerivedEqualsEagerlyBuiltOne() {
+        LogEntry logEntry = new LogEntry()
+            .setHttpRequest(request().withPath("/x"))
+            .setHttpResponse(response().withStatusCode(200).withBody("hi"))
+            .setExpectation(request().withPath("/x"), response().withStatusCode(200).withBody("hi"));
+
+        Expectation derived = logEntry.getExpectation();
+        assertThat(derived, is(notNullValue()));
+        // Expectation.equals ignores the random id/created, so a derived synthetic must equal the object
+        // the eager code produced from the same request/response.
+        assertThat(derived, is(eagerSynthetic(request().withPath("/x"), response().withStatusCode(200).withBody("hi"))));
+    }
+
+    @Test
+    public void syntheticExpectationIsNotRetainedButMemoizedOnFirstRead() throws Exception {
+        LogEntry logEntry = new LogEntry()
+            .setHttpRequest(request().withPath("/x"))
+            .setHttpResponse(response().withStatusCode(200).withBody("hi"))
+            .setExpectation(request().withPath("/x"), response().withStatusCode(200).withBody("hi"));
+
+        // Nothing is retained on the serving path: the real-expectation field is null and the derived
+        // cache has not been materialized until getExpectation() is called.
+        java.lang.reflect.Field expectationField = LogEntry.class.getDeclaredField("expectation");
+        expectationField.setAccessible(true);
+        java.lang.reflect.Field derivedField = LogEntry.class.getDeclaredField("derivedSyntheticExpectation");
+        derivedField.setAccessible(true);
+        assertThat(expectationField.get(logEntry), is(nullValue()));
+        assertThat(derivedField.get(logEntry), is(nullValue()));
+
+        // First read materializes and memoizes, so repeated reads return the same instance (stable id and
+        // therefore byte-identical serialized output across serializations of one entry).
+        Expectation first = logEntry.getExpectation();
+        Expectation second = logEntry.getExpectation();
+        assertThat(first, is(sameInstance(second)));
+        assertThat(expectationField.get(logEntry), is(nullValue()));
+    }
+
+    @Test
+    public void realExpectationStoredAndReturnedAsIs() throws Exception {
+        Expectation real = new Expectation(request().withPath("/real")).withId("fixed-id");
+        LogEntry logEntry = new LogEntry()
+            .setHttpRequest(request().withPath("/real"))
+            .setExpectation(real);
+
+        assertThat(logEntry.getExpectation(), is(sameInstance(real)));
+        java.lang.reflect.Field expectationField = LogEntry.class.getDeclaredField("expectation");
+        expectationField.setAccessible(true);
+        assertThat(expectationField.get(logEntry), is(sameInstance(real)));
+    }
+
+    @Test
+    public void serializedSyntheticExpectationMatchesEagerlyBuiltOne() throws Exception {
+        ObjectMapper mapper = ObjectMapperFactory.createObjectMapper();
+
+        LogEntry synthetic = new LogEntry()
+            .setEpochTime(1000L)
+            .setHttpRequest(request().withPath("/x"))
+            .setHttpResponse(response().withStatusCode(200).withBody("hi"))
+            .setExpectation(request().withPath("/x"), response().withStatusCode(200).withBody("hi"));
+
+        LogEntry eager = new LogEntry()
+            .setEpochTime(1000L)
+            .setHttpRequest(request().withPath("/x"))
+            .setHttpResponse(response().withStatusCode(200).withBody("hi"))
+            .setExpectation(eagerSynthetic(request().withPath("/x"), response().withStatusCode(200).withBody("hi")));
+
+        // The negative control targets this assertion: if getExpectation() stops deriving the synthetic
+        // expectation, the "expectation" object disappears from the serialized entry and this fails.
+        assertThat(mapper.writeValueAsString(synthetic), containsString("\"expectation\""));
+        // The derived expectation equals the eagerly built one except for its random id. (LOG_ENTRIES writes a
+        // synthetic one without the bodies the entry already writes, so the two entries' JSON now differ.)
+        assertThat(stripExpectationId(mapper.writeValueAsString(synthetic.getExpectation())),
+            is(stripExpectationId(mapper.writeValueAsString(eager.getExpectation()))));
+    }
+
+    private static String stripExpectationId(String json) {
+        return json.replaceAll("\"id\":\"[0-9a-fA-F-]+\"", "\"id\":\"<id>\"");
+    }
+
+    @Test
+    public void equalsAndHashCodeDistinguishSyntheticRealAndAbsentExpectations() {
+        LogEntry synthetic = new LogEntry()
+            .setEpochTime(1000L)
+            .setHttpRequest(request().withPath("/x"))
+            .setHttpResponse(response().withStatusCode(200))
+            .setExpectation(request().withPath("/x"), response().withStatusCode(200));
+        LogEntry syntheticEquivalent = new LogEntry()
+            .setEpochTime(1000L)
+            .setHttpRequest(request().withPath("/x"))
+            .setHttpResponse(response().withStatusCode(200))
+            .setExpectation(request().withPath("/x"), response().withStatusCode(200));
+        LogEntry noExpectation = new LogEntry()
+            .setEpochTime(1000L)
+            .setHttpRequest(request().withPath("/x"))
+            .setHttpResponse(response().withStatusCode(200));
+
+        // two synthetic entries built from equal request/response are equal
+        assertThat(synthetic.equals(syntheticEquivalent), is(true));
+        assertThat(synthetic.hashCode(), is(syntheticEquivalent.hashCode()));
+
+        // a synthetic entry is NOT equal to an otherwise-identical entry that carries no expectation
+        // (previously the field was non-null vs null); the synthetic flag preserves that distinction
+        assertThat(synthetic.equals(noExpectation), is(false));
+
+        // a synthetic entry is not equal to one carrying a real, unrelated expectation
+        LogEntry real = new LogEntry()
+            .setEpochTime(1000L)
+            .setHttpRequest(request().withPath("/x"))
+            .setHttpResponse(response().withStatusCode(200))
+            .setExpectation(new Expectation(request().withPath("/other")));
+        assertThat(synthetic.equals(real), is(false));
+    }
+
+    @Test
+    public void cloneOfSyntheticEntryDoesNotForceMaterialisationAndStaysEqual() throws Exception {
+        LogEntry original = new LogEntry()
+            .setType(LogEntry.LogMessageType.FORWARDED_REQUEST)
+            .setEpochTime(1000L)
+            .setHttpRequest(request().withPath("/x"))
+            .setHttpResponse(response().withStatusCode(200).withBody("hi"))
+            .setExpectation(request().withPath("/x"), response().withStatusCode(200).withBody("hi"));
+
+        LogEntry clone = original.clone();
+
+        // cloning must not turn the lazy synthetic into a retained real expectation
+        java.lang.reflect.Field expectationField = LogEntry.class.getDeclaredField("expectation");
+        expectationField.setAccessible(true);
+        assertThat(expectationField.get(clone), is(nullValue()));
+
+        assertThat(clone.equals(original), is(true));
+        assertThat(clone.hashCode(), is(original.hashCode()));
+        assertThat(clone.getExpectation(), is(original.getExpectation()));
+    }
+
+    /**
+     * getExpectation() now materializes the synthetic expectation lazily, and one retained LogEntry is read
+     * concurrently by many off-consumer threads (logQueryExecutor scans, parallel /retrieve serializations).
+     * The memoizing field is volatile so a reader that sees a non-null reference also sees a fully-built
+     * Expectation. This drives many threads at one fresh entry per iteration and fails on any torn read
+     * (null request/response or wrong values). Per docs/code/optimisation-safety.md hazard class 4 it is run
+     * over many iterations; a race here is intermittent, so a single green run would prove little. With the
+     * volatile removed this is a smoke check (it may not fail on every run) - the correctness guarantee
+     * rests on the JMM safe-publication argument, and this test guards against a regression that drops it.
+     */
+    @Test
+    public void concurrentGetExpectationAlwaysReturnsFullyPublishedExpectation() throws Exception {
+        final int threads = Math.max(8, Runtime.getRuntime().availableProcessors() * 2);
+        final int iterations = 500;
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        try {
+            for (int i = 0; i < iterations; i++) {
+                // a FRESH synthetic entry each iteration, so its cache starts null and the threads race the
+                // first materialization rather than all reading an already-published value
+                final LogEntry entry = new LogEntry()
+                    .setType(LogEntry.LogMessageType.FORWARDED_REQUEST)
+                    .setHttpRequest(request().withPath("/race"))
+                    .setHttpResponse(response().withStatusCode(202).withBody("body-" + i))
+                    .setExpectation(request().withPath("/race"), response().withStatusCode(202).withBody("body-" + i));
+                final String expectedBody = "body-" + i;
+
+                final java.util.concurrent.CyclicBarrier barrier = new java.util.concurrent.CyclicBarrier(threads);
+                java.util.List<java.util.concurrent.Future<String>> futures = new java.util.ArrayList<>();
+                for (int t = 0; t < threads; t++) {
+                    futures.add(pool.submit(() -> {
+                        barrier.await();
+                        Expectation exp = entry.getExpectation();
+                        if (exp == null) {
+                            return "null expectation";
+                        }
+                        RequestDefinition req = exp.getHttpRequest();
+                        HttpResponse resp = exp.getHttpResponse();
+                        if (req == null) {
+                            return "null request";
+                        }
+                        if (resp == null) {
+                            return "null response";
+                        }
+                        if (!resp.getBodyAsString().equals(expectedBody)) {
+                            return "torn response body: " + resp.getBodyAsString();
+                        }
+                        if (resp.getStatusCode() == null || resp.getStatusCode() != 202) {
+                            return "torn status: " + resp.getStatusCode();
+                        }
+                        return "ok";
+                    }));
+                }
+                for (java.util.concurrent.Future<String> f : futures) {
+                    assertThat(f.get(30, java.util.concurrent.TimeUnit.SECONDS), is("ok"));
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    // ---- estimatedHeapSize (the maxEventLogSizeInBytes weigher) ----
+
+    @Test
+    public void estimatedHeapSizeChargesPerHeaderOverheadPlusCharacters() {
+        // each header value costs a fixed structural overhead (value NottableString + backing string +
+        // flat-store slots) plus the name and value characters; the name STRUCTURE is not charged.
+        LogEntry noHeader = new LogEntry()
+            .setHttpRequest(request().withMethod("GET").withPath("/p"));
+        LogEntry oneHeader = new LogEntry()
+            .setHttpRequest(request().withMethod("GET").withPath("/p").withHeader("X-Test", "value123"));
+
+        long delta = oneHeader.estimatedHeapSize() - noHeader.estimatedHeapSize();
+        // HEADER_ENTRY_OVERHEAD_BYTES (128) + "X-Test".length() (6) + "value123".length() (8)
+        assertThat(delta, is(128L + 6 + 8));
+    }
+
+    @Test
+    public void estimatedHeapSizeChargesARealAttachedExpectation() {
+        // a real (closest-match) expectation attached via setExpectation(Expectation) is retained, so it
+        // is charged its own estimatedHeapSize on top of the entry's request/response weight.
+        HttpResponse response = response().withStatusCode(200).withBody("ok");
+        Expectation expectation = new Expectation(request().withPath("/api").withBody("{\"x\":1}"))
+            .thenRespond(response().withStatusCode(201).withBody("created"));
+
+        LogEntry synthetic = new LogEntry()
+            .setHttpRequest(request().withPath("/p"))
+            .setHttpResponse(response)
+            .setExpectation(request().withPath("/p"), response);
+        LogEntry withRealExpectation = new LogEntry()
+            .setHttpRequest(request().withPath("/p"))
+            .setHttpResponse(response)
+            .setExpectation(expectation);
+
+        assertThat(
+            withRealExpectation.estimatedHeapSize() - synthetic.estimatedHeapSize(),
+            is(expectation.estimatedHeapSize()));
+    }
+
+    @Test
+    public void translateToCarriesThePublishTimeWeightIntoTheRingSlot() {
+        // The event log adds an entry's weight to its in-flight counter at publish and subtracts the ring
+        // slot's weight when the consumer processes it. A sibling entry sharing the same request can
+        // release the body's decoded String in between, so the slot must carry the weight that was added
+        // rather than recompute a smaller one.
+        String json = "{\"name\":\"value\"}";
+        byte[] rawBytes = json.getBytes(StandardCharsets.UTF_8);
+        JsonBody body = new JsonBody(json, rawBytes, JsonBody.DEFAULT_JSON_CONTENT_TYPE, ONLY_MATCHING_FIELDS);
+        LogEntry published = new LogEntry().setHttpRequest(request().withMethod("POST").withPath("/p").withBody(body));
+        long publishTimeWeight = published.estimatedHeapSize();
+        assertThat(body.retainedDerivedFormBytes(), is(greaterThan(0L)));
+
+        LogEntry slot = new LogEntry();
+        published.translateTo(slot, 0);
+        body.releaseDerivedForms();
+
+        assertThat(body.retainedDerivedFormBytes(), is(0L));
+        assertThat(slot.estimatedHeapSize(), is(publishTimeWeight));
+        // once the slot is cleared for reuse the carried weight must not leak into the next entry
+        slot.clear();
+        slot.setHttpRequest(request().withMethod("POST").withPath("/p").withBody(body));
+        assertThat(slot.estimatedHeapSize(), is(publishTimeWeight - (long) json.length() * 2));
+    }
+
+    @Test
+    public void estimatedHeapSizeIgnoresTheSyntheticExpectation() {
+        // the serve-path synthetic expectation is derived lazily and never retained, so recording it must
+        // add nothing to the weight.
+        HttpResponse response = response().withStatusCode(200).withBody("ok");
+        LogEntry withoutExpectation = new LogEntry()
+            .setHttpRequest(request().withPath("/p"))
+            .setHttpResponse(response);
+        LogEntry withSyntheticExpectation = new LogEntry()
+            .setHttpRequest(request().withPath("/p"))
+            .setHttpResponse(response)
+            .setExpectation(request().withPath("/p"), response);
+
+        assertThat(withSyntheticExpectation.estimatedHeapSize(), is(withoutExpectation.estimatedHeapSize()));
+    }
+
+    @Test
+    public void estimatedHeapSizeIsRecomputedWhenARealExpectationIsAttachedLater() {
+        // the memoised weight must pick up a real expectation attached after the weight was first computed.
+        HttpResponse response = response().withStatusCode(200).withBody("ok");
+        Expectation expectation = new Expectation(request().withPath("/api").withBody("{\"x\":1}"))
+            .thenRespond(response().withStatusCode(201).withBody("created"));
+
+        LogEntry entry = new LogEntry()
+            .setHttpRequest(request().withPath("/p"))
+            .setHttpResponse(response)
+            .setExpectation(request().withPath("/p"), response);
+        long before = entry.estimatedHeapSize();
+
+        entry.setExpectation(expectation);
+
+        assertThat(entry.estimatedHeapSize(), is(before + expectation.estimatedHeapSize()));
+    }
+}

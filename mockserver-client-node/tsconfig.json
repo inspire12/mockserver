@@ -1,0 +1,21 @@
+{
+    "compilerOptions": {
+        "module": "commonjs",
+        "lib": [
+            "es6"
+        ],
+        "noImplicitAny": true,
+        "noImplicitThis": true,
+        "strictNullChecks": true,
+        "strictFunctionTypes": true,
+        "types": ["node"],
+        "noEmit": true,
+        "forceConsistentCasingInFileNames": true
+    },
+    "include": [
+        "test/mockServerClient.ts",
+        "test/expectationTypes.ts",
+        "test/llmImportForms.ts",
+        "test/roundtrip_fidelity_types.ts"
+    ]
+}

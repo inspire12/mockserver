@@ -1,18 +1,52 @@
 <h2>Deploying MockServer Helm Chart</h2>
 
-<p>There are three ways to deploy the MockServer helm chart:</p>
+<p>There are four ways to deploy the MockServer helm chart:</p>
 
 <ol>
+    <li><a href="#deploy_via_oci_registry">via OCI registry</a> (recommended, Helm 3.8+)</li>
     <li><a href="#deploy_via_chart_repository">via chart repository</a></li>
     <li><a href="#deploy_via_package">via package</a></li>
     <li><a href="#deploy_via_local_source">via local source</a></li>
 </ol>
 
+<p>You can also discover MockServer Helm charts on <a target="_blank" href="https://artifacthub.io/packages/search?ts_query_web=mockserver&amp;kind=0" rel="noopener noreferrer">Artifact Hub</a>, the CNCF registry for Kubernetes packages. The official chart is published to the GitHub Container Registry (OCI) as described below; the OCI install command is the recommended way to install it.</p>
+
+<a id="deploy_via_oci_registry" class="anchor" href="#deploy_via_oci_registry">&nbsp</a>
+
+<h3>Deploy Via OCI Registry</h3>
+
+<p>The chart is published to the GitHub Container Registry as an OCI artifact. No <span class="keyword">helm repo add</span> is needed &mdash; <span class="keyword">helm install</span> can pull straight from <span class="keyword">oci://</span>:</p>
+
+<pre class="prettyprint code"><code class="code">helm upgrade --install --kube-context &lt;your kube context&gt; --namespace mockserver --create-namespace --version {{ site.mockserver_version }} mockserver oci://ghcr.io/mock-server/charts/mockserver</code></pre>
+
+<p>To inspect chart metadata for a specific version without installing:</p>
+
+<pre class="prettyprint code"><code class="code">helm show chart oci://ghcr.io/mock-server/charts/mockserver --version {{ site.mockserver_version }}</code></pre>
+
+<p>To browse the full list of published versions, open the package page on GHCR: <a target="_blank" href="https://github.com/orgs/mock-server/packages/container/package/charts%2Fmockserver" rel="noopener noreferrer">github.com/orgs/mock-server/packages/container/package/charts%2Fmockserver</a></p>
+
+<p>The OCI artifact is public &mdash; no authentication is required for <span class="keyword">helm pull</span> or <span class="keyword">helm install</span>. Every released chart version (5.3.0 onward) is available at the same path.</p>
+
+<p>To mirror the chart into a private OCI registry (Harbor, Artifactory, ECR, GAR, ACR, etc.):</p>
+
+<pre class="prettyprint code"><code class="code">helm pull oci://ghcr.io/mock-server/charts/mockserver --version {{ site.mockserver_version }}
+helm push mockserver-{{ site.mockserver_version }}.tgz oci://&lt;your-private-registry&gt;/&lt;namespace&gt;</code></pre>
+
+<a id="verify_chart_signature" class="anchor" href="#verify_chart_signature">&nbsp</a>
+
+<h3>Verifying The Chart Signature</h3>
+
+<p>Recent chart releases are signed with <a target="_blank" href="https://docs.sigstore.dev/cosign/overview/" rel="noopener noreferrer">Sigstore cosign</a>. You can verify a chart against the published MockServer public key before installing it:</p>
+
+<pre class="prettyprint code"><code class="code">cosign verify --key https://www.mock-server.com/mockserver-cosign.pub ghcr.io/mock-server/charts/mockserver:{{ site.mockserver_version }}</code></pre>
+
+<p>A successful verification prints the signed payload and exits with status <span class="keyword">0</span>. Older chart versions predate signing, so verification will report no matching signatures for them.</p>
+
 <a id="deploy_via_chart_repository" class="anchor" href="#helm_extend_classpath">&nbsp</a>
 
 <h3>Deploy Via Chart Repository</h3>
 
-<p>You can add the MockServer chart repository as follows:</p>
+<p>The legacy HTTP-based Helm repository remains available at <strong>www.mock-server.com</strong>:</p>
 
 <pre class="prettyprint code"><code class="code">helm repo add mockserver https://www.mock-server.com
 helm repo update</code></pre>
@@ -33,7 +67,7 @@ helm repo update</code></pre>
 
 <h3>Deploy Via Package</h3>
 
-<p>To run MockServer in Kubernetes the easiest way is to use the existing <a target="_blank" href="https://www.mock-server.com/mockserver-{{ site.mockserver_version }}.tgz">MockServer helm chart</a>.</p>
+<p>To run MockServer in Kubernetes the easiest way is to use the existing <a target="_blank" href="https://www.mock-server.com/mockserver-{{ site.mockserver_version }}.tgz" rel="noopener noreferrer">MockServer helm chart</a>.</p>
 
 <p>This is available by using <strong>www.mock-server.com</strong> as a chart repo, with the following command:</p>
 
@@ -47,7 +81,7 @@ helm repo update</code></pre>
 
 <pre class="prettyprint code"><code class="code">helm upgrade --install --namespace mockserver mockserver helm/mockserver</code></pre>
 
-<p>The commands above will install MockServer into a <strong>namespace</strong> called <span class="keyword">mockserver</span> with default configuration (as per the embedded <a target="_blank"href="https://github.com/mock-server/mockserver/blob/master/helm/mockserver/values.yaml">values.yaml</a>).</p>
+<p>The commands above will install MockServer into a <strong>namespace</strong> called <span class="keyword">mockserver</span> with default configuration (as per the embedded <a target="_blank" href="https://github.com/mock-server/mockserver-monorepo/blob/master/helm/mockserver/values.yaml" rel="noopener noreferrer">values.yaml</a>).</p>
 <p>MockServer will then be available on domain name <span class="keyword">mockserver.mockserver.svc.cluster.local</span>, as long as the namespace you are calling from isn't prevented (by network policy) to call the <span class="keyword">mockserver</span> namespace.</p>
 
 <a id="logs" class="anchor" href="#logs">&nbsp</a>
@@ -88,6 +122,9 @@ helm repo update</code></pre>
     <li><span class="keyword">app.proxyRemotePort</span> (no default)</li>
     <li><span class="keyword">app.jvmOptions</span> (no default)</li>
     <li><span class="keyword">image.snapshot</span> (default: false) - set <span class="keyword">true</span> to use latest snapshot version</li>
+    <li><span class="keyword">image.variant</span> (default: empty) - set <span class="keyword">http3</span> to use the image that can serve HTTP/3 (also set <span class="keyword">mockserver.http3Port</span> in your properties and expose that port as UDP on your Service; a pod that cannot start HTTP/3 on that port exits and restarts instead of running without it, and its log names the port and the cause), or <span class="keyword">graaljs</span> for JavaScript templates</li>
+    <li><span class="keyword">podLabels</span> (default: {}) - additional labels to add to the MockServer pods</li>
+    <li><span class="keyword">imagePullSecrets</span> (default: []) - list of image pull secrets for private registries</li>
 </ul>
 
 <p>For example configure a proxyRemoteHost and proxyRemotePort, as follows:</p>
@@ -105,7 +142,7 @@ helm repo update</code></pre>
 <p>There are two ways to provide MockServer configuration (properties file, expectation initialization JSON, TLS certificates, etc.):</p>
 <ol>
     <li><strong>Inline configuration</strong> (recommended) &mdash; provide configuration directly in <span class="keyword">values.yaml</span></li>
-    <li><strong>External ConfigMap</strong> &mdash; create a ConfigMap separately (manually, via CI, or using the example <a target="_blank" href="https://github.com/mock-server/mockserver/tree/master/helm/mockserver-config">mockserver-config</a> chart)</li>
+    <li><strong>External ConfigMap</strong> &mdash; create a ConfigMap separately (manually, via CI, or using the example <a target="_blank" href="https://github.com/mock-server/mockserver-monorepo/tree/master/helm/mockserver-config" rel="noopener noreferrer">mockserver-config</a> chart)</li>
 </ol>
 <p>Both approaches mount configuration into the container at <strong>/config</strong>. See <a href="/mock_server/configuration_properties.html">MockServer Configuration</a> for details of all configuration options.</p>
 
@@ -115,13 +152,15 @@ helm repo update</code></pre>
 
 <p>Set <span class="keyword">app.config.enabled=true</span> and provide configuration content directly in values. This creates a ConfigMap as part of the main chart &mdash; no separate chart or manual ConfigMap creation is needed.</p>
 
-<p>Using <span class="keyword">--set</span>:</p>
+<p>Using <span class="keyword">--set-string</span> (commas in JSON must be escaped as <span class="keyword">\,</span>):</p>
 
 <pre class="prettyprint code"><code class="code">helm upgrade --install --namespace mockserver \
   --set app.config.enabled=true \
   --set app.config.properties="mockserver.initializationJsonPath=/config/initializerJson.json" \
-  --set app.config.initializerJson='[{"httpRequest":{"path":"/example"},"httpResponse":{"body":"response"}}]' \
+  --set-string 'app.config.initializerJson=[{"httpRequest":{"path":"/example"}\,"httpResponse":{"body":"response"}}]' \
   mockserver helm/mockserver</code></pre>
+
+<p><strong>Note:</strong> Helm's <span class="keyword">--set</span> flag treats commas as key/value separators, which corrupts JSON values. Use <span class="keyword">--set-string</span> with escaped commas (<span class="keyword">\,</span>) for simple cases, or a <span class="keyword">values.yaml</span> file (recommended) for anything non-trivial.</p>
 
 <p>Or using a <span class="keyword">values.yaml</span> file (recommended for complex configuration):</p>
 
@@ -141,6 +180,8 @@ helm repo update</code></pre>
       ]</code></pre>
 
 <pre class="prettyprint code"><code class="code">helm upgrade --install --namespace mockserver -f values.yaml mockserver helm/mockserver</code></pre>
+
+<p>When using inline configuration, pods are <strong>automatically restarted</strong> on <span class="keyword">helm upgrade</span> whenever the configuration content changes. This ensures MockServer always runs with the latest configuration.</p>
 
 <p>The following inline config values are supported:</p>
 <ul>
@@ -172,7 +213,7 @@ For example:
 
 <pre class="prettyprint code"><code class="code">helm upgrade --install --namespace mockserver --set app.mountedConfigMapName=other-mockserver-config --set app.propertiesFileName=other-mockserver.properties mockserver helm/mockserver</code></pre>
 
-An example of a helm chart to create this ConfigMap is <a target="_blank" href="https://github.com/mock-server/mockserver/tree/master/helm/mockserver-config">helm/mockserver-config</a>
+An example of a helm chart to create this ConfigMap is <a target="_blank" href="https://github.com/mock-server/mockserver-monorepo/tree/master/helm/mockserver-config" rel="noopener noreferrer">helm/mockserver-config</a>
 
 <a id="helm_extend_classpath" class="anchor" href="#helm_extend_classpath">&nbsp</a>
 
@@ -190,11 +231,111 @@ For example:
 
 <pre class="prettyprint code"><code class="code">helm upgrade --install --namespace mockserver --set app.mountedLibsConfigMapName=mockserver-libs mockserver helm/mockserver</code></pre>
 
+<a id="helm_persistent_storage" class="anchor" href="#helm_persistent_storage">&nbsp;</a>
+
+<h2>Persistent Storage</h2>
+
+<p>By default, MockServer holds expectations in memory only. On Kubernetes, this means expectations are lost when a pod restarts.
+    To persist expectations across pod restarts, enable persistent storage. This creates (or references) a <strong>PersistentVolumeClaim</strong>
+    and automatically configures MockServer to save and reload expectations from it.</p>
+
+<h3>Quick Start</h3>
+
+<p>The simplest way to enable persistence is with a single <span class="keyword">--set</span> flag:</p>
+
+<pre class="prettyprint code"><code class="code">helm upgrade --install --namespace mockserver \
+  --set app.persistence.enabled=true \
+  mockserver helm/mockserver</code></pre>
+
+<p>This creates a <strong>256Mi</strong> PersistentVolumeClaim using the cluster's default StorageClass, and automatically configures MockServer to persist expectations to it.</p>
+
+<h3>How It Works</h3>
+
+<p>When <span class="keyword">app.persistence.enabled=true</span>, the chart:</p>
+<ol>
+    <li>Creates a PersistentVolumeClaim (unless <span class="keyword">app.persistence.existingClaimName</span> is set)</li>
+    <li>Mounts the PVC into the container at <span class="keyword">/persistence</span> (configurable via <span class="keyword">app.persistence.mountPath</span>)</li>
+    <li>Sets the following environment variables to enable persistence automatically:
+        <ul>
+            <li><span class="keyword">MOCKSERVER_PERSIST_EXPECTATIONS=true</span></li>
+            <li><span class="keyword">MOCKSERVER_PERSISTED_EXPECTATIONS_PATH=/persistence/persistedExpectations.json</span></li>
+            <li><span class="keyword">MOCKSERVER_INITIALIZATION_JSON_PATH=/persistence/persistedExpectations.json</span></li>
+        </ul>
+    </li>
+</ol>
+
+<p><strong>Important:</strong> These environment variables provide defaults. Any matching property in your <span class="keyword">mockserver.properties</span>
+    file takes precedence over environment variables. If you need custom paths or want to disable auto-initialization,
+    set the equivalent properties in your properties file. See <a href="/mock_server/configuration_properties.html">MockServer Configuration</a>
+    for the full property precedence rules.</p>
+
+<h3>Persistence Values</h3>
+
+<p>The following values control persistent storage:</p>
+
+<ul>
+    <li><span class="keyword">app.persistence.enabled</span> (default: <span class="this_value">false</span>) &mdash; set <span class="keyword">true</span> to enable persistent storage</li>
+    <li><span class="keyword">app.persistence.existingClaimName</span> (default: <span class="this_value">""</span>) &mdash; name of an existing PVC to use; if empty, the chart creates one</li>
+    <li><span class="keyword">app.persistence.storageClass</span> (default: <span class="this_value">""</span>) &mdash; StorageClass for the PVC; if empty, the cluster default is used</li>
+    <li><span class="keyword">app.persistence.accessModes</span> (default: <span class="this_value">[ReadWriteOnce]</span>) &mdash; access modes for the PVC</li>
+    <li><span class="keyword">app.persistence.size</span> (default: <span class="this_value">256Mi</span>) &mdash; size of the PVC</li>
+    <li><span class="keyword">app.persistence.mountPath</span> (default: <span class="this_value">/persistence</span>) &mdash; mount path inside the container</li>
+    <li><span class="keyword">app.persistence.annotations</span> (default: <span class="this_value">{}</span>) &mdash; annotations for the PVC (only used when creating a new PVC)</li>
+</ul>
+
+<h3>Pod securityContext (PVC write permissions)</h3>
+
+<p>On clusters with restrictive defaults the pod may be unable to write to the mounted volume, so persistence silently fails. Set a pod-level <span class="keyword">fsGroup</span> so the volume is group-owned and writable. The chart exposes a top-level <span class="keyword">podSecurityContext</span> value that is rendered verbatim into the Deployment's <span class="keyword">spec.template.spec.securityContext</span>, so any pod-level field is supported:</p>
+
+<pre class="prettyprint code"><code class="code">helm upgrade --install --namespace mockserver \
+  --set app.persistence.enabled=true \
+  --set podSecurityContext.fsGroup=2000 \
+  mockserver helm/mockserver</code></pre>
+
+<p><span class="keyword">podSecurityContext</span> defaults to <span class="this_value">{}</span> (no pod-level <span class="keyword">securityContext</span> is emitted). It accepts any pod-level fields such as <span class="keyword">fsGroup</span>, <span class="keyword">fsGroupChangePolicy</span>, <span class="keyword">runAsGroup</span>, or <span class="keyword">seccompProfile</span>.</p>
+
+<h3>Example: Chart-Managed PVC</h3>
+
+<p>Let the chart create and manage the PVC:</p>
+
+<pre class="prettyprint code"><code class="code">app:
+  persistence:
+    enabled: true
+    storageClass: "gp3"
+    size: 1Gi</code></pre>
+
+<pre class="prettyprint code"><code class="code">helm upgrade --install --namespace mockserver -f values.yaml mockserver helm/mockserver</code></pre>
+
+<h3>Example: Existing PVC</h3>
+
+<p>If you manage PVCs separately (e.g. via GitOps or Terraform), reference an existing PVC by name:</p>
+
+<pre class="prettyprint code"><code class="code">helm upgrade --install --namespace mockserver \
+  --set app.persistence.enabled=true \
+  --set app.persistence.existingClaimName=my-mockserver-data \
+  mockserver helm/mockserver</code></pre>
+
+<h3>Example: Clustering with Shared Storage</h3>
+
+<p>For <a href="/mock_server/persisting_expectations.html">clustered MockServer deployments</a>, use a <span class="keyword">ReadWriteMany</span> access mode
+    with a shared filesystem such as NFS, <a target="_blank" href="https://aws.amazon.com/efs/" rel="noopener noreferrer">AWS EFS</a>, or <a target="_blank" href="https://docs.microsoft.com/en-us/azure/storage/files/" rel="noopener noreferrer">Azure Files</a>:</p>
+
+<pre class="prettyprint code"><code class="code">replicaCount: 3
+
+app:
+  persistence:
+    enabled: true
+    accessModes:
+      - ReadWriteMany
+    storageClass: "efs-sc"</code></pre>
+
+<p>See <a href="/mock_server/persisting_expectations.html">Persisting &amp; Clustering Expectations</a> for more details on how MockServer clustering works.</p>
+
 <a id="mockserver_url" class="anchor" href="#mockserver_url">&nbsp</a>
 
 <h2>MockServer URL</h2>
 
-<h3>Local Kubernetes Cluster (i.e. <a target="_blank"href="https://github.com/kubernetes/minikube">minikube</a>, <a target="_blank" href="https://microk8s.io">microk8s</a>)</h3>
+<h3>Local Kubernetes Cluster (i.e. <a target="_blank" href="https://github.com/kubernetes/minikube" rel="noopener noreferrer">minikube</a>, <a target="_blank" href="https://microk8s.io" rel="noopener noreferrer">microk8s</a>)</h3>
 
 <p>If the <span class="keyword">service</span> type hasn't been modified the following will provide the MockServer URL from outside the cluster.</p>
 
@@ -205,13 +346,13 @@ echo http://$MOCKSERVER_HOST</code></pre>
 
 <p>To test the installation the following <span class="keyword">curl</span> command should return the ports MockServer is bound to:</p>
 
-<pre class="prettyprint code"><code class="code">curl -v -X PUT http://$MOCKSERVER_HOST/status</code></pre>
+<pre class="prettyprint code"><code class="code">curl -v -X PUT http://$MOCKSERVER_HOST/mockserver/status</code></pre>
 
 <h3>Docker for Desktop</h3>
 
-<p><a target="_blank" href="https://www.docker.com/products/docker-desktop">Docker for Desktop</a> automatically exposes <strong>LoadBalancer</strong> services.</p>
+<p><a target="_blank" href="https://www.docker.com/products/docker-desktop" rel="noopener noreferrer">Docker for Desktop</a> automatically exposes <strong>LoadBalancer</strong> services.</p>
 
-<p>On MacOS Docker for Desktop runs inside <a target="_blank"href="https://github.com/moby/hyperkit">Hyperkit</a> so the node IP address is not reachable, therefore the only way to call services is via the exposed <strong>LoadBalancer</strong> service added by Docker for Desktop.</p>
+<p>On MacOS Docker for Desktop runs inside <a target="_blank" href="https://github.com/moby/hyperkit" rel="noopener noreferrer">Hyperkit</a> so the node IP address is not reachable, therefore the only way to call services is via the exposed <strong>LoadBalancer</strong> service added by Docker for Desktop.</p>
 
 <p>To ensure that Docker for Desktop exposes MockServer update the service type to <strong>LoadBalancer</strong> using <strong>--set service.type=LoadBalancer</strong> and set the exposed port using <strong>--set service.port=1080</strong>, as follows:</p>
 
@@ -222,7 +363,7 @@ echo http://$MOCKSERVER_HOST</code></pre>
 <p>For <strong>LoadBalancer</strong> services it is possible to query kubernetes to programmatically determine the MockServer base URL as follows:</p>
 
 <pre class="prettyprint code"><code class="code">export SERVICE_IP=$(kubectl get svc --namespace mockserver mockserver -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-export MOCKSERVER_HOST=$SERVICE_IP:1081
+export MOCKSERVER_HOST=$SERVICE_IP:1080
 echo http://$MOCKSERVER_HOST</code></pre>
 
 <h3>Outside Remote Kubernetes Cluster (i.e. Azure AKS, AWS EKS, etc) via Port Forward</h3>
@@ -233,7 +374,7 @@ echo http://$MOCKSERVER_HOST</code></pre>
 
 <h3>Inside Kubernetes Cluster</h3>
 
-<p>If a <a target="_blank" href="https://kubernetes.io/docs/concepts/services-networking/service/#dns">DNS server</a> has been installed in the Kubernetes cluster the following DNS name should be available <span class="keyword">mockserver.&lt;namespace&gt;.svc.cluster.local</span>, i.e. <span class="keyword">mockserver.mockserver.svc.cluster.local</span></p>
+<p>If a <a target="_blank" href="https://kubernetes.io/docs/concepts/services-networking/service/#dns" rel="noopener noreferrer">DNS server</a> has been installed in the Kubernetes cluster the following DNS name should be available <span class="keyword">mockserver.&lt;namespace&gt;.svc.cluster.local</span>, i.e. <span class="keyword">mockserver.mockserver.svc.cluster.local</span></p>
 
 <a id="helm_delete" class="anchor" href="#helm_delete">&nbsp</a>
 
@@ -241,4 +382,4 @@ echo http://$MOCKSERVER_HOST</code></pre>
 
 <p>To completely remove the chart:</p>
 
-<pre class="prettyprint code"><code class="code">helm delete mockserver --purge</code></pre>
+<pre class="prettyprint code"><code class="code">helm uninstall -n mockserver mockserver</code></pre>

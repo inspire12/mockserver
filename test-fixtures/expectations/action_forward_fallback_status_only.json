@@ -1,0 +1,21 @@
+{
+  "httpRequest": {
+    "path": "/fb/status-only"
+  },
+  "httpForwardWithFallback": {
+    "httpForward": {
+      "scheme": "HTTPS",
+      "host": "backend.example.com",
+      "port": 443
+    },
+    "fallbackResponse": {
+      "statusCode": 503,
+      "body": "unavailable"
+    },
+    "fallbackOnStatusCodes": [
+      500
+    ],
+    "fallbackOnTimeout": false,
+    "primary": false
+  }
+}

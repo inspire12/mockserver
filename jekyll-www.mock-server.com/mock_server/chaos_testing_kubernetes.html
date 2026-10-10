@@ -1,0 +1,1103 @@
+---
+title: Chaos Proxy in Kubernetes
+shortTitle: Chaos Proxy in K8s
+description: Deploy MockServer as a chaos proxy in Kubernetes to inject faults into service-to-service and external API calls using forward expectations with chaos profiles.
+layout: page
+pageOrder: 2
+section: 'Chaos Testing'
+subsection: true
+sitemap:
+  priority: 0.8
+  changefreq: 'monthly'
+  lastmod: 2026-05-30T08:00:00+00:00
+keywords: chaos testing kubernetes, fault injection kubernetes, sidecar proxy chaos, egress proxy fault injection, test resilience kubernetes, simulate dependency failure
+schema_faq:
+  - question: "How do I inject faults into a service's external API calls in Kubernetes?"
+    answer: "Deploy MockServer as a sidecar or standalone proxy in your Kubernetes cluster, set your application's HTTP_PROXY / HTTPS_PROXY environment variables to point at MockServer, and create forward expectations with chaos profiles for the target hosts. MockServer forwards requests to the real upstream and probabilistically injects errors or latency into the responses it relays back."
+  - question: "How do I make a dependency intermittently fail in a Kubernetes cluster?"
+    answer: "Place MockServer between your application and the dependency using a Kubernetes Service that routes to MockServer instead of the real backend. Create a forward expectation that sends requests to the real upstream host and attach a chaos profile with an errorStatus (e.g. 503), an errorProbability (e.g. 0.3 for 30% failures), and optionally a latency delay. Only matched requests get chaos; other traffic passes through normally."
+  - question: "Does MockServer support transparent traffic interception in Kubernetes?"
+    answer: "Yes. When transparentProxyEnabled is set to true, MockServer can intercept traffic redirected by iptables REDIRECT rules, using the Host header to determine the forwarding target. See the Service Mesh / Sidecar Mode page for setup details. Alternatively, you can use explicit routing via HTTP_PROXY / HTTPS_PROXY environment variables, a Kubernetes Service pointing at MockServer, or the proxyRemoteHost / proxyRemotePort configuration."
+  - question: "How do I intercept HTTPS traffic through MockServer in Kubernetes?"
+    answer: "For HTTPS interception, clients must trust MockServer's Certificate Authority (CA). MockServer dynamically generates TLS certificates signed by its CA. You can use the default CA certificate bundled with MockServer or generate a unique one with dynamicallyCreateCertificateAuthorityCertificate. Add the CA certificate to your application's trust store — for JVM apps use keytool, for others mount the CA PEM and configure the system or application trust store. See the TLS Configuration page for details."
+---
+
+<p>MockServer can be deployed as a <strong>chaos proxy</strong> in Kubernetes to inject faults (errors, latency, stateful failures) into real service-to-service calls and external API calls. Instead of mocking a dependency, you route traffic through MockServer and let it forward requests to the real upstream while probabilistically injecting failures into the responses.</p>
+
+<p>This is useful for:</p>
+<ul>
+    <li>Testing how your service handles an unreliable internal dependency (e.g. a payment service returning 503s)</li>
+    <li>Simulating external API rate limiting (e.g. a third-party API returning 429 with <code class="inline code">Retry-After</code>)</li>
+    <li>Verifying timeout handling when an upstream becomes slow</li>
+    <li>Testing circuit breakers, retries, and fallback behaviour under realistic conditions</li>
+</ul>
+
+<p>This page builds on the <a href="/mock_server/chaos_testing.html">Chaos Testing &amp; Fault Injection</a> page, which covers the <code class="inline code">chaos</code> profile fields in detail. Here we focus on <strong>deployment patterns in Kubernetes</strong> that put MockServer in the request path so chaos profiles apply to real upstream traffic.</p>
+
+<p><strong>These patterns use explicit routing</strong> &mdash; you point your application at MockServer by swapping a Kubernetes Service, setting <code class="inline code">HTTP_PROXY</code>, or configuring a sidecar's remote host. If you instead want MockServer to intercept outbound traffic <strong>transparently, with no application or routing changes</strong> (and on any Linux host, not only Kubernetes), see <a href="/mock_server/service_mesh.html">Transparent Proxy</a> &mdash; that page covers the <em>interception mechanism</em>, which you can combine with the chaos profiles described here.</p>
+
+<a id="on_this_page" class="anchor" href="#on_this_page">&nbsp;</a>
+
+<h2>On this page</h2>
+
+<p>Three deployment patterns put MockServer in the request path, plus guidance on Helm, HTTPS interception, and scoping:</p>
+
+<table class="comparison_table">
+    <thead>
+        <tr>
+            <th>Deployment patterns</th>
+            <th>Configuration &amp; reference</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td style="vertical-align: top;">
+                <ul>
+                    <li><a href="#how_it_works">How It Works</a> &mdash; overview of the in-path chaos proxy model</li>
+                    <li><a href="#reverse_proxy_pattern">Pattern 1: Reverse Proxy</a> &mdash; route a Kubernetes Service through MockServer</li>
+                    <li><a href="#forward_proxy_pattern">Pattern 2: Egress / Forward Proxy</a> &mdash; inject chaos into external API calls via HTTP_PROXY</li>
+                    <li><a href="#sidecar_pattern">Pattern 3: Sidecar Proxy</a> &mdash; co-locate MockServer in the same pod</li>
+                </ul>
+            </td>
+            <td style="vertical-align: top;">
+                <ul>
+                    <li><a href="#helm_deployment">Deploying with Helm</a> &mdash; Helm chart values for reverse-proxy setup</li>
+                    <li><a href="#https_interception">HTTPS Interception</a> &mdash; CA trust and certificate configuration</li>
+                    <li><a href="#selective_chaos">Selective Chaos Scope</a> &mdash; target specific hosts and paths only</li>
+                    <li><a href="#faq">FAQ</a> &mdash; common questions on injection, HTTPS, and transparent proxying</li>
+                </ul>
+            </td>
+        </tr>
+    </tbody>
+</table>
+
+<a id="how_it_works" class="anchor" href="#how_it_works">&nbsp;</a>
+
+<h2>How It Works</h2>
+
+<ol>
+    <li><strong>Deploy MockServer</strong> in your Kubernetes cluster (standalone Deployment, sidecar container, or via the <a href="https://www.mock-server.com/where/kubernetes.html">Helm chart</a>)</li>
+    <li><strong>Route your application's traffic</strong> through MockServer — using a Kubernetes Service, <code class="inline code">HTTP_PROXY</code>/<code class="inline code">HTTPS_PROXY</code> environment variables, or <code class="inline code">proxyRemoteHost</code>/<code class="inline code">proxyRemotePort</code> configuration</li>
+    <li><strong>Create forward expectations with chaos profiles</strong> — MockServer forwards matched requests to the real upstream and injects faults according to the chaos profile</li>
+    <li>Unmatched requests pass through normally (when <code class="inline code">attemptToProxyIfNoMatchingExpectation</code> is <code class="inline code">true</code>, which is the default)</li>
+</ol>
+
+<p>MockServer operates at the <strong>HTTP layer (L7)</strong>. Traffic can reach it either through explicit routing (a Kubernetes Service, <code class="inline code">HTTP_PROXY</code> / <code class="inline code">HTTPS_PROXY</code> environment variables, or <code class="inline code">proxyRemoteHost</code> / <code class="inline code">proxyRemotePort</code>) or via transparent interception — when <code class="inline code">transparentProxyEnabled</code> is set, MockServer accepts traffic redirected to it by iptables REDIRECT / TPROXY rules and uses the original destination (or the <code class="inline code">Host</code> header) to choose the forwarding target. See the <a href="/mock_server/service_mesh.html">Transparent Proxy / Sidecar Mode</a> page for transparent-interception setup.</p>
+
+<p>Chaos profiles apply to forward action types: <code class="inline code">httpForward</code>, forward template, forward class callback, forward with override (<code class="inline code">httpOverrideForwardedRequest</code>), and forward with validation. They do <strong>not</strong> apply to forward object callbacks or the unmatched proxy pass-through path. See the <a href="/mock_server/chaos_testing.html#where_chaos_applies">compatibility table</a> on the Chaos Testing page.</p>
+
+<a id="reverse_proxy_pattern" class="anchor" href="#reverse_proxy_pattern">&nbsp;</a>
+
+<h2>Pattern 1: Reverse Proxy in Front of a Dependency</h2>
+
+<p>Route a Kubernetes Service through MockServer so that calls to a dependency go via MockServer, which forwards them to the real backend with chaos injection.</p>
+
+<h3>Kubernetes manifests</h3>
+
+<p>Deploy MockServer as a standalone Deployment with a Service. Your application calls the MockServer Service instead of the real dependency.</p>
+
+<pre class="prettyprint lang-yaml code"><code class="code">---
+# MockServer Deployment — acts as a reverse proxy for the payment service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-chaos-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-chaos-proxy
+  template:
+    metadata:
+      labels:
+        app: payment-chaos-proxy
+    spec:
+      containers:
+        - name: mockserver
+          image: mockserver/mockserver:mockserver-{{ site.mockserver_version }}
+          ports:
+            - containerPort: 1080
+          env:
+            - name: MOCKSERVER_LOG_LEVEL
+              value: "INFO"
+---
+# Service that your application calls instead of the real payment-service
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service-chaos
+spec:
+  selector:
+    app: payment-chaos-proxy
+  ports:
+    - port: 8080
+      targetPort: 1080</code></pre>
+
+<h3>Forward expectation with chaos</h3>
+
+<p>Create an expectation that matches requests to the payment service and forwards them to the real backend, injecting 503 errors on 30% of requests with 200ms of added latency:</p>
+
+<button id="button_k8s_chaos_reverse" class="accordion">forward expectation with chaos &mdash; code examples</button>
+<div class="panel">
+    <button class="accordion inner">Java</button>
+    <div class="panel">
+        <pre class="prettyprint lang-java code"><code class="code">import static org.mockserver.model.HttpRequest.request;
+import static org.mockserver.model.HttpForward.forward;
+import static org.mockserver.model.HttpChaosProfile.httpChaosProfile;
+import org.mockserver.model.Delay;
+import java.util.concurrent.TimeUnit;
+
+new MockServerClient("localhost", 1080)
+    .when(
+        request()
+            .withPath("/payments/.*")
+    )
+    .withChaos(
+        httpChaosProfile()
+            .withErrorStatus(503)
+            .withErrorProbability(0.3)
+            .withLatency(new Delay(TimeUnit.MILLISECONDS, 200))
+    )
+    .forward(
+        forward()
+            .withHost("payment-service.production.svc.cluster.local")
+            .withPort(8080)
+            .withScheme(HttpForward.Scheme.HTTP)
+    );</code></pre>
+    </div>
+    <button class="accordion inner">JavaScript</button>
+    <div class="panel">
+        <pre class="prettyprint lang-javascript code"><code class="code">var mockServerClient = require('mockserver-client').mockServerClient;
+mockServerClient("localhost", 1080).mockAnyResponse({
+    "httpRequest": {
+        "path": "/payments/.*"
+    },
+    "httpForward": {
+        "host": "payment-service.production.svc.cluster.local",
+        "port": 8080,
+        "scheme": "HTTP"
+    },
+    "chaos": {
+        "errorStatus": 503,
+        "errorProbability": 0.3,
+        "latency": {
+            "timeUnit": "MILLISECONDS",
+            "value": 200
+        }
+    },
+    "times": {
+        "unlimited": true
+    }
+}).then(
+    function () {
+        console.log("expectation created");
+    },
+    function (error) {
+        console.log(error);
+    }
+);</code></pre>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/expectation/put_expectation" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+    <button class="accordion inner">Python</button>
+    <div class="panel">
+        <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
+from mockserver.models import Expectation, HttpRequest, HttpForward, HttpChaosProfile, Delay, Times
+
+client = MockServerClient("localhost", 1080)
+client.upsert(Expectation(
+    http_request=HttpRequest(path="/payments/.*"),
+    http_forward=HttpForward(
+        host="payment-service.production.svc.cluster.local",
+        port=8080,
+        scheme="HTTP"
+    ),
+    chaos=HttpChaosProfile(
+        error_status=503,
+        error_probability=0.3,
+        latency=Delay(time_unit="MILLISECONDS", value=200)
+    ),
+    times=Times(unlimited=True)
+))</code></pre>
+    </div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel">
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+
+client = MockServer::Client.new('localhost', 1080)
+client.when(
+    MockServer::HttpRequest.new(path: '/payments/.*')
+).with_chaos(
+    MockServer::HttpChaosProfile.new(
+        error_status: 503,
+        error_probability: 0.3,
+        latency: MockServer::Delay.new(time_unit: 'MILLISECONDS', value: 200)
+    )
+).forward(
+    MockServer::HttpForward.new(
+        host: 'payment-service.production.svc.cluster.local',
+        port: 8080,
+        scheme: 'HTTP'
+    )
+)</code></pre>
+    </div>
+    <button class="accordion inner">Go</button>
+    <div class="panel">
+        <pre class="prettyprint lang-go code"><code class="code">package main
+
+import (
+    "bytes"
+    "net/http"
+)
+
+func main() {
+    body := []byte(`{
+    "httpRequest": {
+        "path": "/payments/.*"
+    },
+    "httpForward": {
+        "host": "payment-service.production.svc.cluster.local",
+        "port": 8080,
+        "scheme": "HTTP"
+    },
+    "chaos": {
+        "errorStatus": 503,
+        "errorProbability": 0.3,
+        "latency": {
+            "timeUnit": "MILLISECONDS",
+            "value": 200
+        }
+    },
+    "times": {
+        "unlimited": true
+    }
+}`)
+    req, _ := http.NewRequest("PUT",
+        "http://localhost:1080/mockserver/expectation",
+        bytes.NewReader(body))
+    req.Header.Set("Content-Type", "application/json")
+    http.DefaultClient.Do(req)
+}</code></pre>
+    </div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel">
+        <pre class="prettyprint lang-csharp code"><code class="code">using System.Net.Http;
+using System.Text;
+
+using var httpClient = new HttpClient();
+var json = @"{
+    ""httpRequest"": {
+        ""path"": ""/payments/.*""
+    },
+    ""httpForward"": {
+        ""host"": ""payment-service.production.svc.cluster.local"",
+        ""port"": 8080,
+        ""scheme"": ""HTTP""
+    },
+    ""chaos"": {
+        ""errorStatus"": 503,
+        ""errorProbability"": 0.3,
+        ""latency"": {
+            ""timeUnit"": ""MILLISECONDS"",
+            ""value"": 200
+        }
+    },
+    ""times"": {
+        ""unlimited"": true
+    }
+}";
+await httpClient.PutAsync(
+    "http://localhost:1080/mockserver/expectation",
+    new StringContent(json, Encoding.UTF8, "application/json")
+);</code></pre>
+    </div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel">
+        <pre class="prettyprint lang-rust code"><code class="code">use reqwest::blocking::Client;
+
+let client = Client::new();
+let body = r#"{
+    "httpRequest": {
+        "path": "/payments/.*"
+    },
+    "httpForward": {
+        "host": "payment-service.production.svc.cluster.local",
+        "port": 8080,
+        "scheme": "HTTP"
+    },
+    "chaos": {
+        "errorStatus": 503,
+        "errorProbability": 0.3,
+        "latency": {
+            "timeUnit": "MILLISECONDS",
+            "value": 200
+        }
+    },
+    "times": {
+        "unlimited": true
+    }
+}"#;
+client.put("http://localhost:1080/mockserver/expectation")
+    .header("Content-Type", "application/json")
+    .body(body.to_string())
+    .send()
+    .unwrap();</code></pre>
+    </div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel">
+        <pre class="prettyprint lang-php code"><code class="code">$json = &lt;&lt;&lt;'JSON'
+{
+    "httpRequest": {
+        "path": "/payments/.*"
+    },
+    "httpForward": {
+        "host": "payment-service.production.svc.cluster.local",
+        "port": 8080,
+        "scheme": "HTTP"
+    },
+    "chaos": {
+        "errorStatus": 503,
+        "errorProbability": 0.3,
+        "latency": {
+            "timeUnit": "MILLISECONDS",
+            "value": 200
+        }
+    },
+    "times": {
+        "unlimited": true
+    }
+}
+JSON;
+
+$ch = curl_init('http://localhost:1080/mockserver/expectation');
+curl_setopt_array($ch, [
+    CURLOPT_CUSTOMREQUEST  =&gt; 'PUT',
+    CURLOPT_POSTFIELDS     =&gt; $json,
+    CURLOPT_HTTPHEADER     =&gt; ['Content-Type: application/json; charset=utf-8'],
+    CURLOPT_RETURNTRANSFER =&gt; true,
+]);
+curl_exec($ch);
+curl_close($ch);</code></pre>
+    </div>
+    <button class="accordion inner">REST API</button>
+    <div class="panel">
+        <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/expectation" -d '{
+    "httpRequest": {
+        "path": "/payments/.*"
+    },
+    "httpForward": {
+        "host": "payment-service.production.svc.cluster.local",
+        "port": 8080,
+        "scheme": "HTTP"
+    },
+    "chaos": {
+        "errorStatus": 503,
+        "errorProbability": 0.3,
+        "latency": {
+            "timeUnit": "MILLISECONDS",
+            "value": 200
+        }
+    },
+    "times": {
+        "unlimited": true
+    }
+}'</code></pre>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/expectation/put_expectation" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+</div>
+
+<p>Your application connects to <code class="inline code">payment-service-chaos:8080</code> instead of <code class="inline code">payment-service:8080</code>. MockServer forwards every request to the real <code class="inline code">payment-service.production.svc.cluster.local:8080</code> and injects errors and latency according to the chaos profile. When you are done testing, point your application back to the real service.</p>
+
+<p><strong>Scaling beyond one replica:</strong> the manifests above run a single replica, so the in-line expectation chaos and any <code class="inline code">PUT /mockserver/serviceChaos</code> registration apply to that one pod. If you scale the MockServer Deployment to multiple replicas behind a Service, run the <a href="/mock_server/centralized_deployment.html#option2">clustered HA variant</a> so that service-scoped HTTP, TCP and gRPC chaos registrations <strong>replicate across every replica</strong> — otherwise a control-plane registration only affects the single pod that received it. See <a href="/mock_server/chaos_testing.html#fleet_chaos">Fleet-wide Chaos</a>.</p>
+
+<a id="forward_proxy_pattern" class="anchor" href="#forward_proxy_pattern">&nbsp;</a>
+
+<h2>Pattern 2: Egress / Forward Proxy</h2>
+
+<p>Configure your application to use MockServer as its HTTP(S) proxy by setting <code class="inline code">HTTP_PROXY</code> and <code class="inline code">HTTPS_PROXY</code> environment variables. This lets you inject chaos into calls to external APIs without changing hostnames or Services.</p>
+
+<h3>Application Deployment with proxy env vars</h3>
+
+<pre class="prettyprint lang-yaml code"><code class="code">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      containers:
+        - name: app
+          image: my-app:latest
+          env:
+            - name: HTTP_PROXY
+              value: "http://mockserver.chaos.svc.cluster.local:1080"
+            - name: HTTPS_PROXY
+              value: "http://mockserver.chaos.svc.cluster.local:1080"
+            - name: NO_PROXY
+              value: "localhost,127.0.0.1,*.svc.cluster.local"</code></pre>
+
+<p>With these environment variables, your application's HTTP client sends outbound requests via MockServer. Use <code class="inline code">NO_PROXY</code> to exclude internal cluster traffic you do not want to route through MockServer.</p>
+
+<h3>Forward expectation for an external API</h3>
+
+<p>Inject 429 rate-limit errors on 50% of requests to <code class="inline code">api.stripe.com</code>:</p>
+
+<button id="button_k8s_chaos_egress" class="accordion">forward expectation with chaos &mdash; code examples</button>
+<div class="panel">
+    <button class="accordion inner">Java</button>
+    <div class="panel">
+        <pre class="prettyprint lang-java code"><code class="code">import static org.mockserver.model.HttpRequest.request;
+import static org.mockserver.model.HttpForward.forward;
+import static org.mockserver.model.HttpChaosProfile.httpChaosProfile;
+
+new MockServerClient("localhost", 1080)
+    .when(
+        request()
+            .withHeader("Host", "api.stripe.com")
+    )
+    .withChaos(
+        httpChaosProfile()
+            .withErrorStatus(429)
+            .withErrorProbability(0.5)
+            .withRetryAfter("30")
+    )
+    .forward(
+        forward()
+            .withHost("api.stripe.com")
+            .withPort(443)
+            .withScheme(HttpForward.Scheme.HTTPS)
+    );</code></pre>
+    </div>
+    <button class="accordion inner">JavaScript</button>
+    <div class="panel">
+        <pre class="prettyprint lang-javascript code"><code class="code">var mockServerClient = require('mockserver-client').mockServerClient;
+mockServerClient("localhost", 1080).mockAnyResponse({
+    "httpRequest": {
+        "headers": {
+            "Host": ["api.stripe.com"]
+        }
+    },
+    "httpForward": {
+        "host": "api.stripe.com",
+        "port": 443,
+        "scheme": "HTTPS"
+    },
+    "chaos": {
+        "errorStatus": 429,
+        "errorProbability": 0.5,
+        "retryAfter": "30"
+    },
+    "times": {
+        "unlimited": true
+    }
+}).then(
+    function () {
+        console.log("expectation created");
+    },
+    function (error) {
+        console.log(error);
+    }
+);</code></pre>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/expectation/put_expectation" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+    <button class="accordion inner">Python</button>
+    <div class="panel">
+        <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
+from mockserver.models import Expectation, HttpRequest, HttpForward, HttpChaosProfile, KeyToMultiValue, Times
+
+client = MockServerClient("localhost", 1080)
+client.upsert(Expectation(
+    http_request=HttpRequest(
+        headers=[KeyToMultiValue(name="Host", values=["api.stripe.com"])]
+    ),
+    http_forward=HttpForward(
+        host="api.stripe.com",
+        port=443,
+        scheme="HTTPS"
+    ),
+    chaos=HttpChaosProfile(
+        error_status=429,
+        error_probability=0.5,
+        retry_after="30"
+    ),
+    times=Times(unlimited=True)
+))</code></pre>
+    </div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel">
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+
+client = MockServer::Client.new('localhost', 1080)
+client.when(
+    MockServer::HttpRequest.new(
+        headers: [MockServer::KeyToMultiValue.new(name: 'Host', values: ['api.stripe.com'])]
+    )
+).with_chaos(
+    MockServer::HttpChaosProfile.new(
+        error_status: 429,
+        error_probability: 0.5,
+        retry_after: '30'
+    )
+).forward(
+    MockServer::HttpForward.new(
+        host: 'api.stripe.com',
+        port: 443,
+        scheme: 'HTTPS'
+    )
+)</code></pre>
+    </div>
+    <button class="accordion inner">Go</button>
+    <div class="panel">
+        <pre class="prettyprint lang-go code"><code class="code">package main
+
+import (
+    "bytes"
+    "net/http"
+)
+
+func main() {
+    body := []byte(`{
+    "httpRequest": {
+        "headers": {
+            "Host": ["api.stripe.com"]
+        }
+    },
+    "httpForward": {
+        "host": "api.stripe.com",
+        "port": 443,
+        "scheme": "HTTPS"
+    },
+    "chaos": {
+        "errorStatus": 429,
+        "errorProbability": 0.5,
+        "retryAfter": "30"
+    },
+    "times": {
+        "unlimited": true
+    }
+}`)
+    req, _ := http.NewRequest("PUT",
+        "http://localhost:1080/mockserver/expectation",
+        bytes.NewReader(body))
+    req.Header.Set("Content-Type", "application/json")
+    http.DefaultClient.Do(req)
+}</code></pre>
+    </div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel">
+        <pre class="prettyprint lang-csharp code"><code class="code">using System.Net.Http;
+using System.Text;
+
+using var httpClient = new HttpClient();
+var json = @"{
+    ""httpRequest"": {
+        ""headers"": {
+            ""Host"": [""api.stripe.com""]
+        }
+    },
+    ""httpForward"": {
+        ""host"": ""api.stripe.com"",
+        ""port"": 443,
+        ""scheme"": ""HTTPS""
+    },
+    ""chaos"": {
+        ""errorStatus"": 429,
+        ""errorProbability"": 0.5,
+        ""retryAfter"": ""30""
+    },
+    ""times"": {
+        ""unlimited"": true
+    }
+}";
+await httpClient.PutAsync(
+    "http://localhost:1080/mockserver/expectation",
+    new StringContent(json, Encoding.UTF8, "application/json")
+);</code></pre>
+    </div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel">
+        <pre class="prettyprint lang-rust code"><code class="code">use reqwest::blocking::Client;
+
+let client = Client::new();
+let body = r#"{
+    "httpRequest": {
+        "headers": {
+            "Host": ["api.stripe.com"]
+        }
+    },
+    "httpForward": {
+        "host": "api.stripe.com",
+        "port": 443,
+        "scheme": "HTTPS"
+    },
+    "chaos": {
+        "errorStatus": 429,
+        "errorProbability": 0.5,
+        "retryAfter": "30"
+    },
+    "times": {
+        "unlimited": true
+    }
+}"#;
+client.put("http://localhost:1080/mockserver/expectation")
+    .header("Content-Type", "application/json")
+    .body(body.to_string())
+    .send()
+    .unwrap();</code></pre>
+    </div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel">
+        <pre class="prettyprint lang-php code"><code class="code">$json = &lt;&lt;&lt;'JSON'
+{
+    "httpRequest": {
+        "headers": {
+            "Host": ["api.stripe.com"]
+        }
+    },
+    "httpForward": {
+        "host": "api.stripe.com",
+        "port": 443,
+        "scheme": "HTTPS"
+    },
+    "chaos": {
+        "errorStatus": 429,
+        "errorProbability": 0.5,
+        "retryAfter": "30"
+    },
+    "times": {
+        "unlimited": true
+    }
+}
+JSON;
+
+$ch = curl_init('http://localhost:1080/mockserver/expectation');
+curl_setopt_array($ch, [
+    CURLOPT_CUSTOMREQUEST  =&gt; 'PUT',
+    CURLOPT_POSTFIELDS     =&gt; $json,
+    CURLOPT_HTTPHEADER     =&gt; ['Content-Type: application/json; charset=utf-8'],
+    CURLOPT_RETURNTRANSFER =&gt; true,
+]);
+curl_exec($ch);
+curl_close($ch);</code></pre>
+    </div>
+    <button class="accordion inner">REST API</button>
+    <div class="panel">
+        <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/expectation" -d '{
+    "httpRequest": {
+        "headers": {
+            "Host": ["api.stripe.com"]
+        }
+    },
+    "httpForward": {
+        "host": "api.stripe.com",
+        "port": 443,
+        "scheme": "HTTPS"
+    },
+    "chaos": {
+        "errorStatus": 429,
+        "errorProbability": 0.5,
+        "retryAfter": "30"
+    },
+    "times": {
+        "unlimited": true
+    }
+}'</code></pre>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/expectation/put_expectation" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+</div>
+
+<p>Requests to other hosts pass through normally (the default <code class="inline code">attemptToProxyIfNoMatchingExpectation</code> is <code class="inline code">true</code>). Only requests matching the expectation receive chaos injection.</p>
+
+<a id="sidecar_pattern" class="anchor" href="#sidecar_pattern">&nbsp;</a>
+
+<h2>Pattern 3: Sidecar Proxy</h2>
+
+<p>Run MockServer as a sidecar container in the same pod as your application. This keeps the proxy co-located with the application and avoids a separate Deployment.</p>
+
+<pre class="prettyprint lang-yaml code"><code class="code">apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order-service
+  template:
+    metadata:
+      labels:
+        app: order-service
+    spec:
+      containers:
+        # Your application
+        - name: order-service
+          image: order-service:latest
+          env:
+            - name: INVENTORY_SERVICE_URL
+              value: "http://localhost:1080"
+        # MockServer sidecar — forwards to the real inventory service
+        - name: mockserver-sidecar
+          image: mockserver/mockserver:mockserver-{{ site.mockserver_version }}
+          ports:
+            - containerPort: 1080
+          env:
+            - name: MOCKSERVER_LOG_LEVEL
+              value: "INFO"
+            # Forward all unmatched requests to the real inventory service
+            - name: MOCKSERVER_PROXY_REMOTE_HOST
+              value: "inventory-service.production.svc.cluster.local"
+            - name: MOCKSERVER_PROXY_REMOTE_PORT
+              value: "8080"</code></pre>
+
+<p>With <code class="inline code">MOCKSERVER_PROXY_REMOTE_HOST</code> and <code class="inline code">MOCKSERVER_PROXY_REMOTE_PORT</code> set, MockServer forwards all unmatched requests to the real inventory service. Add expectations with chaos profiles for specific paths to inject faults:</p>
+
+<button id="button_k8s_chaos_sidecar" class="accordion">forward expectation with chaos &mdash; code examples</button>
+<div class="panel">
+    <button class="accordion inner">Java</button>
+    <div class="panel">
+        <pre class="prettyprint lang-java code"><code class="code">import static org.mockserver.model.HttpRequest.request;
+import static org.mockserver.model.HttpForward.forward;
+import static org.mockserver.model.HttpChaosProfile.httpChaosProfile;
+
+new MockServerClient("localhost", 1080)
+    .when(
+        request()
+            .withPath("/inventory/check")
+    )
+    .withChaos(
+        httpChaosProfile()
+            .withErrorStatus(500)
+            .withErrorProbability(1.0)
+            .withSucceedFirst(3)
+            .withFailRequestCount(5)
+    )
+    .forward(
+        forward()
+            .withHost("inventory-service.production.svc.cluster.local")
+            .withPort(8080)
+            .withScheme(HttpForward.Scheme.HTTP)
+    );</code></pre>
+    </div>
+    <button class="accordion inner">JavaScript</button>
+    <div class="panel">
+        <pre class="prettyprint lang-javascript code"><code class="code">var mockServerClient = require('mockserver-client').mockServerClient;
+mockServerClient("localhost", 1080).mockAnyResponse({
+    "httpRequest": {
+        "path": "/inventory/check"
+    },
+    "httpForward": {
+        "host": "inventory-service.production.svc.cluster.local",
+        "port": 8080,
+        "scheme": "HTTP"
+    },
+    "chaos": {
+        "errorStatus": 500,
+        "errorProbability": 1.0,
+        "succeedFirst": 3,
+        "failRequestCount": 5
+    },
+    "times": {
+        "unlimited": true
+    }
+}).then(
+    function () {
+        console.log("expectation created");
+    },
+    function (error) {
+        console.log(error);
+    }
+);</code></pre>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/expectation/put_expectation" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+    <button class="accordion inner">Python</button>
+    <div class="panel">
+        <pre class="prettyprint lang-python code"><code class="code">from mockserver.client import MockServerClient
+from mockserver.models import Expectation, HttpRequest, HttpForward, HttpChaosProfile, Times
+
+client = MockServerClient("localhost", 1080)
+client.upsert(Expectation(
+    http_request=HttpRequest(path="/inventory/check"),
+    http_forward=HttpForward(
+        host="inventory-service.production.svc.cluster.local",
+        port=8080,
+        scheme="HTTP"
+    ),
+    chaos=HttpChaosProfile(
+        error_status=500,
+        error_probability=1.0,
+        succeed_first=3,
+        fail_request_count=5
+    ),
+    times=Times(unlimited=True)
+))</code></pre>
+    </div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel">
+        <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+
+client = MockServer::Client.new('localhost', 1080)
+client.when(
+    MockServer::HttpRequest.new(path: '/inventory/check')
+).with_chaos(
+    MockServer::HttpChaosProfile.new(
+        error_status: 500,
+        error_probability: 1.0,
+        succeed_first: 3,
+        fail_request_count: 5
+    )
+).forward(
+    MockServer::HttpForward.new(
+        host: 'inventory-service.production.svc.cluster.local',
+        port: 8080,
+        scheme: 'HTTP'
+    )
+)</code></pre>
+    </div>
+    <button class="accordion inner">Go</button>
+    <div class="panel">
+        <pre class="prettyprint lang-go code"><code class="code">package main
+
+import (
+    "bytes"
+    "net/http"
+)
+
+func main() {
+    body := []byte(`{
+    "httpRequest": {
+        "path": "/inventory/check"
+    },
+    "httpForward": {
+        "host": "inventory-service.production.svc.cluster.local",
+        "port": 8080,
+        "scheme": "HTTP"
+    },
+    "chaos": {
+        "errorStatus": 500,
+        "errorProbability": 1.0,
+        "succeedFirst": 3,
+        "failRequestCount": 5
+    },
+    "times": {
+        "unlimited": true
+    }
+}`)
+    req, _ := http.NewRequest("PUT",
+        "http://localhost:1080/mockserver/expectation",
+        bytes.NewReader(body))
+    req.Header.Set("Content-Type", "application/json")
+    http.DefaultClient.Do(req)
+}</code></pre>
+    </div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel">
+        <pre class="prettyprint lang-csharp code"><code class="code">using System.Net.Http;
+using System.Text;
+
+using var httpClient = new HttpClient();
+var json = @"{
+    ""httpRequest"": {
+        ""path"": ""/inventory/check""
+    },
+    ""httpForward"": {
+        ""host"": ""inventory-service.production.svc.cluster.local"",
+        ""port"": 8080,
+        ""scheme"": ""HTTP""
+    },
+    ""chaos"": {
+        ""errorStatus"": 500,
+        ""errorProbability"": 1.0,
+        ""succeedFirst"": 3,
+        ""failRequestCount"": 5
+    },
+    ""times"": {
+        ""unlimited"": true
+    }
+}";
+await httpClient.PutAsync(
+    "http://localhost:1080/mockserver/expectation",
+    new StringContent(json, Encoding.UTF8, "application/json")
+);</code></pre>
+    </div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel">
+        <pre class="prettyprint lang-rust code"><code class="code">use reqwest::blocking::Client;
+
+let client = Client::new();
+let body = r#"{
+    "httpRequest": {
+        "path": "/inventory/check"
+    },
+    "httpForward": {
+        "host": "inventory-service.production.svc.cluster.local",
+        "port": 8080,
+        "scheme": "HTTP"
+    },
+    "chaos": {
+        "errorStatus": 500,
+        "errorProbability": 1.0,
+        "succeedFirst": 3,
+        "failRequestCount": 5
+    },
+    "times": {
+        "unlimited": true
+    }
+}"#;
+client.put("http://localhost:1080/mockserver/expectation")
+    .header("Content-Type", "application/json")
+    .body(body.to_string())
+    .send()
+    .unwrap();</code></pre>
+    </div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel">
+        <pre class="prettyprint lang-php code"><code class="code">$json = &lt;&lt;&lt;'JSON'
+{
+    "httpRequest": {
+        "path": "/inventory/check"
+    },
+    "httpForward": {
+        "host": "inventory-service.production.svc.cluster.local",
+        "port": 8080,
+        "scheme": "HTTP"
+    },
+    "chaos": {
+        "errorStatus": 500,
+        "errorProbability": 1.0,
+        "succeedFirst": 3,
+        "failRequestCount": 5
+    },
+    "times": {
+        "unlimited": true
+    }
+}
+JSON;
+
+$ch = curl_init('http://localhost:1080/mockserver/expectation');
+curl_setopt_array($ch, [
+    CURLOPT_CUSTOMREQUEST  =&gt; 'PUT',
+    CURLOPT_POSTFIELDS     =&gt; $json,
+    CURLOPT_HTTPHEADER     =&gt; ['Content-Type: application/json; charset=utf-8'],
+    CURLOPT_RETURNTRANSFER =&gt; true,
+]);
+curl_exec($ch);
+curl_close($ch);</code></pre>
+    </div>
+    <button class="accordion inner">REST API</button>
+    <div class="panel">
+        <pre class="prettyprint code"><code class="code">curl -v -X PUT "http://localhost:1080/mockserver/expectation" -d '{
+    "httpRequest": {
+        "path": "/inventory/check"
+    },
+    "httpForward": {
+        "host": "inventory-service.production.svc.cluster.local",
+        "port": 8080,
+        "scheme": "HTTP"
+    },
+    "chaos": {
+        "errorStatus": 500,
+        "errorProbability": 1.0,
+        "succeedFirst": 3,
+        "failRequestCount": 5
+    },
+    "times": {
+        "unlimited": true
+    }
+}'</code></pre>
+        <p>See <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/expectation/put_expectation" target="_blank" rel="noopener noreferrer">REST API</a> for full JSON specification</p>
+    </div>
+</div>
+
+<p>This example lets the first 3 requests to <code class="inline code">/inventory/check</code> succeed, then injects 500 errors on requests 4 through 8, and recovers to normal responses after that. This is useful for testing retry logic and circuit breakers. See <a href="/mock_server/chaos_testing.html#stateful_count_based_faults">Stateful / Count-Based Faults</a> for more on <code class="inline code">succeedFirst</code> and <code class="inline code">failRequestCount</code>.</p>
+
+<a id="helm_deployment" class="anchor" href="#helm_deployment">&nbsp;</a>
+
+<h2>Deploying with Helm</h2>
+
+<p>The <a href="https://www.mock-server.com/where/kubernetes.html">MockServer Helm chart</a> deploys a standalone MockServer instance. You can configure it as a reverse proxy using <code class="inline code">app.proxyRemoteHost</code> and <code class="inline code">app.proxyRemotePort</code> (which map to the <code class="inline code">PROXY_REMOTE_HOST</code> and <code class="inline code">PROXY_REMOTE_PORT</code> environment variables in the Deployment template), and inject a <code class="inline code">mockserver.properties</code> file via the inline config feature for additional settings.</p>
+
+<pre class="prettyprint code"><code class="code"># Install MockServer as a reverse proxy for the inventory service
+helm install inventory-chaos oci://ghcr.io/mock-server/charts/mockserver \
+  --set app.proxyRemoteHost="inventory-service.production.svc.cluster.local" \
+  --set app.proxyRemotePort="8080" \
+  --set service.type=ClusterIP</code></pre>
+
+<p>Then create forward expectations with chaos profiles via the MockServer API (using <code class="inline code">curl</code>, a client library, or the dashboard UI).</p>
+
+<p>The Helm chart does <strong>not</strong> have a built-in sidecar template. For sidecar deployments, add MockServer as a container directly in your application's Deployment manifest as shown in <a href="#sidecar_pattern">Pattern 3</a> above.</p>
+
+<a id="https_interception" class="anchor" href="#https_interception">&nbsp;</a>
+
+<h2>HTTPS Interception</h2>
+
+<p>MockServer can intercept and forward HTTPS traffic, but clients must <strong>trust MockServer's Certificate Authority (CA)</strong> for this to work. MockServer dynamically generates TLS certificates for upstream hosts, signed by its CA. Without trust, clients will reject MockServer's certificates with TLS handshake errors.</p>
+
+<p><strong>How to establish trust:</strong></p>
+<ul>
+    <li><strong>Default CA:</strong> MockServer ships with a default CA certificate (<code class="inline code">CertificateAuthorityCertificate.pem</code>) bundled in the JAR. Add this certificate to your application's trust store.</li>
+    <li><strong>Dynamic CA:</strong> Set <code class="inline code">MOCKSERVER_DYNAMICALLY_CREATE_CERTIFICATE_AUTHORITY_CERTIFICATE=true</code> and <code class="inline code">MOCKSERVER_DIRECTORY_TO_SAVE_DYNAMIC_SSL_CERTIFICATE=/certs</code> to generate a unique CA on startup. Mount the output directory as a shared volume between the MockServer container and your application container, then add the generated CA PEM to your application's trust store.</li>
+    <li><strong>Custom CA:</strong> Provide your own CA certificate and private key via <code class="inline code">mockserver.certificateAuthorityCertificate</code> and <code class="inline code">mockserver.certificateAuthorityPrivateKey</code>.</li>
+</ul>
+
+<p><strong>For JVM applications</strong>, add the CA certificate to the JVM trust store:</p>
+
+<pre class="prettyprint code"><code class="code">keytool -import -trustcacerts -keystore $JAVA_HOME/lib/security/cacerts \
+  -storepass changeit -noprompt -alias mockserver-ca \
+  -file /certs/CertificateAuthorityCertificate.pem</code></pre>
+
+<p><strong>For non-JVM applications</strong>, mount the CA PEM file and configure the application or OS trust store (e.g. <code class="inline code">SSL_CERT_FILE</code>, <code class="inline code">REQUESTS_CA_BUNDLE</code>, or <code class="inline code">NODE_EXTRA_CA_CERTS</code>).</p>
+
+<p>See the <a href="/mock_server/HTTPS_TLS.html">TLS Configuration</a> page for full details on MockServer's TLS architecture, including mTLS and custom certificate chains.</p>
+
+<p><strong>Important:</strong> MockServer proxies and mocks at L7 (HTTP/HTTPS), but it <strong>can</strong> be placed in-path transparently via Linux iptables <code class="inline code">REDIRECT</code> / <code class="inline code">TPROXY</code> (set <code class="inline code">transparentProxyEnabled</code> to <code class="inline code">true</code> — see <a href="/mock_server/service_mesh.html">Transparent Proxy / Sidecar Mode</a>), and it can inject transport-layer faults via TCP-Layer Chaos. It does not rewrite or manipulate arbitrary raw (non-HTTP) packets.</p>
+
+<a id="selective_chaos" class="anchor" href="#selective_chaos">&nbsp;</a>
+
+<h2>Selective Chaos Scope</h2>
+
+<p>Chaos is injected only for requests that match an expectation with a chaos profile. All other requests are either handled by other expectations or, if <code class="inline code">attemptToProxyIfNoMatchingExpectation</code> is <code class="inline code">true</code> (the default), forwarded to the original destination unchanged.</p>
+
+<p>This means you can inject chaos into specific hosts, paths, or header combinations while leaving everything else untouched. For example, you could inject latency into calls to <code class="inline code">/api/slow-endpoint</code> while leaving <code class="inline code">/api/fast-endpoint</code> and all other paths operating normally.</p>
+
+<p>The <code class="inline code">attemptToProxyIfNoMatchingExpectation</code> property (environment variable: <code class="inline code">MOCKSERVER_ATTEMPT_TO_PROXY_IF_NO_MATCHING_EXPECTATION</code>) controls what happens to unmatched requests. When <code class="inline code">true</code> (default), unmatched requests are forwarded to their original destination based on the Host header. When <code class="inline code">false</code>, unmatched requests receive a 404. See <a href="/mock_server/configuration_properties.html#button_configuration_attempt_to_proxy_if_no_matching_expectation">Configuration Properties</a> for details.</p>
+
+<a id="faq" class="anchor" href="#faq">&nbsp;</a>
+
+<h2>FAQ</h2>
+
+<button id="button_faq_inject_external" class="accordion">How do I inject faults into a service's external API calls in Kubernetes?</button>
+<div class="panel">
+    <p>Deploy MockServer as a sidecar or standalone proxy in your Kubernetes cluster, set your application's <code class="inline code">HTTP_PROXY</code> / <code class="inline code">HTTPS_PROXY</code> environment variables to point at MockServer, and create forward expectations with chaos profiles for the target hosts. MockServer forwards requests to the real upstream and probabilistically injects errors or latency into the responses it relays back. See <a href="#forward_proxy_pattern">Pattern 2: Egress / Forward Proxy</a> above.</p>
+</div>
+
+<button id="button_faq_intermittent_failure" class="accordion">How do I make a dependency intermittently fail in a cluster?</button>
+<div class="panel">
+    <p>Place MockServer between your application and the dependency using a Kubernetes Service that routes to MockServer instead of the real backend. Create a forward expectation that sends requests to the real upstream host and attach a chaos profile with an <code class="inline code">errorStatus</code> (e.g. 503), an <code class="inline code">errorProbability</code> (e.g. 0.3 for 30% failures), and optionally a <code class="inline code">latency</code> delay. Only matched requests get chaos; other traffic passes through normally. See <a href="#reverse_proxy_pattern">Pattern 1: Reverse Proxy</a> above.</p>
+</div>
+
+<button id="button_faq_transparent" class="accordion">Does MockServer support transparent traffic interception in Kubernetes?</button>
+<div class="panel">
+    <p>Yes. Set <code class="inline code">transparentProxyEnabled</code> to <code class="inline code">true</code> and MockServer intercepts traffic redirected to it by iptables REDIRECT / TPROXY rules, using the original destination (or the <code class="inline code">Host</code> header) to choose the forwarding target — see the <a href="/mock_server/service_mesh.html">Transparent Proxy / Sidecar Mode</a> page for setup. Alternatively, route traffic explicitly via <code class="inline code">HTTP_PROXY</code> / <code class="inline code">HTTPS_PROXY</code> environment variables, a Kubernetes Service, or the <code class="inline code">proxyRemoteHost</code> / <code class="inline code">proxyRemotePort</code> configuration.</p>
+</div>
+
+<button id="button_faq_https" class="accordion">How do I intercept HTTPS traffic through MockServer in Kubernetes?</button>
+<div class="panel">
+    <p>Clients must trust MockServer's Certificate Authority (CA). MockServer dynamically generates TLS certificates signed by its CA. You can use the default CA certificate bundled with MockServer, generate a unique one with <code class="inline code">dynamicallyCreateCertificateAuthorityCertificate</code>, or provide your own CA. Add the CA certificate to your application's trust store. See <a href="#https_interception">HTTPS Interception</a> above and the <a href="/mock_server/HTTPS_TLS.html">TLS Configuration</a> page.</p>
+</div>
+
+<h2>Related Pages</h2>
+
+<ul>
+    <li><a href="/mock_server/chaos_testing.html">Chaos Testing &amp; Fault Injection</a> — chaos profile fields, examples, and compatibility table</li>
+    <li><a href="/mock_server/chaos_testing_orchestrators.html">Driving MockServer from Chaos Orchestrators</a> — Chaos Toolkit, AWS FIS, Azure Chaos Studio and LitmusChaos recipes against the control plane</li>
+    <li><a href="/proxy/network_latency_debugging.html">Network Latency Debugging</a> — use the same in-path deployment to capture per-request timing, export HAR with breakdowns, and track latency percentiles</li>
+    <li><a href="/mock_server/HTTPS_TLS.html">TLS Configuration</a> — CA certificates, mTLS, and TLS trust chains</li>
+    <li><a href="/mock_server/configuration_properties.html">Configuration Properties</a> — all properties including <code class="inline code">proxyRemoteHost</code>, <code class="inline code">proxyRemotePort</code>, and <code class="inline code">attemptToProxyIfNoMatchingExpectation</code></li>
+    <li><a href="/mock_server/isolating_single_service.html">Isolating Single Service</a> — using MockServer as a reverse proxy to isolate a service for debugging</li>
+</ul>

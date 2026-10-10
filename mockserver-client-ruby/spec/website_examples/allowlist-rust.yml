@@ -1,0 +1,260 @@
+# Website accordions whose Rust tab is allowed to differ from the REST API tab.
+# Same format and rules as allowlist.yml (the Ruby tabs): key, the finding
+# it accepts (status), a reason, and the digest the check prints. Any other
+# finding fails the check, and so does an entry that no longer matches.
+#   ruby spec/website_examples/check_website_examples.rb --lang rust --verbose
+
+# --- Same as the Ruby tab ---
+mock_server/_includes/grpc_mocking.html#button_grpc_record_replay:
+  status: differs
+  digest: d7e5cdb560d3
+  reason: Rust replays the expectations it retrieved; the REST API tab saves them
+    to a file and uploads that file.
+mock_server/_includes/load_scenario_code_examples.html#button_load_lifecycle:
+  status: differs
+  digest: 52a57c61e556
+  reason: Rust also clears the scenario registry at the end; the REST API tab stops
+    at stop.
+mock_server/_includes/load_scenario_code_examples.html#button_load_rate_soak:
+  status: differs
+  digest: d4710066d96b
+  reason: Rust also stops the scenario after starting it; the REST API tab registers
+    and starts it.
+mock_server/_includes/load_scenario_code_examples.html#button_load_vu_ramp:
+  status: differs
+  digest: 4f98da7d9e08
+  reason: Rust also stops the scenario after starting it; the REST API tab registers
+    and starts it.
+mock_server/_includes/openapi_request_matcher_code_examples.html#button_match_by_inline_openapi_json:
+  status: rest_invalid_json
+  digest: 3fda2f398375
+  reason: One REST API tab splices the spec in with a shell backtick cat, which is
+    not JSON as written; Rust reads the spec from a file.
+? mock_server/_includes/stateful_scenarios.html#external_trigger_mdash_flip_a_dependency_from_healthy_to_down_on_demand_from_your_test_harness
+: status: differs
+  digest: 9e853dd5de24
+  reason: Rust, like the Java tab, shows only the trigger call; the REST API tab also
+    registers the expectations it relies on.
+? mock_server/_includes/stateful_scenarios.html#timed_auto_transition_mdash_model_a_deployment_that_automatically_completes_after_1_second
+: status: differs
+  digest: 5135518949b0
+  reason: Rust, like the Java tab, shows only the scenario call; the REST API tab
+    also registers the expectations it relies on.
+mock_server/contract_testing.html#button_pact_full_workflow:
+  status: differs
+  digest: 81612ff860c6
+  reason: The REST API tab adds an expectation id and a JSON-object body and reads
+    the contract from a file; Rust follows the Java tab and passes the exported contract
+    on.
+mock_server/load_injection.html#button_load_step_checks:
+  status: differs
+  digest: 4c663b38bea8
+  reason: Rust also stops the scenario after starting it; the REST API tab registers
+    and starts it.
+mock_server/load_injection.html#in_run_thresholds_fail_the_run_on_a_latency_or_error_budget_breach:
+  status: differs
+  digest: 7ffcd99321f8
+  reason: Rust reads the status once; the REST API tab polls it in a shell loop.
+mock_server/mock_openid_connect_provider.html#button_create_oidc_provider:
+  status: differs
+  digest: 665743e62ea3
+  reason: The REST API tab shows a defaults call and then a configured call; Rust
+    shows the configured one.
+mock_server/using_openapi.html#button_wsdl_inline:
+  status: differs
+  digest: b996b93a35f3
+  reason: The REST API tab abbreviates the WSDL document with "..."; Rust sends it
+    in full.
+
+# --- Intentional: the tab shows the same feature another way ---
+mock_server/_includes/response_action_code_examples.html#button_file_store_api:
+  status: differs
+  digest: b886d2ef760d
+  reason: 'The Rust client always sends file content base64-encoded (base64: true);
+    the REST API tab sends the text.'
+mock_server/_includes/response_action_code_examples.html#button_response_literal_binary_PNG_body:
+  status: differs
+  digest: a9cb6d35fbc3
+  reason: The Rust tab abbreviates the PNG's base64 to its first characters; the REST
+    API tab inlines the whole image.
+mock_server/_includes/response_action_code_examples.html#button_response_recover_after_fail_then_succeed:
+  status: does_not_compile
+  digest: b635b657a2e9
+  reason: The tab holds two separate programs; the check joins a tab into one program,
+    which redeclares their names.
+mock_server/_includes/stateful_scenarios.html#rest_api_reference_mdash_inspect_and_control_scenarios_with_curl:
+  status: differs
+  digest: 5f0cf6f1da06
+  reason: Rust makes the same calls but lists all scenarios last; the REST API tab
+    lists them first.
+mock_server/debugging_issues.html#button_retrieve_all_recorded_log_messages:
+  status: differs
+  digest: '0342759e4bae'
+  reason: The Rust client asks for format=LOG_ENTRIES so it can parse the entries;
+    the REST API tab takes the default format.
+mock_server/debugging_issues.html#button_retrieve_recorded_log_messages_as_array:
+  status: differs
+  digest: d05cba1c18ca
+  reason: The Rust client asks for format=LOG_ENTRIES so it can parse the entries;
+    the REST API tab takes the default format.
+mock_server/debugging_issues.html#button_retrieve_recorded_log_messages_using_request_matcher:
+  status: differs
+  digest: 81639d207003
+  reason: The Rust client asks for format=LOG_ENTRIES so it can parse the entries;
+    the REST API tab takes the default format.
+mock_server/load_injection.html#cross_step_capture_login_capture_a_token_reuse_it:
+  status: differs
+  digest: 2119274f54d9
+  reason: Rust sends the login body as a JSON string; the REST API tab as a JSON object.
+    A load step sends the same bytes either way.
+mock_server/load_injection.html#register_start_read_status_then_stop_a_ramp_then_hold_scenario:
+  status: differs
+  digest: 4dc640b80414
+  reason: Rust reads the scenario status and stops it with its own calls; the REST
+    API tab reads and stops by path (same calls, other order).
+mock_server/mockserver_clients.html#button_client_retrieve_logs:
+  status: differs
+  digest: 81639d207003
+  reason: The Rust client asks for format=LOG_ENTRIES so it can parse the entries;
+    the REST API tab takes the default format.
+mock_server/running_tests_in_parallel.html#button_parallel_tests_unique_session_id:
+  status: differs
+  digest: a52815ca8944
+  reason: Rust generates a fresh session id with Uuid::new_v4(); the REST API tab shows
+    a fixed one.
+
+# --- The check cannot run it ---
+mock_server/CORS_support.html#button_enabled_permissive_cors_for_all_response:
+  status: raised
+  digest: 7870533d621b
+  reason: Rust starts a server with the CORS properties (the binary launcher, which
+    would download the server); the REST API tab sets them on a running server.
+mock_server/CORS_support.html#button_enabled_permissive_cors_for_control_plane_api:
+  status: raised
+  digest: 7870533d621b
+  reason: Rust starts a server with the CORS properties (the binary launcher, which
+    would download the server); the REST API tab sets them on a running server.
+mock_server/HTTPS_TLS.html#button_client_mtls_connection:
+  status: raised
+  digest: b00dce3d3167
+  reason: Connects over mutual TLS with certificate files at placeholder paths (/path/to/...);
+    the check runs a plain HTTP capture server.
+mock_server/_includes/openapi_request_matcher_code_examples.html#button_match_by_inline_openapi_yaml:
+  status: raised
+  digest: a619ec8b1bd6
+  reason: Rust reads the YAML spec from a placeholder path (/path/to/...); the REST
+    API tab inlines it.
+mock_server/interactive_breakpoints.html#button_breakpoint_client_api:
+  status: raised
+  digest: bd0003e76516
+  reason: Opens the breakpoint WebSocket first, which the check does not serve, so
+    nothing is registered.
+mock_server/mockserver_clients.html#button_client_create_expectation_over_tls:
+  status: raised
+  digest: b00dce3d3167
+  reason: Connects over TLS; the check runs a plain HTTP capture server, so the TLS
+    handshake never completes.
+mock_server/using_openapi.html#button_open_api_inline_json_specification:
+  status: raised
+  digest: a619ec8b1bd6
+  reason: Rust reads the spec from a placeholder path (/path/to/...); the REST API
+    tab splices it in with a shell backtick command.
+mock_server/using_openapi.html#button_wsdl_file:
+  status: raised
+  digest: a619ec8b1bd6
+  reason: Rust reads the WSDL from a placeholder path (/path/to/...); the REST API
+    tab sends it from a file with -d @.
+
+# --- Not compared ---
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_basic:
+  status: not_compared
+  digest: aa23e801a2c1
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_handlers:
+  status: not_compared
+  digest: 9549f20ef146
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_push:
+  status: not_compared
+  digest: 12274177e0fe
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_streaming:
+  status: not_compared
+  digest: 30a2e58bc428
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_workflow:
+  status: not_compared
+  digest: ad90e6eac9aa
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_mcp_full:
+  status: not_compared
+  digest: 1415aa6bf293
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_mcp_prompts:
+  status: not_compared
+  digest: 47bc54a6221b
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_mcp_resources:
+  status: not_compared
+  digest: e959d6525a15
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_mcp_tools:
+  status: not_compared
+  digest: ee498f6f5825
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/creating_expectations.html#tabs-1:
+  status: not_compared
+  digest: e0f92de6a6d4
+  reason: These language tabs have no REST API tab to compare with.
+mock_server/client_compatibility.html#loose-36c7585c1ff8:
+  status: not_compared
+  digest: 36c7585c1ff8
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/drift_detection.html#tabs-1:
+  status: not_compared
+  digest: 7742f207a3fb
+  reason: These language tabs have no REST API tab to compare with.
+mock_server/drift_detection.html#tabs-2:
+  status: not_compared
+  digest: 51d1535157b3
+  reason: These language tabs have no REST API tab to compare with.
+mock_server/mock_openid_connect_provider.html#button_device_flow:
+  status: not_compared
+  digest: a3150f004286
+  reason: The REST API tab calls the mocked OIDC endpoints, not /mockserver/.
+mock_server/mock_openid_connect_provider.html#button_introspect_token:
+  status: not_compared
+  digest: d640c20cd401
+  reason: The REST API tab calls the mocked OIDC endpoints, not /mockserver/.
+mock_server/mockserver_clients.html#loose-8b52c5ecb335:
+  status: not_compared
+  digest: 8b52c5ecb335
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/mockserver_clients.html#loose-99f1a4213f08:
+  status: not_compared
+  digest: 99f1a4213f08
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/mockserver_testcontainers.html#loose-2bba7f91dbdb:
+  status: not_compared
+  digest: 2bba7f91dbdb
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/mockserver_testcontainers.html#loose-9ab3fba72c39:
+  status: not_compared
+  digest: 9ab3fba72c39
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/mockserver_testcontainers.html#loose-ba5d0afde5fb:
+  status: not_compared
+  digest: ba5d0afde5fb
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/wasm_rules.html#loose-09213240214b:
+  status: not_compared
+  digest: '09213240214b'
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/wasm_rules.html#loose-247b773d1207:
+  status: not_compared
+  digest: 247b773d1207
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/wasm_rules.html#loose-c49baa56a27f:
+  status: not_compared
+  digest: c49baa56a27f
+  reason: Outside any accordion, so there is no REST API tab to compare with.

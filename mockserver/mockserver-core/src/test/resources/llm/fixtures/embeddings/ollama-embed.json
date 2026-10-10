@@ -1,0 +1,8 @@
+200
+{
+  "model" : "all-minilm",
+  "embeddings" : [ "<vector:768>", "<vector:768>" ],
+  "total_duration" : 14143917,
+  "load_duration" : 1019500,
+  "prompt_eval_count" : 10
+}

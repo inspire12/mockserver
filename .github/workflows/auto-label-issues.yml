@@ -1,0 +1,40 @@
+name: Auto-label issues
+
+on:
+  issues:
+    types: [opened]
+
+# Defence-in-depth: any new job added to this workflow starts from no
+# permissions by default rather than inheriting the repo-wide default.
+# The single existing job re-grants `issues: write` for itself below.
+permissions: {}
+
+jobs:
+  auto-label:
+    name: Auto-label from template
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Label bug reports
+        if: contains(github.event.issue.body, 'Describe the issue') && contains(github.event.issue.body, 'MockServer Log')
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['bug']
+            });
+      - name: Label feature requests
+        if: contains(github.event.issue.body, 'Describe the feature request') && contains(github.event.issue.body, 'The solution you')
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['enhancement']
+            });

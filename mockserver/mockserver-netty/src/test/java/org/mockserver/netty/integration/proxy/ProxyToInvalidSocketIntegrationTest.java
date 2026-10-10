@@ -1,0 +1,103 @@
+package org.mockserver.netty.integration.proxy;
+
+import io.netty.channel.EventLoopGroup;
+import io.netty.channel.nio.NioEventLoopGroup;
+import org.junit.AfterClass;
+import org.junit.Before;
+import org.junit.BeforeClass;
+import org.junit.Test;
+import org.mockserver.httpclient.NettyHttpClient;
+import org.mockserver.integration.ClientAndServer;
+import org.mockserver.logging.MockServerLogger;
+import org.mockserver.model.HttpResponse;
+import org.mockserver.scheduler.Scheduler;
+import org.mockserver.test.ClosedPort;
+import org.mockserver.verify.VerificationTimes;
+
+import java.net.InetSocketAddress;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
+import static io.netty.handler.codec.http.HttpHeaderNames.HOST;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.core.Is.is;
+import static org.mockserver.configuration.Configuration.configuration;
+import static org.mockserver.integration.ClientAndServer.startClientAndServer;
+import static org.mockserver.model.HttpRequest.request;
+import static org.mockserver.stop.Stop.stopQuietly;
+
+/**
+ * @author jamesdbloom
+ */
+public class ProxyToInvalidSocketIntegrationTest {
+
+    private static ClientAndServer clientAndServer;
+
+    private static EventLoopGroup clientEventLoopGroup;
+
+    private static NettyHttpClient httpClient;
+
+    @BeforeClass
+    public static void startServer() {
+        clientAndServer = startClientAndServer();
+    }
+
+    @BeforeClass
+    public static void startEventLoopGroup() {
+        clientEventLoopGroup = new NioEventLoopGroup(3, new Scheduler.SchedulerThreadFactory(ProxyToInvalidSocketIntegrationTest.class.getSimpleName() + "-eventLoop"));
+        httpClient = new NettyHttpClient(configuration(), new MockServerLogger(), clientEventLoopGroup, null, false);
+    }
+
+    @AfterClass
+    public static void stopEventLoopGroup() {
+        clientEventLoopGroup.shutdownGracefully(0, 0, MILLISECONDS).syncUninterruptibly();
+    }
+
+    @AfterClass
+    public static void stopServer() {
+        stopQuietly(clientAndServer);
+    }
+
+    @Before
+    public void reset() {
+        clientAndServer.reset();
+    }
+
+    @Test
+    public void shouldNotForwardRequestWithInvalidHostHead() throws Exception {
+        // when
+        Future<HttpResponse> responseFuture =
+            httpClient.sendRequest(
+                request()
+                    .withPath("/some_path")
+                    .withHeader(HOST.toString(), "localhost:" + ClosedPort.CLOSED_PORT),
+                new InetSocketAddress(clientAndServer.getPort())
+            );
+
+        // then
+        assertThat(responseFuture.get(10, TimeUnit.SECONDS).getStatusCode(), is(502));
+    }
+
+    @Test
+    public void shouldVerifyReceivedRequests() throws Exception {
+        // given
+        Future<HttpResponse> responseFuture =
+            httpClient.sendRequest(
+                request()
+                    .withPath("/some_path")
+                    .withHeader(HOST.toString(), "localhost:" + ClosedPort.CLOSED_PORT),
+                new InetSocketAddress(clientAndServer.getPort())
+            );
+
+        // then
+        assertThat(responseFuture.get(10, TimeUnit.SECONDS).getStatusCode(), is(502));
+
+        // then
+        clientAndServer.verify(request()
+            .withPath("/some_path"));
+        clientAndServer.verify(request()
+            .withPath("/some_path"), VerificationTimes.exactly(1));
+    }
+
+}

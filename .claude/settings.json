@@ -1,0 +1,55 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Bash(scripts/ci/bk-pipeline-status.sh:*)",
+      "Bash(./scripts/ci/bk-pipeline-status.sh:*)"
+    ],
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean -fd*)",
+      "Bash(rm -rf .)",
+      "Bash(rm -rf ..)",
+      "Bash(rm -rf ~)",
+      "Bash(rm -rf /)",
+      "Bash(rm -rf /*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Task|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .opencode/scripts/check-halt-hook.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .opencode/scripts/check-bare-checkout-write-hook.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "osascript -e 'display notification \"Task completed\" with title \"Claude Code — MockServer\"'"
+          },
+          {
+            "type": "command",
+            "command": "bash .opencode/scripts/aggregate-telemetry.sh .tmp/decisions --csv .tmp/telemetry-latest.csv >/dev/null 2>&1 || true"
+          }
+        ]
+      }
+    ]
+  }
+}

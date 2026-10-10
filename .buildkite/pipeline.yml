@@ -1,24 +1,10 @@
 steps:
-  - label: ":docker: update docker image"
-    command: "docker pull mockserver/mockserver:maven"
-
-  - wait
-
-  - label: ":maven: build"
-    command: "docker run -v $(pwd):/build/mockserver -w /build/mockserver -a stdout -a stderr -e BUILDKITE_BRANCH=$BUILDKITE_BRANCH mockserver/mockserver:maven /build/mockserver/scripts/buildkite_quick_build.sh"
-    artifact_paths:
-      - "**/*.log"
-      - "**/target/surefire-reports/TEST-*.xml"
-      - "**/target/surefire-reports/*-output.txt"
-      - "**/target/failsafe-reports/TEST-*.xml"
-      - "**/target/failsafe-reports/*-output.txt"
-    timeout_in_minutes: 60
-
-  - wait: ~
-    continue_on_failure: true
-
-  - label: ":junit: annotate test results"
-    plugins:
-      - junit-annotate#v2.4.1:
-          artifacts: "**/target/*-reports/TEST-*.xml"
-          always-annotate: true
+  - label: ":pipeline: Generate pipeline"
+    command: ".buildkite/scripts/generate-pipeline.sh"
+    timeout_in_minutes: 2
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2

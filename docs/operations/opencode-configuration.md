@@ -11,17 +11,24 @@ The harness is code. It is versioned alongside the codebase it describes. Any en
 ```mermaid
 flowchart TB
     subgraph Root["Repository Root"]
-        CONFIG["opencode.jsonc<br/><i>models, permissions, agents</i>"]
-        AGENTS_MD["AGENTS.md<br/><i>global instructions</i>"]
+        CONFIG["opencode.jsonc
+models, permissions, agents"]
+        AGENTS_MD["AGENTS.md
+global instructions"]
     end
 
     subgraph Harness[".opencode/"]
         direction TB
-        AG["agents/<br/><i>12 sub-agent prompts</i>"]
-        RU["rules/<br/><i>6 guardrail files</i>"]
-        SK["skills/<br/><i>10 workflow definitions</i>"]
-        CM["commands/<br/><i>11 slash commands</i>"]
-        PL["plugins/<br/><i>2 session plugins</i>"]
+        AG["agents/
+12 sub-agent prompts"]
+        RU["rules/
+25 guardrail files"]
+        SK["skills/
+18 workflow definitions"]
+        CM["commands/
+12 slash commands"]
+        PL["plugins/
+3 hook plugins"]
     end
 
     CONFIG -->|"loads"| AGENTS_MD
@@ -42,10 +49,10 @@ flowchart TB
 | 1 | [Config](#building-block-1-config) | `opencode.jsonc` | Root configuration: models, permissions, agent definitions |
 | 2 | [Model Strategy](#building-block-2-model-strategy) | `opencode.jsonc` (agent entries) | Right model for the right task |
 | 3 | [Agents](#building-block-3-agents) | `.opencode/agents/*.md` | 12 specialist sub-agents with least-privilege access |
-| 4 | [Rules](#building-block-4-rules) | `.opencode/rules/*.md` | 6 guardrails always enforced |
-| 5 | [Skills](#building-block-5-skills) | `.opencode/skills/*/SKILL.md` | 10 reusable multi-step workflows |
-| 6 | [Commands](#building-block-6-commands) | `.opencode/commands/*.md` | 11 slash shortcuts with guaranteed routing |
-| 7 | [Plugins & Tools](#building-block-7-plugins--tools) | `.opencode/plugins/*.ts` | Session hooks and external integrations |
+| 4 | [Rules](#building-block-4-rules) | `.opencode/rules/*.md` | 25 guardrails always enforced |
+| 5 | [Skills](#building-block-5-skills) | `.opencode/skills/*/SKILL.md` | 18 reusable multi-step workflows |
+| 6 | [Commands](#building-block-6-commands) | `.opencode/commands/*.md` | 12 slash shortcuts with guaranteed routing |
+| 7 | [Plugins & Tools](#building-block-7-plugins--tools) | `.opencode/plugins/*.ts` | Session and tool-execution hooks, external integrations |
 
 ---
 
@@ -69,7 +76,7 @@ The root configuration file `opencode.jsonc` controls the entire system. Every s
   "default_agent": "plan",
 
   // Cheap model for titles, summaries, and compaction
-  "small_model": "tesco-anthropic/haiku-4.5",
+  "small_model": "openai/gpt-4o-mini",
 
   // Global instructions loaded into every session
   "instructions": ["AGENTS.md"],
@@ -77,12 +84,14 @@ The root configuration file `opencode.jsonc` controls the entire system. Every s
   // File watcher excludes (saves tokens, avoids indexing build artifacts)
   "watcher": {
     "ignore": [
-      "vendor/**", "node_modules/**", ".git/**", ".tmp/**",
-      "target/**",        // Maven build output
+      "vendor/**", "**/node_modules/**", ".git/**", ".tmp/**",
+      "**/target/**",     // Maven build output in all modules
       ".idea/**",         // IntelliJ project files
       "*.class", "*.jar", // Java bytecode and archives
-      "_site/**",         // Jekyll generated site
-      ".sass-cache/**"    // Jekyll SCSS cache
+      "**/_site/**",      // Jekyll generated site
+      "**/.sass-cache/**",// Jekyll SCSS cache
+      "terraform/**/.terraform/**",
+      "build-*/**"        // Downloaded Buildkite logs
     ]
   },
 
@@ -93,6 +102,10 @@ The root configuration file `opencode.jsonc` controls the entire system. Every s
       "git push --force*": "deny",
       "git reset --hard*": "deny",
       "git clean -fd*": "deny",
+      "rm -rf .": "deny",
+      "rm -rf ..": "deny",
+      "rm -rf ~": "deny",
+      "rm -rf /": "deny",
       "rm -rf /*": "deny"
     }
   },
@@ -108,9 +121,9 @@ The root configuration file `opencode.jsonc` controls the entire system. Every s
 |---------|-------|-----------|
 | `default_agent: "plan"` | Start read-only | Prevents accidental modifications; forces deliberate switch to build mode |
 | `compaction.prune: true` | Auto-prune old context | MockServer's codebase is large; long investigation sessions would otherwise hit context limits |
-| `watcher.ignore` includes `target/**` | Skip Maven output | `target/` contains thousands of `.class` files that would waste indexing tokens |
-| `watcher.ignore` includes `_site/**` | Skip Jekyll output | Generated HTML should never be edited directly |
-| Permission deny-list | 4 destructive patterns | Defence in depth — these are also blocked by `git-safety.md` rules, but config-level denial is a harder guarantee |
+| `watcher.ignore` includes `**/target/**` | Skip Maven output | Module `target/` directories contain thousands of generated files |
+| `watcher.ignore` includes `**/_site/**` | Skip Jekyll output | Generated HTML should never be edited directly |
+| Permission deny-list | 8 destructive patterns | Defence in depth — these are also blocked by `git-safety.md` rules, but config-level denial is a harder guarantee |
 
 ### AGENTS.md — The Global Instruction File
 
@@ -132,29 +145,23 @@ This file acts as the agent's "onboarding document" — everything a new enginee
 
 ## Building Block 2: Model Strategy
 
-Different tasks have different cognitive demands. Using a premium model for test execution wastes money; using a cheap model for security auditing misses vulnerabilities. MockServer uses 5 model tiers:
+Different tasks have different cognitive demands *and* different needs for determinism. Because the orchestrator delegates almost all execution — implementation *and* investigation — to subagents (see `docs/operations/ai-sdlc-integration-spec.md` §5.5/§7 and `.opencode/rules/subagent-routing.md`), the per-agent configuration is **where inference cost and determinism are actually managed**. Three decision variables are set explicitly per agent — **model** (capability/cost), **temperature** (determinism vs creativity, opencode side), and **reasoning effort** (reasoning budget, Claude Code side) — and all are recorded so the routing is auditable (see §9). Agents are grouped into model tiers:
 
 ```mermaid
 flowchart LR
-    subgraph Premium["Premium Tier"]
-        IMP["implementer"]
-        SIM["simplifier"]
-    end
-
-    subgraph Standard["Standard Tier"]
-        CR["code-reviewer"]
-        SA["security-auditor"]
-        DW["docs-writer"]
-        TA["taskify-agent"]
-    end
-
-    subgraph Independent["Independent Tier"]
+    subgraph Reasoning["Reasoning Tier"]
         RF["review-final"]
+        SA["security-auditor"]
         DB["debugger"]
+        IMP["implementer"]
         PI["pipeline-investigator"]
     end
 
-    subgraph Budget["Budget Tier"]
+    subgraph Standard["Standard Tier"]
+        SIM["simplifier"]
+        CR["code-reviewer"]
+        DW["docs-writer"]
+        TA["taskify-agent"]
         RC["review-cheap"]
     end
 
@@ -163,24 +170,48 @@ flowchart LR
         CS["council-seat"]
     end
 
-    style Premium fill:#fde8ec,stroke:#e4002b
+    style Reasoning fill:#f3e8fd,stroke:#7a00cc
     style Standard fill:#e8f0fa,stroke:#00539f
-    style Independent fill:#f0ecfb,stroke:#6b5ce7
-    style Budget fill:#fef8ec,stroke:#f5a623
     style Fast fill:#e8f8f0,stroke:#00a651
 ```
 
-| Tier | Model | Agents | Rationale |
-|------|-------|--------|-----------|
-| **Premium** | `opus-4.6` | implementer, simplifier | Highest quality for production code generation and complex refactoring |
-| **Standard** | `sonnet-4.6` | code-reviewer, security-auditor, docs-writer, taskify-agent | Strong code analysis and writing at moderate cost |
-| **Independent** | `gpt-5.5` | review-final, debugger, pipeline-investigator | Different provider to avoid shared blind spots with Anthropic models |
-| **Budget** | `kimi-k2.6` | review-cheap | Non-authoritative intermediate review; cheap enough to iterate |
-| **Fast** | `haiku-4.5` | test-runner, council-seat | Rote operations (run tests, emit short verdicts) — speed over depth |
+| Tier | opencode (OpenAI) | Claude Code (Anthropic) | Agents | Rationale |
+|------|-------------------|--------------------------|--------|-----------|
+| **Reasoning** | `openai/gpt-5` | `claude-opus-5-5` + `effort: high` | review-final, security-auditor, debugger, implementer, pipeline-investigator | Highest-stakes reasoning — authoritative binding review, security audit, hard debugging, production code, and CI failure investigation |
+| **Standard** | `openai/gpt-4o` | `claude-sonnet-5` + `effort: medium` | simplifier, code-reviewer, docs-writer, taskify-agent, review-cheap | Strong analysis, refactoring, and writing at moderate cost and reasoning budget |
+| **Fast** | `openai/gpt-4o-mini` | `claude-haiku-4-5-20251001` + `effort: low–medium` | test-runner (`low`), council-seat (`medium`) | Rote test execution (`low`) vs short exploratory debate seats (`medium`) — speed over depth |
 
-### Why Multiple Providers?
+This gives the review escalation a genuine **capability gradient** on both harnesses: `review-cheap` (gpt-4o / sonnet + `effort: medium`) → `review-final` (gpt-5 / opus + `effort: high`), so the binding gate is a stronger second brain, not a same-model re-run. **`effort` is now set explicitly on every Claude agent** (not just the high-stakes lanes) so the reasoning budget is an intentional, auditable choice that tracks each task's reasoning depth — `high` for hard implementation/review/audit/investigation, `medium` for standard analysis and writing, `low` for mechanical work. `implementer` is deliberately on the Reasoning tier alongside the reviewers: generating production code has equal or higher blast radius than reviewing it, so it warrants the same model capability and reasoning budget.
 
-The `review-final` agent deliberately uses a different provider (OpenAI) than the implementation agents (Anthropic). This ensures the final quality gate has genuinely independent reasoning — not the same model reviewing its own output through a different prompt.
+**Caveat — reasoning models and `temperature`:** OpenAI reasoning models may reject or ignore a custom sampling `temperature` (only the default is accepted). The Reasoning-tier agents retain their low `temperature` entries for documentation/auditability, but if the provider rejects them, drop the `temperature` field for those five agents and rely on the model's native low-variance reasoning. Re-verify against the OpenAI API behaviour for `gpt-5` after provisioning.
+
+### Temperature (opencode)
+
+opencode sets an explicit per-agent `temperature` (deterministic/high-risk work low, ideation higher). **Claude Code does not support a per-subagent sampling `temperature`** (the field is silently ignored — verified against the Claude Code subagent docs, 2026-06; re-check release notes before adding a `temperature` frontmatter field), so on the Claude side determinism is governed by model choice and the supported `effort` lever, not temperature.
+
+| Temp | Agents | Why |
+|:----:|--------|-----|
+| **0** | test-runner | Rote execution — fully deterministic |
+| **0.1** | review-cheap, review-final, code-reviewer, security-auditor, simplifier | Review/verify and high-risk work — low variance |
+| **0.2** | implementer, debugger, pipeline-investigator | Mostly deterministic with a little hypothesis search |
+| **0.3–0.4** | taskify-agent (0.3), docs-writer (0.4) | Structuring and prose benefit from mild latitude |
+| **0.7** | council-seat | Design debate / ideation — creativity wanted |
+
+For work that benefits from exploration before convergence, stage these
+temperatures as a descending **multi-pass pipeline** (explore → refine → validate)
+rather than a single pass — see `.opencode/rules/multi-pass-temperature.md`.
+
+### Provider Strategy and Reviewer Independence
+
+opencode uses OpenAI models exclusively. Claude Code (`.claude/`) uses Anthropic models exclusively. Independence between the implementation and review agents rests on three mechanisms:
+
+1. **Fresh context** — the reviewer never sees the implementing agent's reasoning, only the diff. This is the primary mechanism and the one that does the most work in practice.
+2. **A distinct adversarial prompt** — `review-final` is a separate agent definition with its own review constitution, briefed to refute rather than to agree.
+3. **Restricted tools** — `write` and `edit` are denied, so the reviewer cannot edit through its normal tooling. This is **partial** mechanical enforcement, not a sandbox: `bash` remains granted for inspection and read-only validation, and `permission.bash` denies only destructive git and `rm -rf` patterns — so `sed -i`, `tee` and `>` redirection are still reachable. The prohibition on writing through the shell is instruction-level, spelled out in the read-only clause of `.opencode/agents/review-final.md` (and, identically, `.claude/settings.json` plus `.claude/agents/review-final.md` under Claude Code).
+
+A further lever, **temperature** (0.1 for reviewers against 0.2 for the implementer), applies on the opencode side only — Claude Code has no per-subagent temperature and uses `effort` instead — and is subject to the reasoning-model caveat above: `gpt-5` may ignore a custom sampling temperature. Do not count on it as load-bearing for the binding gate.
+
+**Model diversity is deliberately not a mechanism here, and is not pursued.** It applies to `review-cheap` (gpt-4o / sonnet against the implementer's gpt-5 / opus) but **not** to `review-final`, which runs the implementer's own model in both harnesses. Manufacturing diversity within a provider would mean downgrading one side — the configured alternatives are only Sonnet and Haiku under Claude Code, and `gpt-4o` / `gpt-4o-mini` under opencode — and weakening the implementer to differentiate the reviewer is a worse trade than having no diversity. Running the gate from the opposite harness would give true cross-provider independence, but that needs separate provider credentials and is not part of the normal workflow. Treat the three mechanisms above as the whole of `review-final`'s independence, and do not describe the binding gate as provider-independent.
 
 ---
 
@@ -192,16 +223,16 @@ Each sub-agent is a configured AI persona with a specific model, system prompt, 
 
 | Agent | Model Tier | Role | Write | Edit | Bash | Skill |
 |-------|-----------|------|:-----:|:----:|:----:|:-----:|
-| **implementer** | Premium | Writes production code and tests | Y | Y | Y | Y |
-| **simplifier** | Premium | Reduces code to smallest correct form | Y | Y | Y | Y |
+| **implementer** | Reasoning | Writes production code and tests | Y | Y | Y | Y |
+| **simplifier** | Standard | Reduces code to smallest correct form | Y | Y | Y | Y |
 | **docs-writer** | Standard | Architecture docs, ADRs, READMEs | Y | Y | Y | Y |
 | **taskify-agent** | Standard | Breaks specs into structured task graphs | Y | Y | Y | Y |
 | **code-reviewer** | Standard | Pre-commit correctness, security, conventions | - | - | Y | - |
-| **security-auditor** | Standard | Security-focused Java/Netty audits | - | - | Y | - |
-| **review-final** | Independent | Authoritative binding PASS/BLOCK verdict | - | - | Y | Y |
-| **review-cheap** | Budget | Non-authoritative intermediate review | - | - | Y | Y |
-| **debugger** | Independent | Investigates issues using logs, CI, AWS | - | - | Y | - |
-| **pipeline-investigator** | Independent | Buildkite pipeline failure analysis | - | - | Y | Y |
+| **security-auditor** | Reasoning | Security-focused Java/Netty audits | - | - | Y | - |
+| **review-final** | Reasoning | Authoritative binding PASS/BLOCK verdict | - | - | Y | Y |
+| **review-cheap** | Standard | Non-authoritative intermediate review | - | - | Y | Y |
+| **debugger** | Reasoning | Investigates issues using logs, CI, AWS | - | - | Y | Y |
+| **pipeline-investigator** | Reasoning | Buildkite pipeline failure analysis | - | - | Y | Y |
 | **test-runner** | Fast | Runs Maven tests, reports results | - | - | Y | - |
 | **council-seat** | Fast | Design council parallel debate seat | - | - | - | - |
 
@@ -219,13 +250,13 @@ flowchart TD
     subgraph ReadBash["Read + Bash Only"]
         CR2["code-reviewer"]
         SA2["security-auditor"]
-        DB2["debugger"]
         TR2["test-runner"]
     end
 
     subgraph ReadBashSkill["Read + Bash + Skill"]
         RF2["review-final"]
         RC2["review-cheap"]
+        DB2["debugger"]
         PI2["pipeline-investigator"]
     end
 
@@ -240,7 +271,7 @@ flowchart TD
 ```
 
 - **Code reviewers** cannot write or edit files — they can only read and report. This prevents a reviewer from "fixing" code instead of reporting issues.
-- **The debugger** has skill disabled — it uses bash directly to run AWS CLI, `gh`, and other investigation tools rather than loading skill workflows.
+- **The debugger** can load skills for structured investigations (for example `aws-investigation`) while still using bash for ad-hoc probing.
 - **Council seats** have no bash, write, edit, or skill access — they can only read code and emit a verdict. This prevents a debate participant from taking unilateral action.
 - **Test runner** cannot write files — it runs `mvn test` and reports results, nothing more.
 
@@ -259,18 +290,37 @@ Example: the `code-reviewer.md` includes a checklist for LLM-specific issues (ha
 
 ## Building Block 4: Rules
 
-Rules are mandatory constraints loaded into sessions. They encode what experienced engineers know but an AI does not.
+Rules are mandatory constraints that encode what experienced engineers know but an AI does not. Only `AGENTS.md` is always in context — it is the sole entry in `opencode.jsonc` `instructions[]`. Every rule below is **loaded on demand**: read when a reachable referrer (`AGENTS.md`, an agent/command/skill, or another reachable rule) points to it. An unreferenced rule is inert. The **Reachable** column records that each rule is wired into that reference graph; the rule-reachability check in `scripts/validate_opencode_config.sh` fails CI if any rule becomes unreachable.
 
 ### Rule Catalogue
 
-| Rule | Lines | Always Loaded | Purpose |
-|------|------:|:------------:|---------|
-| `git-safety.md` | 56 | Yes | Blocks 11 destructive git commands without confirmation |
-| `commit-workflow.md` | 129 | Yes | 4-step pre-commit workflow with adversarial review |
-| `testing-policy.md` | 69 | Yes | Maven module mapping, test commands, quality standards |
-| `tmp-directory.md` | 75 | Yes | Use `.tmp/` at repo root, never `/tmp/` |
-| `report-formatting.md` | 36 | Yes | Subagent JSON → report template formatting convention |
-| `coding-principles.md` | 29 | Yes | Think before coding, simplicity first, surgical changes |
+| Rule | Reachable | Purpose |
+|------|:---------:|---------|
+| `git-safety.md` | Yes | Blocks 11 destructive git commands without confirmation |
+| `commit-workflow.md` | Yes | 5-step pre-commit gate chain: classify → validate → changelog → adversarial review → locked commit |
+| `commit-locking.md` | Yes | Filesystem-based commit lock for parallel session safety |
+| `testing-policy.md` | Yes | Maven module mapping, test commands, quality standards |
+| `tmp-directory.md` | Yes | Use `.tmp/` at repo root, never `/tmp/` |
+| `report-formatting.md` | Yes | Subagent JSON → report template formatting convention |
+| `review-constitution.md` | Yes | 8-lens adversarial review with ~100 review principles |
+| `mermaid-diagrams.md` | Yes | Mermaid diagram conventions and formatting rules |
+| `coding-principles.md` | Yes | Think before coding, simplicity first, surgical changes |
+| `code-comment-discipline.md` | Yes | What a code comment must earn; keep run/experiment narrative out of source |
+| `aws-ids-file.md` | Yes | Require `~/mockserver-aws-ids.md` before AWS operations |
+| `operating-model.md` | Yes | The DVRR operating model — decompose, verify, review, reintegrate |
+| `worktree-workflow.md` | Yes | Per-session worktree isolation, linear history, locked rebase merge |
+| `subagent-routing.md` | Yes | Conversational routing of tasks to the correct subagent |
+| `risk-authority-classification.md` | Yes | Classify each unit by risk and act within its authority class |
+| `control-integrity.md` | Yes | Higher-scrutiny gated-approval for changes to the controls themselves |
+| `operator-halt.md` | Yes | Operator halt — stop autonomous work on demand |
+| `untrusted-input.md` | Yes | Treat ingested content as data, not instructions |
+| `decision-log.md` | Yes | Per-unit telemetry and routing-rationale decision log |
+| `multi-pass-temperature.md` | Yes | Staged explore → refine → validate temperature pipeline |
+| `evaluation-harness.md` | Yes | Agent/config evaluation fixtures and conformance checks |
+| `metrics.md` | Yes | SDLC metrics capture and reporting conventions |
+| `documentation-style.md` | Yes | Pyramid Principle with progressive disclosure for all docs |
+| `local-plans.md` | Yes | Uncommitted `*.local.md` plan docs in `docs/plans/` |
+| `licence-provenance.md` | Yes | Dependency licence and provenance constraints |
 
 ### git-safety.md — Banned Commands
 
@@ -287,9 +337,9 @@ Key commands blocked without explicit user confirmation:
 | `git push --force` | `git push --force-with-lease` |
 | `git rebase` on shared branches | Merge instead |
 
-These are enforced at two levels: the config file's `permission.bash` deny-list (hard block) and the rule file (instruction-level reinforcement).
+These are enforced at two levels, but **unevenly**: only three of the eleven — `git push --force`, `git reset --hard` and `git clean -fd` — appear in the `permission.bash` deny-list and are hard-blocked by the framework. The other eight (`git checkout -- …`, `git restore …`, `git stash drop`/`clear`, `git branch -D`, `git rebase` on shared branches) are **instruction-level only**: the rule tells the agent not to run them, and nothing stops it. Treat the table as policy, not as a sandbox.
 
-### commit-workflow.md — The 4-Step Pre-Commit Process
+### commit-workflow.md — The 5-Step Pre-Commit Process
 
 ```mermaid
 flowchart TD
@@ -312,17 +362,23 @@ flowchart TD
     K -->|No| L[Fix issues]
     L --> B
 
-    K -->|Yes| M["Adversarial review<br/>(review-cheap agent,<br/>different model)"]
-    M -->|PASS| N[Commit]
+    K -->|Yes| CL["Changelog review
+(user-visible change?)"]
+
+    CL --> M["Adversarial review
+(review-cheap agent,
+different model)"]
+    M -->|PASS| N["Acquire commit lock,
+commit"]
     M -->|FAIL| L
 
     style M fill:#fef8ec,stroke:#f5a623
     style N fill:#e8f8f0,stroke:#00a651
 ```
 
-The adversarial review (Step 3) is critical: the `review-cheap` agent runs on a different model (`kimi-k2.6`) with fresh context, specifically scanning for LLM-generated issues — hallucinated names, plausible but wrong logic, missing error handling, and accidentally committed secrets.
+The adversarial review (Step 4) is critical: the `review-cheap` agent runs with a fresh context, specifically scanning for LLM-generated issues — hallucinated names, plausible but wrong logic, missing error handling, and accidentally committed secrets. The `review-final` agent provides the binding verdict — and for **control-class** changes (the rules, agents, gates, and CI/test controls themselves) `review-final` is mandatory and its PASS authorizes only a *gated-approval* commit, never an autonomous one. See `.opencode/rules/control-integrity.md`.
 
-Skip conditions exist for speed: `"skip tests"` skips validation, `"skip review"` skips the adversarial review, `"just commit"` skips both. These are used when the user is confident in the change.
+Skip conditions exist for speed: `"skip tests"` skips validation (Step 2), `"skip changelog"` skips the changelog review (Step 3), `"skip review"` skips the adversarial review (Step 4), and `"just commit"` skips all three. These are used when the user is confident in the change.
 
 ---
 
@@ -338,12 +394,19 @@ A skill is a self-contained multi-step workflow — a runbook the agent executes
 | `pipeline-investigation` | SKILL.md + report-template.md | Yes (`pipeline-investigator`) | "pipeline failing", "build errors", Buildkite URLs |
 | `ideate` | SKILL.md + spec-template.md | No | "I have an idea", "let's think through", "brainstorm" |
 | `pr-review` | SKILL.md | No | "review PRs", "PR report", "open PRs" |
+| `pr-monitor` | SKILL.md | No | "monitor PRs", "auto-merge PRs", "watch dependency PRs" |
 | `renew-test-certs` | SKILL.md | No | "certificates expired", "TLS tests failing" |
+| `review-code` | SKILL.md | No | "deep code review", "adversarial review", "quality audit" |
+| `review-spec` | SKILL.md | No | "spec review", "design review", "review this plan" |
 | `browser-auth` | SKILL.md | No | "navigate to buildkite", "extract token from browser" |
+| `dependabot-snyk-pr-management` | SKILL.md | No | "dependabot PR", "snyk PR", "dependency upgrade" |
 | `dockerhub-credentials` | SKILL.md | No | "docker hub token", "configure docker hub" |
 | `terraform-tfvars` | SKILL.md | No | "create tfvars", "deploy buildkite agents" |
 | `docker-build-push` | SKILL.md | No | "build docker image", "push maven image", "rebuild CI image" |
 | `issue-review` | SKILL.md | No | "review issue", "triage issue", "is this a bug" |
+| `build-monitor` | SKILL.md | No | "monitor builds", "watch pipeline", "continuous monitoring" |
+| `release-management` | SKILL.md | No | "prepare release", "release version", "run release pipeline" |
+| `ui-screenshots` | SKILL.md | No | "screenshot the dashboard", "capture UI", "dashboard screenshots" |
 
 ### Skill Anatomy
 
@@ -365,7 +428,12 @@ The `SKILL.md` file contains:
 
 ### Subagent Routing Convention
 
-Skills whose description contains `MUST be launched as a Task subagent with subagent_type "<type>"` are never loaded directly via the skill tool. Instead, they are launched via the Task tool, which creates a separate subagent session with the correct model and permissions.
+Subagent routing is defined outside skills. Skills are never responsible for declaring their own dispatch mechanism.
+
+Use:
+- command metadata (`agent` + `subtask: true`) for slash-command routing,
+- `.opencode/rules/subagent-routing.md` for conversational routing,
+- `opencode.jsonc` permissions to prevent invalid direct loads by restricted agents.
 
 ```mermaid
 sequenceDiagram
@@ -395,7 +463,7 @@ This separation ensures:
 
 ## Building Block 6: Commands
 
-Commands are slash shortcuts that map user-friendly invocations to specific agents and skills. They enforce routing at the **framework level** — before the AI makes a decision.
+Commands are slash shortcuts that map user-friendly invocations to specific agents and, when needed, skills. They enforce routing at the **framework level** — before the AI makes a decision.
 
 ### Command Catalogue
 
@@ -403,13 +471,13 @@ Commands are slash shortcuts that map user-friendly invocations to specific agen
 |---------|-------|:-------:|---------|
 | `/aws-investigation` | `debugger` | Yes | Investigate AWS infrastructure issues |
 | `/pipeline-investigation` | `pipeline-investigator` | Yes | Investigate Buildkite pipeline failures |
-| `/review-code` | `general` | Yes | Deep code audit |
-| `/review-spec` | `general` | Yes | Critical review of spec/design document |
-| `/codebase-change-report` | `general` | Yes | Generate report of recent changes |
-| `/update-architecture-docs` | `general` | Yes | Review and update architecture docs |
-| `/design-council` | (default) | No | Convene parallel design council debate |
-| `/excalidraw` | (default) | No | Generate .excalidraw architecture diagrams |
-| `/codeql-scan` | (default) | No | Run CodeQL security scan on Java code |
+| `/review-code` | `review-final` | Yes | Deep code audit |
+| `/review-spec` | `review-final` | Yes | Critical review of spec/design document |
+| `/codebase-change-report` | `docs-writer` | Yes | Generate report of recent changes |
+| `/update-architecture-docs` | `docs-writer` | Yes | Review and update architecture docs |
+| `/design-council` | `general` | Yes | Convene parallel design council debate |
+| `/excalidraw` | `general` | Yes | Generate .excalidraw architecture diagrams |
+| `/codeql-scan` | `security-auditor` | Yes | Run CodeQL security scan on Java code |
 | `/issue-review` | (default) | No | Review, classify, and resolve a GitHub issue |
 | `/commit` | (default) | No | Commit changes following full pre-commit workflow |
 
@@ -437,9 +505,9 @@ Routing is the single biggest practical failure mode of multi-agent setups. Mock
 
 | Layer | Mechanism | Example |
 |-------|-----------|---------|
-| **Convention** | Skill descriptions contain routing markers | `MUST be launched as a Task subagent with subagent_type "debugger"` |
+| **Routing rule** | Conversational mapping in `.opencode/rules/subagent-routing.md` | `pipeline-investigation -> pipeline-investigator` |
 | **Framework** | Command files hardcode the target agent | `agent: pipeline-investigator` in frontmatter |
-| **Permission** | Read-only agents cannot load skills | `debugger` has `"skill": false` in config |
+| **Permission** | Read-only agents can be skill-disabled by role | `code-reviewer` has `"skill": false` in config |
 
 ---
 
@@ -447,12 +515,25 @@ Routing is the single biggest practical failure mode of multi-agent setups. Mock
 
 ### Plugins
 
-Plugins are TypeScript files that hook into session lifecycle events. MockServer has two:
+Plugins are TypeScript files that hook into session lifecycle and tool-execution events. Local files are auto-discovered from `.opencode/plugins/` — no registration step (the `plugin[]` key in `opencode.jsonc` is only for npm-distributed plugins, and this repo does not use it). MockServer has three:
 
 | Plugin | Purpose |
 |--------|---------|
 | `buildkite-status.ts` | On session start, queries Buildkite API for the 5 most recent builds. Shows a toast warning if any are failing. Writes details to `.tmp/.buildkite-status`. Throttled to once per hour. |
 | `session-notification.ts` | Sends macOS notifications via `osascript` when a session goes idle ("Task completed") or errors (with "Basso" sound). |
+| `operator-halt.ts` | Enforces the operator halt (`.opencode/rules/operator-halt.md`) *mechanically*, not by agent compliance. Its `tool.execute.before` hook runs `.opencode/scripts/check-halt.sh` before every `bash`/`write`/`edit`/`patch`/`task` call and throws (denying the tool) when a halt is engaged. Fails open if the check itself cannot run. The Claude Code counterpart is the `PreToolUse` hook in `.claude/settings.json`. |
+
+`.claude/settings.json` wires a second `PreToolUse` hook,
+`check-bare-checkout-write-hook.sh`, on `Write|Edit|MultiEdit|NotebookEdit`. It refuses an edit whose
+target resolves inside the **main checkout** rather than a linked worktree, which
+`.opencode/rules/worktree-workflow.md` requires. That mistake is silent rather than loud — the main
+checkout usually sits on an older commit, so the edit is written against stale content, escapes the
+session's own verification, and can be rebased away by another session; this repository has lost
+gate-passed work to it. The hook asks git which worktree a path belongs to (for the main worktree
+`--show-toplevel` equals the directory holding `--git-common-dir`; for a linked worktree they differ),
+so it needs no hard-coded paths. Scratch under the main checkout's `.tmp/` and `.worktrees/` is
+allowed. Like the halt hook it **fails open** — a per-tool-call gate must never wedge a session — and
+it only sees the edit tools, so a write performed through Bash is not covered.
 
 Plugins require the `@opencode-ai/plugin` npm package (defined in `.opencode/package.json`).
 
@@ -482,9 +563,12 @@ For non-trivial decisions that cross domains, the `/design-council` command conv
 
 ```mermaid
 flowchart TD
-    CEO["CEO (invoking agent)"] -->|"fan out"| S1["Seat 1<br/>Perspective A"]
-    CEO -->|"fan out"| S2["Seat 2<br/>Perspective B"]
-    CEO -->|"fan out"| S3["Seat 3<br/>Perspective C"]
+    CEO["CEO (invoking agent)"] -->|"fan out"| S1["Seat 1
+Perspective A"]
+    CEO -->|"fan out"| S2["Seat 2
+Perspective B"]
+    CEO -->|"fan out"| S3["Seat 3
+Perspective C"]
 
     S1 -->|"verdict"| CEO
     S2 -->|"verdict"| CEO
@@ -555,8 +639,7 @@ mockserver/
 ├── AGENTS.md                               # Global instructions (loaded every session)
 └── .opencode/
     ├── .gitignore                           # Ignores node_modules, package.json, bun.lock
-    ├── package.json                         # Plugin dependency (@opencode-ai/plugin)
-    ├── IMPROVEMENTS.md                      # Applied and planned improvements
+    ├── package-lock.json                    # Plugin dependency lock (@opencode-ai/plugin)
     ├── agents/                              # 12 sub-agent prompt files
     │   ├── code-reviewer.md
     │   ├── council-seat.md
@@ -570,18 +653,41 @@ mockserver/
     │   ├── simplifier.md
     │   ├── taskify-agent.md
     │   └── test-runner.md
-    ├── rules/                               # 6 guardrail files
+    ├── rules/                               # 25 guardrail files
+    │   ├── aws-ids-file.md
+    │   ├── code-comment-discipline.md
     │   ├── coding-principles.md
+    │   ├── commit-locking.md
     │   ├── commit-workflow.md
+    │   ├── control-integrity.md
+    │   ├── decision-log.md
+    │   ├── documentation-style.md
+    │   ├── evaluation-harness.md
     │   ├── git-safety.md
+    │   ├── licence-provenance.md
+    │   ├── local-plans.md
+    │   ├── mermaid-diagrams.md
+    │   ├── metrics.md
+    │   ├── multi-pass-temperature.md
+    │   ├── operating-model.md
+    │   ├── operator-halt.md
     │   ├── report-formatting.md
+    │   ├── review-constitution.md
+    │   ├── risk-authority-classification.md
+    │   ├── subagent-routing.md
     │   ├── testing-policy.md
-    │   └── tmp-directory.md
-    ├── skills/                              # 10 skill workflows
+    │   ├── tmp-directory.md
+    │   ├── untrusted-input.md
+    │   └── worktree-workflow.md
+    ├── skills/                              # 18 skill workflows
     │   ├── aws-investigation/
     │   │   ├── SKILL.md
     │   │   └── report-template.md
     │   ├── browser-auth/
+    │   │   └── SKILL.md
+    │   ├── build-monitor/
+    │   │   └── SKILL.md
+    │   ├── dependabot-snyk-pr-management/
     │   │   └── SKILL.md
     │   ├── docker-build-push/
     │   │   └── SKILL.md
@@ -595,13 +701,23 @@ mockserver/
     │   ├── pipeline-investigation/
     │   │   ├── SKILL.md
     │   │   └── report-template.md
+    │   ├── pr-monitor/
+    │   │   └── SKILL.md
     │   ├── pr-review/
+    │   │   └── SKILL.md
+    │   ├── release-management/
     │   │   └── SKILL.md
     │   ├── renew-test-certs/
     │   │   └── SKILL.md
-    │   └── terraform-tfvars/
+    │   ├── review-code/
+    │   │   └── SKILL.md
+    │   ├── review-spec/
+    │   │   └── SKILL.md
+    │   ├── terraform-tfvars/
+    │   │   └── SKILL.md
+    │   └── ui-screenshots/
     │       └── SKILL.md
-    ├── commands/                             # 11 slash commands
+    ├── commands/                             # 12 slash commands
     │   ├── aws-investigation.md
     │   ├── codebase-change-report.md
     │   ├── codeql-scan.md
@@ -610,14 +726,26 @@ mockserver/
     │   ├── excalidraw.md
     │   ├── issue-review.md
     │   ├── pipeline-investigation.md
+    │   ├── prepare-release.md
     │   ├── review-code.md
     │   ├── review-spec.md
     │   └── update-architecture-docs.md
-    ├── plugins/                             # 2 session plugins
+    ├── plugins/                             # 3 plugins (auto-discovered)
     │   ├── buildkite-status.ts
+    │   ├── operator-halt.ts
     │   └── session-notification.ts
-    └── plans/                               # Plan documents
-        └── buildkite-terraform-migration.md
+    ├── scripts/                             # Gate and lifecycle shell scripts
+    │   ├── acquire-commit-lock.sh
+    │   ├── agent-status.sh
+    │   ├── aggregate-telemetry.sh
+    │   ├── check-bare-checkout-write-hook.sh # Claude Code PreToolUse: refuse main-checkout edits
+    │   ├── check-halt-hook.sh               # Claude Code PreToolUse wrapper
+    │   ├── check-halt.sh                    # Operator-halt source of truth
+    │   └── release-commit-lock.sh
+    └── evals/                               # Agent/config evaluation harness
+        ├── README.md
+        ├── run-evals.sh
+        └── tasks/                           # Fixtures + recorded .result baselines
 ```
 
 ---
@@ -627,8 +755,9 @@ mockserver/
 When modifying the opencode configuration:
 
 - **Adding an agent**: Add the entry to `opencode.jsonc`, create the prompt file in `.opencode/agents/`, update the routing table in `AGENTS.md`, and update this document.
-- **Adding a skill**: Create the skill directory under `.opencode/skills/`, add a `SKILL.md`, optionally add templates. If the skill requires subagent routing, add the routing marker to the skill description and create a corresponding command file.
-- **Adding a rule**: Create the rule file in `.opencode/rules/`. Rules are automatically loaded based on filename conventions.
+- **Adding a skill**: Create the skill directory under `.opencode/skills/`, add a `SKILL.md`, optionally add templates. If the skill requires subagent routing, create a corresponding command file and add the conversational mapping in `.opencode/rules/subagent-routing.md`.
+- **Adding a rule**: Create the rule file in `.opencode/rules/`, then reference it from a reachable referrer (`AGENTS.md`, an agent/command/skill, or another reachable rule) so it loads on demand. Rules are **not** auto-loaded by filename — an unreferenced rule is inert, and `scripts/validate_opencode_config.sh` fails CI until it is wired in.
 - **Changing model assignments**: Update the `model` field in the agent's entry in `opencode.jsonc`. No other files need to change.
 - **Adding a command**: Create a markdown file in `.opencode/commands/` with YAML frontmatter specifying the target agent.
-- **Adding a plugin**: Create the TypeScript file in `.opencode/plugins/`. Ensure `@opencode-ai/plugin` is in `.opencode/package.json`.
+- **Adding a plugin**: Create the TypeScript file in `.opencode/plugins/` exporting a named `Plugin` — it is auto-discovered, with no registration in `opencode.jsonc`. Ensure `@opencode-ai/plugin` is a dependency of `.opencode/package.json`, creating that file if needed — it is gitignored, so a fresh clone has the tracked `package-lock.json` but no manifest. A plugin that gates `tool.execute.before` runs on **every** tool call, so it must be cheap and fail open.
+- **Validation**: Run `./scripts/validate_opencode_config.sh` to catch broken command→skill references, command→agent mismatches, subagent-routing drift, unreachable (orphaned) rules, and hardcoded infrastructure literals.

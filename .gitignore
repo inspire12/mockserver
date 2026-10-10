@@ -44,7 +44,13 @@ mockserver_keystore.jks
 ._*
 .Spotlight-V100
 .Trashes
-Icon?
+# macOS custom-folder-icon resource file: "Icon" followed by a control character
+# (in practice only the carriage return, "Icon\r" - the class is broader than the one
+# filename that actually occurs, which is harmless since the rest are unreachable).
+# NOT `Icon?`: `?` is a single-character glob, and on a case-insensitive filesystem that
+# matches the directory `icons` - silently ignoring every NEW file under any icons/ folder
+# while already-tracked ones stay visible. That hid six plugin tool-window icons.
+Icon[[:cntrl:]]
 ehthumbs.db
 Thumbs.db
 
@@ -84,6 +90,7 @@ npm-debug.log
 tmp
 custom_tmp
 .bundle
+.vite
 
 # vagrant #
 ###########
@@ -95,10 +102,16 @@ drone.io
 
 # tomcat working directories #
 ##############################
-mockserver-proxy-war/tomcat/
-mockserver-proxy-war/tomcat_proxy/
-mockserver-war/tomcat/
-mockserver-war/tomcat_mockserver/
+# The WAR tests set Tomcat's baseDir to <module>/tomcat[_<suffix>], where the
+# suffix is derived from the servlet context or the test's own scratch name, so
+# match every tomcat* directory in the two servlet modules rather than listing
+# them individually.
+mockserver/mockserver-proxy-war/tomcat*/
+mockserver/mockserver-war/tomcat*/
+
+# test report output (JUnit XML) #
+###################################
+test-reports/
 
 # test output #
 ###############
@@ -109,9 +122,14 @@ mockserver_keystore_*_jks
 !/*/PKCS8CertificateAuthorityPrivateKey.pem
 /**/Certificate.pem
 /**/PKCS8PrivateKey.pem
+/mockserver-ca.pem
+/**/mockserver-ca.pem
+/**/mockserver-ca*.pem.tmp
 /*/mockserverInitialization*.json
 persistedExpectations.json
 mockserverInitialization.json
+recordedRequests.ndjson
+/**/recordedRequests.ndjson
 /*.pem
 _test*.java
 go_client
@@ -123,7 +141,18 @@ terraform/**/*.tfstate
 terraform/**/*.tfstate.backup
 terraform/**/*.tfvars
 !terraform/**/*.tfvars.example
+# Allow the website tfvars in git — it contains only public deployment
+# metadata (bucket names, hosted-zone ID, ACM ARN) and the release pipeline
+# expects to read + commit it. Other tfvars (e.g. terraform/buildkite-agents)
+# contain real tokens and stay ignored.
+!terraform/website/terraform.tfvars
 terraform/**/.terraform.lock.hcl
+terraform/**/tfplan
+terraform/**/*.tfplan
+
+# Buildkite CI dependency cache (workspace-local) #
+#####################################################
+.buildkite-cache/
 
 # Buildkite CLI config (local only) #
 ######################################
@@ -134,6 +163,33 @@ terraform/**/.terraform.lock.hcl
 /.tmp/*
 !/.tmp/.gitkeep
 
+# opencode npm artifacts (dev tooling; no tracked manifest, so not Dependabot-managed) #
+########################################################################################
+/.opencode/package.json
+/.opencode/package-lock.json
+
+# git worktrees for parallel agent sessions #
+##############################################
+.worktrees/
+
+# operator halt sentinels (kill-switch; global + scoped) #
+##########################################################
+/AGENT_HALT
+/AGENT_HALT_*
+
+# opencode commit lock (parallel session safety) #
+###################################################
+/.tmp/.commit-lock
+
+# Local-only working/plan docs (never committed) #
+###################################################
+*.local.md
+
+# Claude Code local state (per-machine) #
+##########################################
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+
 # Buildkite build log downloads #
 ##################################
 build-*/
@@ -141,6 +197,15 @@ build-*/
 # docker build - corporate CA certificate (local only) #
 #########################################################
 docker_build/maven/corporate-root-ca.pem
+docker/local/ca-bundle.pem
+docker/graaljs/ca-bundle.pem
+docker/ca-bundle.pem
+docker/root/ca-bundle.pem
+docker/snapshot/ca-bundle.pem
+docker/root-snapshot/ca-bundle.pem
+docker/clustered/ca-bundle.pem
+docker/aot/ca-bundle.pem
+docker/http3/ca-bundle.pem
 
 # soft links #
 ##############
@@ -148,3 +213,23 @@ kube_config.yaml
 
 # Flatten Maven Plugin generated file
 .flattened-pom.xml
+
+# Python bytecode (e.g. from running examples/python) #
+########################################################
+__pycache__/
+*.pyc
+
+# Paho MQTT client file-persistence dirs created when MockServer connects to an  #
+# MQTT broker (e.g. the demo's launch-with-demo-data.sh --with-broker mode)      #
+##################################################################################
+mockserver-mqtt-*/
+
+# Compiled Go example binaries (examples are run via `go run`, not committed)
+examples/go/create_expectation/create_expectation
+examples/go/modify_proxied_response/modify_proxied_response
+examples/go/scenario/scenario
+examples/go/callback/callback
+
+# JVM heap dumps (e.g. from the LLM-capture launcher's -XX:+HeapDumpOnOutOfMemoryError) #
+########################################################################################
+*.hprof

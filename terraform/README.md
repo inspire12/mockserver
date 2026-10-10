@@ -8,15 +8,19 @@ graph TB
         direction TB
         BA["buildkite-agents/"]
         BP["buildkite-pipelines/"]
+        WEB["website/"]
+        SES["ses-email-forwarding/"]
     end
 
-    BA -->|provisions| AWS["AWS eu-west-2<br/>Build Agent Account"]
-    BP -->|manages| BK["Buildkite<br/>Pipeline Definitions"]
+    BA -->|provisions| AWS["AWS eu-west-2\nBuild Agent Account"]
+    BP -->|manages| BK["Buildkite\nPipeline Definitions"]
+    WEB -->|provisions S3 + CloudFront + Route53\n+ cross-account IAM| AWSWEB["AWS us-east-1\nWebsite Account"]
+    SES -->|provisions inbound email| AWSWEB
 
     subgraph AWS
         direction TB
         VPC[VPC + Subnets]
-        ASG[AutoScaling Group<br/>Spot instances, 0–10]
+        ASG["AutoScaling Group\nSpot instances, 0-10"]
         SCALER[Lambda Autoscaler]
         AGENT[Buildkite Agents]
     end
@@ -32,10 +36,12 @@ graph TB
 |-----------|---------|----------|
 | [`buildkite-agents/`](buildkite-agents/) | Buildkite CI build agent cluster | AWS (`eu-west-2`) |
 | [`buildkite-pipelines/`](buildkite-pipelines/) | Buildkite pipeline definitions | Buildkite + AWS |
+| [`website/`](website/) | Static-site S3 buckets, CloudFront distributions, Route 53 records, and cross-account IAM role for `mock-server.com` and every versioned subdomain | AWS (`us-east-1` + `eu-west-2`) |
+| [`ses-email-forwarding/`](ses-email-forwarding/) | SES catch-all email forwarding for `mock-server.com` | AWS (`us-east-1`) |
 
 ## Prerequisites
 
-- [Terraform](https://www.terraform.io/downloads) >= 1.5
+- [Terraform](https://www.terraform.io/downloads) >= 1.15
 - [AWS CLI](https://aws.amazon.com/cli/) with SSO profile `mockserver-build`
 - AWS build agent account (see `~/mockserver-aws-ids.md`)
 

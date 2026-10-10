@@ -1,7 +1,7 @@
 apiVersion: v1
 name: mockserver-config
-version: "5.15.0"
-appVersion: "5.15.0"
+version: "8.0.0"
+appVersion: "8.0.0"
 description: Chart to provide config to MockServer
 keywords:
   - mocking
@@ -16,7 +16,7 @@ keywords:
   - https-proxy
 home: "http://mock-server.com"
 sources:
-  - "https://github.com/mock-server/mockserver"
+  - "https://github.com/mock-server/mockserver-monorepo"
   - "https://hub.docker.com/r/mockserver/mockserver"
 maintainers:
   - name: James D Bloom

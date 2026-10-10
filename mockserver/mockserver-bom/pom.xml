@@ -1,0 +1,363 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <groupId>org.mock-server</groupId>
+        <artifactId>mockserver</artifactId>
+        <version>8.0.1-SNAPSHOT</version>
+    </parent>
+
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>mockserver-bom</artifactId>
+    <packaging>pom</packaging>
+
+    <name>MockServer Bill of Materials (BOM)</name>
+    <description>Bill of Materials for MockServer. Import this BOM into the dependencyManagement section
+        of a consuming project to align every MockServer module (mockserver-core, mockserver-netty,
+        mockserver-junit-jupiter, the Spring integrations, and the rest) to a single, mutually consistent
+        version, so you can declare any MockServer artifact without repeating its version.
+
+        This BOM manages ONLY MockServer's own org.mock-server artifacts. It deliberately does NOT pin the
+        third-party libraries MockServer depends on internally (Jackson, Netty, Guava, Nimbus, Velocity,
+        SLF4J, …), so importing it never changes the versions — or scopes — your project resolves for those
+        shared libraries. Manage third-party versions yourself, or import each upstream project's own BOM.
+    </description>
+    <url>https://www.mock-server.com</url>
+
+    <!--
+        This BOM publishes ONLY MockServer's own modules — the org.mock-server:* entries listed below.
+
+        This module inherits the parent POM's <dependencyManagement>, which pins MockServer's third-party
+        transitive dependencies (Jackson, Netty, Velocity, SLF4J, commons-*, etc.) for MockServer's OWN
+        internal build. Those inherited third-party pins MUST NOT leak into the published BOM: expanding them
+        would silently override a consumer's own versions AND scopes for those libraries whenever they import
+        this BOM (e.g. a test-scoped pin dragging a consumer's compile dependency onto the test classpath —
+        see GitHub issue #2684).
+
+        The flatten-maven-plugin below therefore uses dependencyManagement=extended_interpolate (NOT expand):
+        extended_interpolate takes the dependencyManagement from THIS module's raw POM — only the
+        org.mock-server entries declared here — and resolves their ${project.*} placeholders against the
+        effective model, WITHOUT expanding the inherited parent management. The published BOM thus pins every
+        MockServer module to ${project.version} and nothing else.
+
+        The parent's own flatten-maven-plugin execution is declared with <inherited>false</inherited>, so it
+        does not apply to this module; the execution below is this module's own copy.
+    -->
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-client-java</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-client-java-no-dependencies</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-netty</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-netty-no-dependencies</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-junit-rule</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-junit-rule-no-dependencies</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-junit-jupiter</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-junit-jupiter-no-dependencies</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-spring-test-listener</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-spring-test-listener-no-dependencies</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-spring-boot-starter</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-testcontainers</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-testing</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-integration-testing</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-integration-testing-no-dependencies</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-war</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-proxy-war</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-async</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-state-infinispan</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-blob-s3</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-blob-gcs</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-blob-azure</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>${project.groupId}</groupId>
+                <artifactId>mockserver-k8s-webhook</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <plugins>
+            <!-- Flatten this module's POM into a self-contained BOM for publishing. dependencyManagement
+                 uses extended_interpolate (NOT expand): it keeps ONLY this module's own org.mock-server
+                 entries from the raw POM and resolves their ${project.version}/${project.groupId}
+                 placeholders, WITHOUT expanding the inherited parent third-party management — so the
+                 published BOM manages MockServer's own artifacts only (GitHub issue #2684). The parent
+                 declares the same plugin with <inherited>false</inherited>, so this is an independent
+                 execution scoped to this module. -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <version>1.8.0</version>
+                <inherited>false</inherited>
+                <configuration>
+                    <flattenMode>bom</flattenMode>
+                    <pomElements>
+                        <dependencyManagement>extended_interpolate</dependencyManagement>
+                        <!-- the resolved dependencyManagement above needs none of the parent's
+                             build-internal properties (skipTests, compiler levels, plugin versions, etc.),
+                             so drop them to keep the consumed artifact clean. -->
+                        <properties>remove</properties>
+                    </pomElements>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>flatten</id>
+                        <phase>process-resources</phase>
+                        <goals>
+                            <goal>flatten</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>flatten-clean</id>
+                        <phase>clean</phase>
+                        <goals>
+                            <goal>clean</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- Guard test for the published BOM (GitHub issue #2684): installs the just-flattened BOM into
+                 the local repository and runs a small consumer project against it. verify.groovy asserts the
+                 consumer keeps its OWN oauth2-oidc-sdk version and compile scope (not MockServer's
+                 test-scoped pin) and that EVERY managed entry in the published BOM is an org.mock-server
+                 artifact. This is the only thing that observes the module's public contract — nothing else
+                 in the reactor does, which is why a change elsewhere silently rewrote it. Mirrors the
+                 maven-invoker-plugin convention used by mockserver-netty. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-invoker-plugin</artifactId>
+                <version>3.10.1</version>
+                <configuration>
+                    <skipInvocation>${skipTests}</skipInvocation>
+                    <debug>false</debug>
+                    <streamLogs>false</streamLogs>
+                    <streamLogsOnFailures>true</streamLogsOnFailures>
+                    <showErrors>true</showErrors>
+                    <showVersion>true</showVersion>
+                    <disableReports>true</disableReports>
+                    <projectsDirectory>${basedir}/src/integration-tests/</projectsDirectory>
+                    <cloneProjectsTo>${project.build.directory}/integration-tests/</cloneProjectsTo>
+                    <reportsDirectory>${project.build.directory}</reportsDirectory>
+                    <cloneClean>true</cloneClean>
+                    <ignoreFailures>false</ignoreFailures>
+                    <filterProperties>
+                        <mockserver.version>${project.version}</mockserver.version>
+                    </filterProperties>
+                    <settingsFile>src/integration-tests/settings.xml</settingsFile>
+                    <!-- the post-build assertions live in verify.groovy (the plugin default is
+                         "postbuild"); goals per project come from each project's invoker.properties. -->
+                    <postBuildHookScript>verify</postBuildHookScript>
+                    <!-- List each invoker project EXPLICITLY (not a bom-** wildcard). The fail-closed marker
+                         check below (maven-enforcer requireFilesExist) can only assert literal marker paths —
+                         the rule has no glob support — so the set of projects run here and the set of markers
+                         asserted there must be kept 1:1 BY HAND. A wildcard would silently admit a new project
+                         whose hook could skip unnoticed — exactly the false green this guard exists to kill.
+                         When you add a bom-* invoker project, add BOTH: a <pomInclude> here AND its
+                         target/bom-guard-executed.marker <file> in the enforcer execution below. -->
+                    <pomIncludes>
+                        <pomInclude>bom-only-manages-mockserver-artifacts/pom.xml</pomInclude>
+                    </pomIncludes>
+                </configuration>
+                <!-- Pin the Groovy version used to run the verify.groovy post-build hook. maven-invoker-plugin
+                     already bundles org.apache.groovy:groovy / groovy-json / groovy-xml at runtime (via its
+                     groovy-bom import, defaulting to the plugin's own groovyVersion — 4.0.31 for 3.10.1), so
+                     these entries do not PROVIDE the interpreter, they OVERRIDE its version — which is exactly
+                     what Dependabot bumps. groovy-xml carries XmlSlurper (a separate module since Groovy 4).
+                     groovy-json is pinned too: the plugin bundles it at runtime as well, so overriding only
+                     groovy + groovy-xml would leave a Groovy-4 groovy-json mixed onto a Groovy-5 core, and
+                     Dependabot would not track the undeclared module — keep all three on the same version.
+
+                     NOTE: because the interpreter is bundled, dropping these entries reverts to the plugin's
+                     default Groovy rather than removing the interpreter — it does NOT by itself silence the
+                     hook. The hook IS silently skipped, though, whenever the plugin finds no script matching
+                     <postBuildHookScript>verify</postBuildHookScript> (a renamed/removed verify.groovy), or if
+                     a future plugin version stops bundling the interpreter. Any such silent skip would let the
+                     #2684 guard pass vacuously; the maven-enforcer requireFilesExist execution below fails
+                     closed on it (verify.groovy writes a proof-of-execution marker as its last act, and the
+                     enforcer asserts that marker exists after the invoker run). -->
+                <dependencies>
+                    <dependency>
+                        <groupId>org.apache.groovy</groupId>
+                        <artifactId>groovy</artifactId>
+                        <version>6.0.0</version>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.apache.groovy</groupId>
+                        <artifactId>groovy-xml</artifactId>
+                        <version>6.0.0</version>
+                    </dependency>
+                    <dependency>
+                        <groupId>org.apache.groovy</groupId>
+                        <artifactId>groovy-json</artifactId>
+                        <version>6.0.0</version>
+                    </dependency>
+                </dependencies>
+                <executions>
+                    <execution>
+                        <id>integration-test</id>
+                        <goals>
+                            <goal>install</goal>
+                            <goal>run</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- Fail closed when the #2684 guard did not actually run.
+                 maven-invoker-plugin SILENTLY SKIPS its post-build hook when it finds no script matching
+                 <postBuildHookScript>verify</postBuildHookScript> (a renamed or removed verify.groovy), and
+                 would also skip if a future plugin version stopped putting a Groovy interpreter on its
+                 classpath. A silent skip means the verify.groovy assertions never execute, yet the invoker
+                 run (and the build) still go GREEN: the guard stops guarding and nothing notices. This is the
+                 same class of false green that .buildkite/scripts/steps/assert-suite-ran.sh removes for
+                 Docker-gated suites.
+
+                 verify.groovy writes a proof-of-execution marker under the invoker project's own build
+                 output as its LAST act (only a hook that ran to completion can create it), and this
+                 execution asserts that marker exists after the invoker run. The check is deliberately
+                 maven-enforcer (requireFilesExist) and NOT Groovy: if it depended on the Groovy interpreter,
+                 the very breakage it is meant to catch (a broken/absent interpreter) would take out the
+                 check along with the hook, defeating the purpose. Enforcer is already on this build (the
+                 inherited dependencyConvergence execution), so this adds no new plugin.
+
+                 Staleness: the marker lives under the invoker project's target/, which the invoker goal's
+                 own `clean` (invoker.properties: `clean dependency:list ...`) wipes at the start of every
+                 run, and the whole clone is recreated each run (cloneClean=true). A leftover marker from an
+                 earlier run therefore cannot make a skipped hook look successful.
+
+                 Bound to `verify` so it runs after invoker:run (integration-test phase). Skipped in lockstep
+                 with the invoker via ${skipTests}, so `-DskipTests` does not turn this into a false failure. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <!-- version inherited from the parent POM (currently 3.6.3) -->
+                <executions>
+                    <execution>
+                        <id>assert-bom-guard-executed</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <skip>${skipTests}</skip>
+                            <!-- combine.self="override" so the parent POM's plugin-level
+                                 <rules><dependencyConvergence/></rules> does NOT merge into this execution.
+                                 Without it this execution runs BOTH rules, so a convergence failure would be
+                                 misattributed to the guard. (combine.children="override" is not enough here —
+                                 the child rule element name differs, so the recessive dependencyConvergence
+                                 survives; combine.self replaces the whole <rules> element.) dependencyConvergence
+                                 still runs in its own inherited `enforce` execution at the `validate` phase. -->
+                            <rules combine.self="override">
+                                <requireFilesExist>
+                                    <!-- One <file> per invoker project listed in <pomIncludes> above, kept 1:1
+                                         BY HAND (requireFilesExist takes literal paths, not globs). Add a bom-*
+                                         invoker project => add its marker here too, or that project's guard can
+                                         skip unnoticed. Each path is <clone>/target/bom-guard-executed.marker,
+                                         where <clone> = cloneProjectsTo/<invoker-project-dir>. -->
+                                    <files>
+                                        <file>${project.build.directory}/integration-tests/bom-only-manages-mockserver-artifacts/target/bom-guard-executed.marker</file>
+                                    </files>
+                                    <message>The #2684 BOM guard did not execute: verify.groovy never wrote its proof-of-execution marker (expected at target/integration-tests/bom-only-manages-mockserver-artifacts/target/bom-guard-executed.marker). The maven-invoker-plugin post-build hook was SILENTLY SKIPPED — most likely because no script matches &lt;postBuildHookScript&gt;verify&lt;/postBuildHookScript&gt; (verify.groovy renamed, moved or deleted), or because a Groovy interpreter is no longer on the invoker plugin's classpath (see its groovy / groovy-xml dependencies). Because the hook did not run, this build proves NOTHING about the published mockserver-bom (that it manages only org.mock-server artifacts and does not hijack a consumer's oauth2-oidc-sdk scope/version). Fix the hook/interpreter wiring in mockserver-bom/pom.xml and re-run `mvn verify`; check the invoker build log under target/integration-tests/ for the skip.</message>
+                                </requireFilesExist>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>

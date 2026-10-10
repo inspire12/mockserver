@@ -1,0 +1,161 @@
+steps:
+  - label: ":s3: restore npm cache"
+    command: ".buildkite/scripts/cache-restore.sh npm"
+    timeout_in_minutes: 10
+    soft_fail: true
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  # The codegen-compile and end-to-end steps build the mockserver jar from HEAD
+  # via Maven (ui-java-codegen-compile.sh and ui-e2e.sh, which mount --cache
+  # maven). Restore the shared maven local-repo cache so those builds resolve
+  # from a warm ~/.m2 instead of Maven Central — a transient Central "Connection
+  # reset" during that resolve is what previously killed jar-building jobs.
+  # Restore-only: the mockserver-java and mockserver-maven-plugin pipelines own
+  # the maven cache SAVE. soft_fail so a cache miss / no S3 creds never fails.
+  - label: ":s3: restore maven cache"
+    command: ".buildkite/scripts/cache-restore.sh maven"
+    timeout_in_minutes: 10
+    soft_fail: true
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - wait
+
+  - label: ":react: UI lint and typecheck"
+    command: ".buildkite/scripts/steps/ui-lint.sh"
+    timeout_in_minutes: 10
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":jest: UI tests"
+    command: ".buildkite/scripts/steps/ui-test.sh"
+    artifact_paths:
+      - "mockserver-ui/test-reports/*.xml"
+    timeout_in_minutes: 10
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  # Composer generated-code compile gates. The dashboard composer emits client
+  # code in seven languages; broken generated code reaches users directly. Java
+  # (ui-java-codegen-compile.sh), C# (ComposerCodegenEquivalenceTests.cs) and Node
+  # (the tsc type-proof in node.test.ts, run under ":jest: UI tests") are already
+  # gated. These four close the remaining languages: each emits the shared
+  # composer matrix and compiles / syntax-checks it with that language's toolchain
+  # (Go + Rust against the REAL in-repo client, so a client-API rename fails here).
+  - label: ":python: composer generated-Python compile gate"
+    command: ".buildkite/scripts/steps/ui-client-codegen-compile.sh python"
+    timeout_in_minutes: 15
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":ruby: composer generated-Ruby compile gate"
+    command: ".buildkite/scripts/steps/ui-client-codegen-compile.sh ruby"
+    timeout_in_minutes: 15
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":go: composer generated-Go compile gate"
+    command: ".buildkite/scripts/steps/ui-client-codegen-compile.sh go"
+    timeout_in_minutes: 20
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":rust: composer generated-Rust compile gate"
+    command: ".buildkite/scripts/steps/ui-client-codegen-compile.sh rust"
+    timeout_in_minutes: 20
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  # UI build and end-to-end run alongside lint and unit tests rather than after them:
+  # neither consumes their output, and e2e is the pipeline's longest step. The cost is
+  # that e2e runs even when the unit tests are red.
+  - label: ":package: UI build"
+    command: ".buildkite/scripts/steps/ui-build.sh"
+    timeout_in_minutes: 10
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":playwright: UI end-to-end (real browser)"
+    # Drives the served dashboard in headless Chromium against a live MockServer
+    # (real REST + real WebSocket). Builds the current runnable JAR, boots it,
+    # and runs the Playwright suite against it. Heavier than the jsdom tests
+    # (JAR build + browser image), so it is a longer-timeout step.
+    command: ".buildkite/scripts/steps/ui-e2e.sh"
+    artifact_paths:
+      - "mockserver-ui/test-reports/*.xml"
+      - "mockserver-ui/test-results/**/*"
+      - "mockserver-ui/playwright-report/**/*"
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+        # Builds the runnable mockserver jar from HEAD (Maven) before the
+        # Playwright run. A transient Maven Central resolution failure is remapped
+        # to sentinel 42 by run-in-docker.sh; a real test failure exits 1 and can
+        # never reach 42. (The incident's UI Playwright job died building this jar
+        # on a transient Central "Connection reset" fetching angus-activation.)
+        - exit_status: 42   # transient Maven Central resolution failure
+          limit: 2
+
+  - wait: ~
+    continue_on_failure: true
+
+  - label: ":junit: annotate test results"
+    plugins:
+      - junit-annotate#8a549e5220869601737287b4d6a9293703dc5a6f:  # v2.7.0
+          artifacts: "mockserver-ui/test-reports/*.xml"
+          always-annotate: true
+    timeout_in_minutes: 10
+
+  - wait
+
+  - label: ":s3: save npm cache"
+    command: ".buildkite/scripts/cache-save.sh npm"
+    timeout_in_minutes: 10
+    soft_fail: true
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2

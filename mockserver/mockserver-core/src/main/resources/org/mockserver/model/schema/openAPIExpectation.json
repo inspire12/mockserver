@@ -1,0 +1,47 @@
+{
+  "title": "open api or swagger expectation",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "specUrlOrPayload": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object"
+        }
+      ]
+    },
+    "operationsAndResponses": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "statusCode": {
+                "type": "string"
+              },
+              "exampleName": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "statusCode"
+            ]
+          }
+        ]
+      }
+    },
+    "contextPathPrefix": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "specUrlOrPayload"
+  ]
+}

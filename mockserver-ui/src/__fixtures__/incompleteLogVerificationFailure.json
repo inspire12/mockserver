@@ -1,0 +1,38 @@
+{
+  "description": "A VERIFICATION_FAILED log entry for a verification that could not be trusted because the event log had lost entries, as the dashboard receives it, with every cause present. Read by MockServerEventLogVerifyIncompleteLogCauseTest (the server's message text and loss fields), DashboardLogEntryDTOSerializerTest (the wire shape) and EventLogLossDetails.test.tsx (what the user sees). Counts and bounds are representative; only the text and the field names are compared with the server.",
+  "logEntry": {
+    "description": "VERIFICATION_FAILED",
+    "messageParts": [
+      {
+        "key": "0_0msg",
+        "value": "request:"
+      },
+      {
+        "key": "0_0arg",
+        "json": true,
+        "argument": true,
+        "value": {
+          "path": "/absent"
+        }
+      },
+      {
+        "key": "0_1msg",
+        "value": "could not be verified exactly 0 times because the event log has dropped log events and evicted entries:"
+      },
+      {
+        "key": "0_1arg",
+        "json": true,
+        "argument": true,
+        "value": {
+          "droppedRingFull": 16,
+          "droppedInFlightBytes": 3,
+          "inFlightBytesBudget": 1000,
+          "evictedAtMaxLogEntries": 3,
+          "maxLogEntries": 3,
+          "evictedAtMaxEventLogSizeInBytes": 2,
+          "maxEventLogSizeInBytes": 4000
+        }
+      }
+    ]
+  }
+}

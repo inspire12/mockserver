@@ -1,0 +1,57 @@
+{
+  "title": "SSE response to return",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "delay": {
+      "$ref": "#/definitions/delay"
+    },
+    "headers": {
+      "$ref": "#/definitions/keyToMultiValue"
+    },
+    "statusCode": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 999
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "type": "string"
+          },
+          "data": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "retry": {
+            "type": "integer"
+          },
+          "delay": {
+            "$ref": "#/definitions/delay"
+          }
+        }
+      }
+    },
+    "templateType": {
+      "enum": [
+        "VELOCITY",
+        "JAVASCRIPT",
+        "MUSTACHE"
+      ]
+    },
+    "closeConnection": {
+      "type": "boolean"
+    },
+    "primary": {
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+  }
+}

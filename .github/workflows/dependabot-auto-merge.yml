@@ -1,0 +1,494 @@
+# Auto-merge Dependabot minor/patch PRs — and within-major SECURITY fixes — once
+# EVERY check that actually exists on the PR head has genuinely passed.
+#
+# Why not GitHub native auto-merge? Native auto-merge waits only on the repo's
+# *configured* required-status-check list. In this repo Buildkite and Snyk are
+# NOT required checks (see docs/infrastructure/ci-cd.md), so native auto-merge
+# would merge a Dependabot PR the moment its *required* checks were green while
+# Buildkite or a Snyk scan was still pending or red — and a newly-added check is
+# invisible to it until someone remembers to add it to the list. This workflow
+# instead reads the checks that ACTUALLY exist on the head commit — from BOTH the
+# Check Runs API and the legacy Commit Status API — and refuses unless every one
+# of them is green. It never trusts a maintained list.
+#
+# Security posture (all load-bearing — see docs/infrastructure/ci-cd.md):
+#   * schedule/workflow_dispatch only — NEVER pull_request_target; no PR-authored
+#     input ever reaches this job.
+#   * No checkout. PR code is never fetched or executed. State is read via the API
+#     and the merge is by PR number.
+#   * workflow-level permissions {}; the single job gets contents:write +
+#     pull-requests:write and nothing else.
+#   * No secrets.* — the API token comes from the job-scoped github.token context.
+#   * No third-party actions, so nothing to be compromised or SHA-drift.
+#   * Fails closed on every ambiguity (see the DECISION MATRIX in the run step).
+#
+# RELEASE-IN-FLIGHT GATE (see docs/infrastructure/ci-cd.md):
+#   Unattended merges STAND DOWN while a release is cutting from master — a
+#   release ships whatever master happens to be at that moment, so a bump that
+#   auto-merges mid-release lands in the release unreviewed (this happened: six
+#   distroless digest bumps auto-merged a few hours before 8.0.0 was cut and
+#   shipped inside it). The gate reads the repository variable RELEASE_IN_PROGRESS
+#   via the `vars` context — NO API call, NO token, NO new permission, so unlike a
+#   Buildkite query the signal is structurally un-"unreadable". The release
+#   pipeline sets it (epoch seconds) at `prepare` and clears it at `finalize`; a
+#   built-in max-age backstop (default 12h, override via vars.RELEASE_GATE_MAX_AGE_HOURS)
+#   auto-expires a flag a FAILED release left stranded, so a half-finished release
+#   cannot pause dependency updates forever. The gate only ever PREVENTS a merge —
+#   it never relaxes any check above — and every hold is logged AND surfaced as an
+#   idempotent PR comment. A manual workflow_dispatch run can set
+#   `ignore_release_gate: true` to force through a genuinely urgent bump. Security
+#   updates are gated too, deliberately (see docs): a security bump in an
+#   unreviewed release carries the same risk, and the hold lasts only until the
+#   release ends (the next 3-hourly sweep re-evaluates and merges it).
+name: Dependabot auto-merge
+
+on:
+  schedule:
+    # Every 3 hours, offset off the hour. Dependency bumps do not need to merge
+    # within seconds; a sweep is inherently self-retrying (a PR that is pending
+    # now is re-evaluated next run) and carries no PR-controlled trigger input.
+    - cron: '23 */3 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Log decisions without merging (leave ON to trial).'
+        type: boolean
+        default: true
+      pr:
+        description: 'Optional single PR number to evaluate (else sweep all open).'
+        type: string
+        required: false
+      ignore_release_gate:
+        description: 'Bypass the release-in-flight gate (force merges during a release — use only for an urgent bump).'
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  auto-merge:
+    name: Evaluate and merge eligible Dependabot PRs
+    runs-on: ubuntu-latest
+    # Least privilege, granted at job level only.
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      # Manual-dispatch overrides (empty on the schedule path).
+      DISPATCH_DRY_RUN: ${{ github.event.inputs.dry_run }}
+      DISPATCH_PR: ${{ github.event.inputs.pr }}
+      DISPATCH_IGNORE_RELEASE_GATE: ${{ github.event.inputs.ignore_release_gate }}
+      # Release-in-flight signal — read from the `vars` context (repository
+      # variables), so there is NO API call and NO token: an empty string means
+      # "unset / no release". Set to release-start epoch-seconds by the release
+      # pipeline's `prepare` stage and cleared at `finalize`. See the header.
+      RELEASE_IN_PROGRESS: ${{ vars.RELEASE_IN_PROGRESS }}
+      # Optional operator tuning of the stranded-flag backstop; blank ⇒ default 12h.
+      RELEASE_GATE_MAX_AGE_HOURS: ${{ vars.RELEASE_GATE_MAX_AGE_HOURS }}
+      # LIVE ON THE SCHEDULE: the scheduled sweep actually merges eligible PRs.
+      # The workflow_dispatch `dry_run` input still defaults to true, so a MANUAL
+      # run is a safe dry-run probe unless the operator explicitly sets it false.
+      DEFAULT_DRY_RUN: 'false'
+    steps:
+      # NOTE: deliberately no actions/checkout — this job fetches no PR code.
+      - name: Evaluate open Dependabot PRs and merge the eligible ones
+        run: |
+          set -uo pipefail
+
+          DRY_RUN="${DISPATCH_DRY_RUN:-$DEFAULT_DRY_RUN}"
+          ONLY_PR="${DISPATCH_PR:-}"
+
+          # ── Accepted PR classes, all forge-resistant ─────────────────────────
+          # Two are branch-structural (A, B); a third (C, defined further below)
+          # covers Dependabot SECURITY updates, which never land on an A/B branch.
+          #
+          # (A) GROUP_BRANCH_REGEX — a "-minor-and-patch" GROUP branch. The
+          #     minor+patch groups configured in .github/dependabot.yml embed the
+          #     group name verbatim; MAJORS are excluded from every group's
+          #     update-types, so a major arrives as an UNGROUPED single-dependency
+          #     branch (e.g. dependabot/maven/mockserver/com.graphql-java-graphql-
+          #     java-27.0.0) that does not match. Verified against real history:
+          #     genuine minors group here (grafana/k6 2.0.0→2.1.0) while majors do
+          #     not (eclipse-temurin 17→25, ubuntu 24.04→25.10 both arrived
+          #     ungrouped).
+          #
+          # (B) DIGEST_BRANCH_REGEX — an UNGROUPED Docker DIGEST bump on a distroless
+          #     base. Dependabot's grouping of digest updates is inconsistent (a
+          #     distroless digest once grouped as docker-minor-and-patch "across 6
+          #     directories", yet the current six arrive one-per-directory and
+          #     ungrouped), so digests cannot be caught by grouping alone. They are
+          #     matched directly instead, on TWO independent Dependabot-generated
+          #     signals that must BOTH hold (see the title check in the gate below):
+          #       1. the branch is under a ".../distroless/<image>-<hexsha>" path,
+          #          and 2. the PR title is Dependabot's digest-bump shape
+          #          ("bump X from `<hexsha>` to `<hexsha>`").
+          #     This is scoped to distroless ON PURPOSE: distroless is pinned on
+          #     NON-SEMVER tags (nonroot/debug-nonroot/latest), so across the dozens
+          #     of distroless PRs in this repo's history EVERY ONE is a digest bump
+          #     and NONE is a version/tag change — it is the one image class that can
+          #     only ever move by digest. Dependabot bumps tags/digests, never the
+          #     image *repository* name, so "distroless/java17" can never silently
+          #     become a "distroless/java21" tag change. Semver-tagged images
+          #     (alpine, ubuntu, eclipse-temurin, grafana/k6) are deliberately NOT
+          #     matched here — their digest bumps stay ungrouped and are refused, so
+          #     no version string can ever reach this path.
+          #
+          # Both branch classes live in the base repo and are created by Dependabot
+          # alone, so a PR author cannot forge either (the fork gate above
+          # independently rejects any branch not in this repo). The trailing hex run
+          # in each regex means an ungrouped major (…-27.0.0, …-25.10, …-25-jdk-noble)
+          # can never match: a dot or a non-hex tag ends the string first.
+          # See docs/infrastructure/ci-cd.md for the full argument and the evidence.
+          GROUP_BRANCH_REGEX='^dependabot/.+-minor-and-patch-[0-9a-f]+$'
+          DIGEST_BRANCH_REGEX='^dependabot/docker/.+/distroless/[a-z0-9._-]+-[0-9a-f]{7,}$'
+          # Dependabot's digest-bump title: bump <image> from `<sha>` to `<sha>`
+          # (the shas are backticked). A version bump titles the from/to as bare
+          # versions ("from 24.04 to 25.10", "from 17-jdk-noble to 25-jdk-noble"),
+          # so requiring a >=7-char HEX run either side can only match a digest
+          # movement, never a tag/version change. The single "." stands in for the
+          # backtick that wraps each sha — written this way (not a literal backtick)
+          # so the regex is unambiguous shell and stays shellcheck-clean.
+          DIGEST_TITLE_REGEX='bump [^ ]+ from .[0-9a-f]{7,}. to .[0-9a-f]{7,}.'
+
+          # ── (C) SECURITY updates — a title-parsed, EXPLICIT semver bound ──────
+          #
+          # Dependabot SECURITY updates match NEITHER branch class above: every
+          # `groups:` entry in .github/dependabot.yml omits `applies-to:`, which
+          # DEFAULTS TO `version-updates`, so a security fix is raised UNGROUPED
+          # (e.g. dependabot/npm_and_yarn/mockserver-ui/fflate-0.4.9) or inside
+          # GitHub's own auto-created `npm_and_yarn` security group — never on a
+          # `*-minor-and-patch-<sha>` branch. Left unhandled they sit open forever
+          # (confirmed live: #2640/#2645/#2646/#2647 were fully green yet unmerged).
+          #
+          # WHY NOT just add a security group named to match path A? Because path
+          # A's ENTIRE safety argument is structural major-exclusion via group
+          # membership, and a security group CANNOT reproduce it: GitHub's docs are
+          # explicit that "`update-types` only affects version updates, not security
+          # updates", so `update-types: [minor, patch]` is SILENTLY IGNORED on an
+          # `applies-to: security-updates` group. A security group whose name ended
+          # `-minor-and-patch` would therefore let a MAJOR security bump auto-merge
+          # under path A — exactly the failure Rule 6d of check-false-green-guards.sh
+          # exists to reject. So path C never relies on grouping; it derives its
+          # major-exclusion from an EXPLICIT semver comparison of the title versions.
+          #
+          # WHY the title parse is trustworthy: it is the SAME trust level as path
+          # B's DIGEST_TITLE_REGEX. The fork gate above has already proven the head
+          # branch lives in THIS repo, and the author gate has proven the author is
+          # dependabot[bot], so both the title AND the body are Dependabot-generated
+          # text on a base-repo branch — a PR author cannot forge either.
+          #
+          # VERSION_PAIR_REGEX matches Dependabot's one-dependency bump shape,
+          # "bump <name> from <X> to <Y>", where X and Y are DOTTED NUMERIC versions
+          # (at least one dot). Requiring dotted numerics is what separates a version
+          # bump from path B's digest bump: a digest title reads "from `<sha>` to
+          # `<sha>`" whose backticked hex tokens are not dotted numerics, so the two
+          # title shapes are mutually exclusive and neither can be mistaken for the
+          # other. A multi-dependency grouped security title ("bump the npm_and_yarn
+          # group across 3 directories with 5 updates") carries NO such pair, so it
+          # is refused — we will not range-check a title we cannot parse.
+          #
+          # SECURITY_BODY_MARKER is Dependabot's security-update footer, emitted
+          # ONLY on security PRs ("You can disable automated security fix PRs for
+          # this repo from the Security Alerts page"). It is absent from ordinary
+          # version-update PRs (verified against grouped version PRs #2628/#2630),
+          # so it is what distinguishes a security update from any other ungrouped
+          # PR that might otherwise reach path C's branch position.
+          VERSION_PAIR_REGEX='bump [^ ]+ from [0-9]+\.[0-9][0-9.]* to [0-9]+\.[0-9][0-9.]*'
+          SECURITY_BODY_MARKER='You can disable automated security fix PRs'
+
+          log()    { printf '%s\n' "$*"; }
+          refuse() { log "  REFUSE (#$1): $2"; }
+
+          # Hold an OTHERWISE-ELIGIBLE PR because a release is in flight. Never
+          # merges. Logs, and posts an idempotent PR comment so the hold is visible
+          # (never silent). The comment carries a marker keyed to the release token
+          # (the RELEASE_IN_PROGRESS value), so repeated 3-hourly sweeps within the
+          # SAME release episode comment exactly once, while a later release (new
+          # token) comments afresh. A dry-run only logs — it mutates nothing.
+          hold_pr() {
+            hpr="$1"; htoken="$2"; hreason="$3"
+            log "  HELD (#$hpr): release in flight — NOT merging ($hreason)"
+            if [ "$DRY_RUN" = "true" ]; then
+              log "    DRY-RUN: would post a release-hold comment on #$hpr"; return 0
+            fi
+            # Digits only in the marker so a non-epoch flag value can never carry
+            # a "-->" that would malform the HTML comment and defeat idempotency
+            # (the writer only ever sets epoch seconds; this guards the theoretical
+            # manually-set garbage value). Same sanitised marker is used to post
+            # and to match, so idempotency is preserved.
+            htoken_marker="$(printf '%s' "$htoken" | tr -cd '0-9')"
+            marker="<!-- dependabot-release-gate:${htoken_marker} -->"
+            existing="$(gh api "repos/$REPO/issues/$hpr/comments?per_page=100" --jq '.[].body' 2>/dev/null || true)"
+            if grep -qF -- "$marker" <<<"$existing"; then
+              log "    (release-hold comment already present for this episode — not re-posting)"; return 0
+            fi
+            body="$(printf '%s\n%s\n\n%s\n\n%s' \
+              "$marker" \
+              "🚧 **Auto-merge paused — a MockServer release is in progress.**" \
+              "This dependency PR is fully green and would normally have auto-merged, but the release-in-flight gate is holding it so the bump does not ship unreviewed inside a release cut from \`master\`. No action needed: it auto-merges on the next scheduled sweep once the release finishes." \
+              "_Gate: the \`RELEASE_IN_PROGRESS\` repository variable. It self-expires as a backstop if a release fails without clearing it. To force this through, re-run the \`Dependabot auto-merge\` workflow with \`ignore_release_gate: true\`._")"
+            if gh pr comment "$hpr" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
+              log "    posted release-hold comment on #$hpr"
+            else
+              log "    could not post release-hold comment on #$hpr (continuing; the HOLD is still enforced)"
+            fi
+          }
+
+          # Evaluate one PR. Returns 0 only if it merged (or would in dry-run).
+          # Never exits the process — a single bad PR must not abort the sweep.
+          evaluate_pr() {
+            pr="$1"
+            log "── PR #$pr ─────────────────────────────────────────────"
+
+            if ! prjson="$(gh api "repos/$REPO/pulls/$pr" 2>/dev/null)"; then
+              refuse "$pr" "API error fetching PR (fail closed)"; return 1
+            fi
+
+            state="$(jq -r '.state // ""' <<<"$prjson")"
+            draft="$(jq -r '.draft // false' <<<"$prjson")"
+            user="$(jq -r '.user.login // ""' <<<"$prjson")"
+            head_ref="$(jq -r '.head.ref // ""' <<<"$prjson")"
+            head_sha="$(jq -r '.head.sha // ""' <<<"$prjson")"
+            head_repo="$(jq -r '.head.repo.full_name // ""' <<<"$prjson")"
+            base_repo="$(jq -r '.base.repo.full_name // ""' <<<"$prjson")"
+            title="$(jq -r '.title // ""' <<<"$prjson")"
+            body="$(jq -r '.body // ""' <<<"$prjson")"
+
+            # Gate: author is Dependabot.
+            if [ "$user" != "dependabot[bot]" ]; then
+              refuse "$pr" "author is '$user', not dependabot[bot]"; return 1
+            fi
+            # Gate: PR is open.
+            if [ "$state" != "open" ]; then
+              refuse "$pr" "state is '$state', not open"; return 1
+            fi
+            # Gate: not a draft.
+            if [ "$draft" = "true" ]; then
+              refuse "$pr" "PR is a draft"; return 1
+            fi
+            # Gate: head is a branch in THIS repo, not a fork.
+            if [ -z "$head_repo" ] || [ "$head_repo" != "$base_repo" ]; then
+              refuse "$pr" "head repo '$head_repo' != base '$base_repo' (fork/deleted)"; return 1
+            fi
+            # Gate: the PR is accepted by exactly one of three paths — (A) a
+            # minor/patch GROUP branch, (B) a distroless DIGEST branch whose TITLE
+            # is also Dependabot's digest-bump shape, or (C) a SECURITY update whose
+            # title parses to a single within-major version bump. Majors and tag
+            # changes match none of them (see the regexes/comment above). Paths A and
+            # B are branch-structural; path C is decided from the body+title signals
+            # because security updates never land on an A/B-shaped branch.
+            if grep -Eq -- "$GROUP_BRANCH_REGEX" <<<"$head_ref"; then
+              : # (A) accepted — structural major-exclusion via group membership
+            elif grep -Eq -- "$DIGEST_BRANCH_REGEX" <<<"$head_ref"; then
+              # (B) branch looks like a distroless digest bump; require the PR title
+              # to ALSO be a digest-bump title. Two independent Dependabot-generated
+              # signals must agree — fail closed if the title is anything else (e.g.
+              # a version bump that somehow shared the branch shape).
+              if ! grep -Eq -- "$DIGEST_TITLE_REGEX" <<<"$title"; then
+                refuse "$pr" "branch '$head_ref' looks like a digest bump but title '$title' is not a digest-bump title — fail closed"; return 1
+              fi
+            elif grep -qF -- "$SECURITY_BODY_MARKER" <<<"$body"; then
+              # (C) Dependabot SECURITY update (body carries the security-fix footer).
+              # Accept ONLY a single within-major version bump, with the major bound
+              # computed EXPLICITLY here — grouping cannot supply it (see the big
+              # comment above: update-types is ignored for security groups).
+              #
+              # (C1) The title must contain EXACTLY ONE "bump <name> from <X> to <Y>"
+              #      dotted-version pair. Zero pairs = a multi-dependency grouped
+              #      security title we cannot range-check; more than one = an
+              #      unexpected shape. Either way, fail closed.
+              npairs="$(printf '%s' "$title" | grep -oE "$VERSION_PAIR_REGEX" | wc -l | tr -d '[:space:]')"
+              if [ "$npairs" != "1" ]; then
+                refuse "$pr" "security PR title '$title' has ${npairs} parseable version pair(s) (need exactly 1) — fail closed"; return 1
+              fi
+              sec_pair="$(printf '%s' "$title" | grep -oE "$VERSION_PAIR_REGEX" | head -1)"
+              sec_from="$(printf '%s' "$sec_pair" | sed -E 's/.* from ([0-9.]+) to ([0-9.]+)$/\1/')"
+              sec_to="$(printf '%s' "$sec_pair" | sed -E 's/.* from ([0-9.]+) to ([0-9.]+)$/\2/')"
+              # (C2) EXPLICIT semver major-exclusion. The major components must be
+              #      equal — this is the conjunct that keeps a major security bump
+              #      (foo 3.1.5 -> 4.0.0) out, standing in for the group membership
+              #      that path A relies on and a security group cannot provide.
+              from_major="${sec_from%%.*}"
+              to_major="${sec_to%%.*}"
+              if [ "$from_major" != "$to_major" ]; then
+                refuse "$pr" "security bump ${sec_from} -> ${sec_to} crosses a semver major (${from_major} -> ${to_major}) — fail closed"; return 1
+              fi
+              # (C3) 0.x special case: under npm/semver a 0.x MINOR bump is breaking
+              #      (0.4.8 -> 0.4.9 is safe, 0.4.x -> 0.5.0 is not), so when the
+              #      major is 0 the minor components must ALSO be equal.
+              if [ "$from_major" = "0" ]; then
+                from_rest="${sec_from#*.}"; from_minor="${from_rest%%.*}"
+                to_rest="${sec_to#*.}"; to_minor="${to_rest%%.*}"
+                if [ "$from_minor" != "$to_minor" ]; then
+                  refuse "$pr" "0.x security bump ${sec_from} -> ${sec_to} crosses a 0.x minor (${from_minor} -> ${to_minor}), which is breaking under semver — fail closed"; return 1
+                fi
+              fi
+              log "  (C) security update within-major: ${sec_from} -> ${sec_to} (accepted)"
+            else
+              refuse "$pr" "branch '$head_ref' is neither a *-minor-and-patch group nor a distroless digest bump, and the PR is not a Dependabot security update (major/tag/ungrouped)"; return 1
+            fi
+
+            # Gate: mergeable. GitHub computes this asynchronously; retry while null.
+            mergeable="$(jq -r '.mergeable' <<<"$prjson")"
+            mstate="$(jq -r '.mergeable_state // "unknown"' <<<"$prjson")"
+            tries=0
+            while [ "$mergeable" = "null" ] && [ "$tries" -lt 3 ]; do
+              sleep 3; tries=$((tries+1))
+              prjson="$(gh api "repos/$REPO/pulls/$pr" 2>/dev/null)" || { refuse "$pr" "API error re-fetching mergeability"; return 1; }
+              mergeable="$(jq -r '.mergeable' <<<"$prjson")"
+              mstate="$(jq -r '.mergeable_state // "unknown"' <<<"$prjson")"
+            done
+            if [ "$mergeable" != "true" ]; then
+              refuse "$pr" "mergeable='$mergeable' (unknown/conflicting) — fail closed"; return 1
+            fi
+            case "$mstate" in
+              clean|unstable|has_hooks) : ;;  # our own check aggregation below is the green authority
+              *) refuse "$pr" "mergeable_state='$mstate' (dirty/behind/blocked/unknown)"; return 1 ;;
+            esac
+
+            # ── DECISION MATRIX: every check that exists must be green ──────────
+            # Aggregate BOTH APIs. Reading only check-runs would miss Buildkite and
+            # both Snyk scans, which are Commit Statuses, not Check Runs.
+            if ! cr="$(gh api "repos/$REPO/commits/$head_sha/check-runs?per_page=100" 2>/dev/null)"; then
+              refuse "$pr" "API error fetching check-runs (fail closed)"; return 1
+            fi
+            if ! st="$(gh api "repos/$REPO/commits/$head_sha/status?per_page=100" 2>/dev/null)"; then
+              refuse "$pr" "API error fetching commit statuses (fail closed)"; return 1
+            fi
+
+            n_cr="$(jq -r '.check_runs | length' <<<"$cr")"
+            n_st="$(jq -r '.statuses | length' <<<"$st")"
+            n_total=$((n_cr + n_st))
+            log "  aggregated signals: check-runs=$n_cr + statuses=$n_st = $n_total"
+
+            # Empty-set trap: silence is never success.
+            if [ "$n_total" -eq 0 ]; then
+              refuse "$pr" "ZERO checks found on head $head_sha (empty-set trap)"; return 1
+            fi
+
+            success=0; problems=0
+            # Check Runs: require completed + success. skipped/neutral are
+            # non-blocking (GitHub treats them as non-failing; the fork-only
+            # 'Build & test full reactor' check is legitimately skipped on in-repo
+            # branches, so treating skipped as failure would merge nothing). Every
+            # other value — failure/cancelled/timed_out/action_required/stale/
+            # startup_failure, a null conclusion, or anything unrecognised — fails.
+            while IFS="$(printf '\t')" read -r name status conclusion; do
+              [ -z "$name" ] && continue
+              if [ "$status" != "completed" ]; then
+                log "    check-run '$name': status=$status → NOT COMPLETE"; problems=$((problems+1)); continue
+              fi
+              case "$conclusion" in
+                success)         success=$((success+1)) ;;
+                skipped|neutral) log "    check-run '$name': $conclusion (non-blocking)" ;;
+                *)               log "    check-run '$name': conclusion=$conclusion → PROBLEM"; problems=$((problems+1)) ;;
+              esac
+            done < <(jq -r '.check_runs[] | [.name, .status, (.conclusion // "null")] | @tsv' <<<"$cr")
+
+            # Commit Statuses: require state=success; anything else fails closed.
+            while IFS="$(printf '\t')" read -r ctx cstate; do
+              [ -z "$ctx" ] && continue
+              case "$cstate" in
+                success) success=$((success+1)) ;;
+                *)       log "    status '$ctx': state=$cstate → PROBLEM"; problems=$((problems+1)) ;;
+              esac
+            done < <(jq -r '.statuses[] | [.context, .state] | @tsv' <<<"$st")
+
+            if [ "$problems" -gt 0 ]; then
+              refuse "$pr" "$problems check(s) not green — fail closed"; return 1
+            fi
+            if [ "$success" -lt 1 ]; then
+              refuse "$pr" "no successful check present (all skipped/neutral) — fail closed"; return 1
+            fi
+
+            log "  ELIGIBLE: $success success + $((n_total - success)) non-blocking, 0 problems"
+
+            # RELEASE-IN-FLIGHT GATE. Applied ONLY here, to a PR that has already
+            # passed every check above — the gate can only ever PREVENT a merge, it
+            # never enables one, so it cannot weaken the check aggregation. gate_held
+            # / gate_reason / gate_token are computed once before the sweep.
+            if [ "$gate_held" = "true" ]; then
+              hold_pr "$pr" "$gate_token" "$gate_reason"; return 1
+            fi
+
+            if [ "$DRY_RUN" = "true" ]; then
+              log "  DRY-RUN: would squash-merge PR #$pr"; return 0
+            fi
+            # --match-head-commit pins the merge to the exact SHA whose checks were
+            # validated above. Without it, a force-push landing between validation and
+            # merge would merge an unvalidated head; GitHub refuses instead.
+            if gh pr merge "$pr" --repo "$REPO" --squash --delete-branch \
+                 --match-head-commit "$head_sha"; then
+              log "  MERGED PR #$pr (squash)"; return 0
+            fi
+            refuse "$pr" "gh pr merge failed (GitHub refused) — left for inspection"; return 1
+          }
+
+          # ── RELEASE-IN-FLIGHT GATE: compute state ONCE for the whole sweep ────
+          # Decision matrix (fail direction is chosen per case, never silent):
+          #   override set (ignore_release_gate=true) → CLEAR (log it)
+          #   flag unset (empty)                      → CLEAR (no release)
+          #   flag = epoch, age in [0, max)           → HELD  (release in progress)
+          #   flag = epoch, age ≥ max                 → CLEAR (STRANDED flag — a
+          #                                             failed release; log LOUDLY so
+          #                                             the stale variable gets cleared)
+          #   flag = epoch, age < 0 (future/skew)     → HELD  (fail closed)
+          #   flag present but NOT an epoch           → HELD  (fail closed; a garbage
+          #                                             flag is an operator error to
+          #                                             surface, not to ignore)
+          # Reading is via the `vars` context (env above), so there is no API/token
+          # to be "down": the only residual ambiguity is a malformed VALUE, handled
+          # above. Holding costs at most one 3-hourly sweep of delay per PR; merging
+          # into a release is the expensive failure — so ambiguity holds.
+          IGNORE_GATE="${DISPATCH_IGNORE_RELEASE_GATE:-false}"
+          GATE_MAX_AGE_HOURS="${RELEASE_GATE_MAX_AGE_HOURS:-12}"
+          case "$GATE_MAX_AGE_HOURS" in ''|*[!0-9]*) GATE_MAX_AGE_HOURS=12 ;; esac
+          [ "$GATE_MAX_AGE_HOURS" -eq 0 ] 2>/dev/null && GATE_MAX_AGE_HOURS=12
+          RELEASE_FLAG="${RELEASE_IN_PROGRESS:-}"
+          gate_held=false; gate_reason=""; gate_token="none"
+          if [ "$IGNORE_GATE" = "true" ]; then
+            log "RELEASE GATE: OVERRIDDEN (ignore_release_gate=true) — proceeding despite any release flag"
+          elif [ -z "$RELEASE_FLAG" ]; then
+            log "RELEASE GATE: clear (RELEASE_IN_PROGRESS unset) — proceeding"
+          else
+            gate_token="$RELEASE_FLAG"
+            if grep -Eq '^[0-9]{9,}$' <<<"$RELEASE_FLAG"; then
+              now="$(date -u +%s)"
+              age=$(( now - RELEASE_FLAG ))
+              max=$(( GATE_MAX_AGE_HOURS * 3600 ))
+              if [ "$age" -lt 0 ]; then
+                gate_held=true
+                gate_reason="RELEASE_IN_PROGRESS is in the future (age=${age}s; clock skew or a bad value) — fail closed"
+                log "RELEASE GATE: HELD — $gate_reason"
+              elif [ "$age" -ge "$max" ]; then
+                log "RELEASE GATE: STRANDED FLAG — RELEASE_IN_PROGRESS age ${age}s >= ${max}s (${GATE_MAX_AGE_HOURS}h backstop); a release likely FAILED without clearing it. PROCEEDING and requesting the variable be cleared."
+              else
+                gate_held=true
+                gate_reason="release in progress (RELEASE_IN_PROGRESS age ${age}s < ${max}s backstop)"
+                log "RELEASE GATE: HELD — $gate_reason. Eligible PRs will be reported and left unmerged."
+              fi
+            else
+              gate_held=true
+              gate_reason="RELEASE_IN_PROGRESS is set but not an epoch timestamp ('$RELEASE_FLAG') — fail closed; clear or fix the variable"
+              log "RELEASE GATE: HELD — $gate_reason"
+            fi
+          fi
+
+          # Build the candidate list.
+          candidates=()
+          if [ -n "$ONLY_PR" ]; then
+            candidates=("$ONLY_PR")
+          else
+            if ! list="$(gh pr list --repo "$REPO" --state open --limit 100 --json number --jq '.[].number')"; then
+              log "FATAL: could not list open PRs"; exit 1
+            fi
+            while IFS= read -r n; do [ -n "$n" ] && candidates+=("$n"); done <<<"$list"
+          fi
+
+          log "DRY_RUN=$DRY_RUN  release_gate_held=$gate_held  candidates=${#candidates[@]}"
+          for pr in "${candidates[@]}"; do
+            evaluate_pr "$pr" || true
+          done
+          log "done."

@@ -1,0 +1,747 @@
+package org.mockserver.serialization.model;
+
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonSetter;
+import org.mockserver.matchers.TimeToLive;
+import org.mockserver.matchers.Times;
+import org.mockserver.mock.Expectation;
+import org.mockserver.mock.ResponseMode;
+import org.mockserver.mock.CrossProtocolEventBus;
+import org.mockserver.model.*;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+/**
+ * @author jamesdbloom
+ */
+public class ExpectationDTO extends ObjectWithJsonToString implements DTO<Expectation> {
+
+    private static final String[] excludedFields = {"id"};
+    private String id;
+    private Integer priority;
+    private Integer percentage;
+    private HttpChaosProfileDTO chaos;
+    private RateLimitDTO rateLimit;
+    private RequestDefinitionDTO httpRequest;
+    private HttpResponseDTO httpResponse;
+    private HttpTemplateDTO httpResponseTemplate;
+    private HttpClassCallbackDTO httpResponseClassCallback;
+    private HttpObjectCallbackDTO httpResponseObjectCallback;
+    private HttpForwardDTO httpForward;
+    private HttpTemplateDTO httpForwardTemplate;
+    private HttpClassCallbackDTO httpForwardClassCallback;
+    private HttpObjectCallbackDTO httpForwardObjectCallback;
+    private HttpOverrideForwardedRequestDTO httpOverrideForwardedRequest;
+    private HttpForwardValidateActionDTO httpForwardValidateAction;
+    private HttpForwardWithFallbackDTO httpForwardWithFallback;
+    private HttpSseResponseDTO httpSseResponse;
+    private HttpLlmResponseDTO httpLlmResponse;
+    private HttpWebSocketResponseDTO httpWebSocketResponse;
+    private GrpcStreamResponseDTO grpcStreamResponse;
+    private GrpcBidiResponseDTO grpcBidiResponse;
+    private BinaryResponseDTO binaryResponse;
+    private DnsResponseDTO dnsResponse;
+    private HttpErrorDTO httpError;
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private List<AfterActionDTO> beforeActions;
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private List<AfterActionDTO> afterActions;
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private List<ExpectationStepDTO> steps;
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private List<HttpResponseDTO> httpResponses;
+    private ResponseMode responseMode;
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private List<Integer> responseWeights;
+    private Integer switchAfter;
+    private org.mockserver.serialization.model.TimesDTO times;
+    private TimeToLiveDTO timeToLive;
+    private String namespace;
+    private String scenarioName;
+    private String scenarioState;
+    private String newScenarioState;
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private List<CrossProtocolScenario> crossProtocolScenarios;
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private List<CaptureRuleDTO> capture;
+
+    public ExpectationDTO(Expectation expectation) {
+        if (expectation != null) {
+            this.id = expectation.getId();
+            Integer priority = expectation.getPriority();
+            if (priority != null) {
+                this.priority = expectation.getPriority();
+            }
+            this.percentage = expectation.getPercentage();
+            this.chaos = expectation.getChaos() != null ? new HttpChaosProfileDTO(expectation.getChaos()) : null;
+            this.rateLimit = expectation.getRateLimit() != null ? new RateLimitDTO(expectation.getRateLimit()) : null;
+            RequestDefinition requestMatcher = expectation.getHttpRequest();
+            if (requestMatcher instanceof HttpRequest) {
+                this.httpRequest = new HttpRequestDTO((HttpRequest) requestMatcher);
+            } else if (requestMatcher instanceof OpenAPIDefinition) {
+                this.httpRequest = new OpenAPIDefinitionDTO((OpenAPIDefinition) requestMatcher);
+            } else if (requestMatcher instanceof BinaryRequestDefinition) {
+                this.httpRequest = new BinaryRequestDefinitionDTO((BinaryRequestDefinition) requestMatcher);
+            } else if (requestMatcher instanceof DnsRequestDefinition) {
+                this.httpRequest = new DnsRequestDefinitionDTO((DnsRequestDefinition) requestMatcher);
+            } else if (requestMatcher instanceof ConditionalRequestDefinition) {
+                this.httpRequest = new ConditionalRequestDefinitionDTO((ConditionalRequestDefinition) requestMatcher);
+            }
+            HttpResponse httpResponse = expectation.getHttpResponse();
+            if (httpResponse != null) {
+                this.httpResponse = new HttpResponseDTO(httpResponse);
+            }
+            HttpTemplate httpResponseTemplate = expectation.getHttpResponseTemplate();
+            if (httpResponseTemplate != null) {
+                this.httpResponseTemplate = new HttpTemplateDTO(httpResponseTemplate);
+            }
+            HttpClassCallback httpResponseClassCallback = expectation.getHttpResponseClassCallback();
+            if (httpResponseClassCallback != null) {
+                this.httpResponseClassCallback = new HttpClassCallbackDTO(httpResponseClassCallback);
+            }
+            HttpObjectCallback httpResponseObjectCallback = expectation.getHttpResponseObjectCallback();
+            if (httpResponseObjectCallback != null) {
+                this.httpResponseObjectCallback = new HttpObjectCallbackDTO(httpResponseObjectCallback);
+            }
+            HttpForward httpForward = expectation.getHttpForward();
+            if (httpForward != null) {
+                this.httpForward = new HttpForwardDTO(httpForward);
+            }
+            HttpTemplate httpForwardTemplate = expectation.getHttpForwardTemplate();
+            if (httpForwardTemplate != null) {
+                this.httpForwardTemplate = new HttpTemplateDTO(httpForwardTemplate);
+            }
+            HttpClassCallback httpForwardClassCallback = expectation.getHttpForwardClassCallback();
+            if (httpForwardClassCallback != null) {
+                this.httpForwardClassCallback = new HttpClassCallbackDTO(httpForwardClassCallback);
+            }
+            HttpObjectCallback httpForwardObjectCallback = expectation.getHttpForwardObjectCallback();
+            if (httpForwardObjectCallback != null) {
+                this.httpForwardObjectCallback = new HttpObjectCallbackDTO(httpForwardObjectCallback);
+            }
+            HttpOverrideForwardedRequest httpOverrideForwardedRequest = expectation.getHttpOverrideForwardedRequest();
+            if (httpOverrideForwardedRequest != null) {
+                this.httpOverrideForwardedRequest = new HttpOverrideForwardedRequestDTO(httpOverrideForwardedRequest);
+            }
+            HttpForwardValidateAction httpForwardValidateAction = expectation.getHttpForwardValidateAction();
+            if (httpForwardValidateAction != null) {
+                this.httpForwardValidateAction = new HttpForwardValidateActionDTO(httpForwardValidateAction);
+            }
+            HttpForwardWithFallback httpForwardWithFallback = expectation.getHttpForwardWithFallback();
+            if (httpForwardWithFallback != null) {
+                this.httpForwardWithFallback = new HttpForwardWithFallbackDTO(httpForwardWithFallback);
+            }
+            HttpSseResponse httpSseResponse = expectation.getHttpSseResponse();
+            if (httpSseResponse != null) {
+                this.httpSseResponse = new HttpSseResponseDTO(httpSseResponse);
+            }
+            HttpLlmResponse httpLlmResponse = expectation.getHttpLlmResponse();
+            if (httpLlmResponse != null) {
+                this.httpLlmResponse = new HttpLlmResponseDTO(httpLlmResponse);
+            }
+            HttpWebSocketResponse httpWebSocketResponse = expectation.getHttpWebSocketResponse();
+            if (httpWebSocketResponse != null) {
+                this.httpWebSocketResponse = new HttpWebSocketResponseDTO(httpWebSocketResponse);
+            }
+            GrpcStreamResponse grpcStreamResponse = expectation.getGrpcStreamResponse();
+            if (grpcStreamResponse != null) {
+                this.grpcStreamResponse = new GrpcStreamResponseDTO(grpcStreamResponse);
+            }
+            GrpcBidiResponse grpcBidiResponse = expectation.getGrpcBidiResponse();
+            if (grpcBidiResponse != null) {
+                this.grpcBidiResponse = new GrpcBidiResponseDTO(grpcBidiResponse);
+            }
+            BinaryResponse binaryResponse = expectation.getBinaryResponse();
+            if (binaryResponse != null) {
+                this.binaryResponse = new BinaryResponseDTO(binaryResponse);
+            }
+            DnsResponse dnsResponse = expectation.getDnsResponse();
+            if (dnsResponse != null) {
+                this.dnsResponse = new DnsResponseDTO(dnsResponse);
+            }
+            HttpError httpError = expectation.getHttpError();
+            if (httpError != null) {
+                this.httpError = new HttpErrorDTO(httpError);
+            }
+            List<AfterAction> beforeActions = expectation.getBeforeActions();
+            if (beforeActions != null && !beforeActions.isEmpty()) {
+                this.beforeActions = beforeActions.stream().map(AfterActionDTO::new).collect(Collectors.toList());
+            }
+            List<AfterAction> afterActions = expectation.getAfterActions();
+            if (afterActions != null && !afterActions.isEmpty()) {
+                this.afterActions = afterActions.stream().map(AfterActionDTO::new).collect(Collectors.toList());
+            }
+            List<ExpectationStep> stepsList = expectation.getSteps();
+            if (stepsList != null && !stepsList.isEmpty()) {
+                this.steps = stepsList.stream().map(ExpectationStepDTO::new).collect(Collectors.toList());
+            }
+            List<HttpResponse> httpResponsesList = expectation.getHttpResponses();
+            if (httpResponsesList != null && !httpResponsesList.isEmpty()) {
+                this.httpResponses = httpResponsesList.stream().map(HttpResponseDTO::new).collect(Collectors.toList());
+            }
+            this.responseMode = expectation.getResponseMode();
+            List<Integer> responseWeightsList = expectation.getResponseWeights();
+            if (responseWeightsList != null && !responseWeightsList.isEmpty()) {
+                this.responseWeights = new java.util.ArrayList<>(responseWeightsList);
+            }
+            this.switchAfter = expectation.getSwitchAfter();
+            Times times = expectation.getTimes();
+            if (times != null) {
+                this.times = new org.mockserver.serialization.model.TimesDTO(times);
+            }
+            TimeToLive timeToLive = expectation.getTimeToLive();
+            if (timeToLive != null) {
+                this.timeToLive = new TimeToLiveDTO(timeToLive);
+            }
+            if (expectation.getNamespace() != null) {
+                this.namespace = expectation.getNamespace();
+            }
+            if (expectation.getScenarioName() != null) {
+                this.scenarioName = expectation.getScenarioName();
+            }
+            if (expectation.getScenarioState() != null) {
+                this.scenarioState = expectation.getScenarioState();
+            }
+            if (expectation.getNewScenarioState() != null) {
+                this.newScenarioState = expectation.getNewScenarioState();
+            }
+            if (expectation.getCrossProtocolScenarios() != null && !expectation.getCrossProtocolScenarios().isEmpty()) {
+                this.crossProtocolScenarios = expectation.getCrossProtocolScenarios();
+            }
+            List<CaptureRule> captureList = expectation.getCapture();
+            if (captureList != null && !captureList.isEmpty()) {
+                this.capture = captureList.stream().map(CaptureRuleDTO::new).collect(Collectors.toList());
+            }
+        }
+    }
+
+    public ExpectationDTO() {
+    }
+
+    public Expectation buildObject() {
+        RequestDefinition httpRequest = null;
+        HttpResponse httpResponse = null;
+        HttpTemplate httpResponseTemplate = null;
+        HttpClassCallback httpResponseClassCallback = null;
+        HttpObjectCallback httpResponseObjectCallback = null;
+        HttpForward httpForward = null;
+        HttpTemplate httpForwardTemplate = null;
+        HttpClassCallback httpForwardClassCallback = null;
+        HttpObjectCallback httpForwardObjectCallback = null;
+        HttpOverrideForwardedRequest httpOverrideForwardedRequest = null;
+        HttpForwardValidateAction httpForwardValidateAction = null;
+        HttpForwardWithFallback httpForwardWithFallback = null;
+        HttpSseResponse httpSseResponse = null;
+        HttpLlmResponse httpLlmResponse = null;
+        HttpWebSocketResponse httpWebSocketResponse = null;
+        GrpcStreamResponse grpcStreamResponse = null;
+        GrpcBidiResponse grpcBidiResponse = null;
+        BinaryResponse binaryResponse = null;
+        DnsResponse dnsResponse = null;
+        HttpError httpError = null;
+        Times times;
+        TimeToLive timeToLive;
+        int priority;
+        if (this.httpRequest != null) {
+            httpRequest = this.httpRequest.buildObject();
+        }
+        if (this.httpResponse != null) {
+            httpResponse = this.httpResponse.buildObject();
+        }
+        if (this.httpResponseTemplate != null) {
+            httpResponseTemplate = this.httpResponseTemplate.buildObject();
+        }
+        if (this.httpResponseClassCallback != null) {
+            httpResponseClassCallback = this.httpResponseClassCallback.buildObject();
+        }
+        if (this.httpResponseObjectCallback != null) {
+            httpResponseObjectCallback = this.httpResponseObjectCallback.buildObject();
+        }
+        if (this.httpForward != null) {
+            httpForward = this.httpForward.buildObject();
+        }
+        if (this.httpForwardTemplate != null) {
+            httpForwardTemplate = this.httpForwardTemplate.buildObject();
+        }
+        if (this.httpForwardClassCallback != null) {
+            httpForwardClassCallback = this.httpForwardClassCallback.buildObject();
+        }
+        if (this.httpForwardObjectCallback != null) {
+            httpForwardObjectCallback = this.httpForwardObjectCallback.buildObject();
+        }
+        if (this.httpOverrideForwardedRequest != null) {
+            httpOverrideForwardedRequest = this.httpOverrideForwardedRequest.buildObject();
+        }
+        if (this.httpForwardValidateAction != null) {
+            httpForwardValidateAction = this.httpForwardValidateAction.buildObject();
+        }
+        if (this.httpForwardWithFallback != null) {
+            httpForwardWithFallback = this.httpForwardWithFallback.buildObject();
+        }
+        if (this.httpSseResponse != null) {
+            httpSseResponse = this.httpSseResponse.buildObject();
+        }
+        if (this.httpLlmResponse != null) {
+            httpLlmResponse = this.httpLlmResponse.buildObject();
+        }
+        if (this.httpWebSocketResponse != null) {
+            httpWebSocketResponse = this.httpWebSocketResponse.buildObject();
+        }
+        if (this.grpcStreamResponse != null) {
+            grpcStreamResponse = this.grpcStreamResponse.buildObject();
+        }
+        if (this.grpcBidiResponse != null) {
+            grpcBidiResponse = this.grpcBidiResponse.buildObject();
+        }
+        if (this.binaryResponse != null) {
+            binaryResponse = this.binaryResponse.buildObject();
+        }
+        if (this.dnsResponse != null) {
+            dnsResponse = this.dnsResponse.buildObject();
+        }
+        if (this.httpError != null) {
+            httpError = this.httpError.buildObject();
+        }
+        List<AfterAction> beforeActionList = null;
+        if (this.beforeActions != null && !this.beforeActions.isEmpty()) {
+            beforeActionList = this.beforeActions.stream().map(AfterActionDTO::buildObject).collect(Collectors.toList());
+        }
+        List<AfterAction> afterActionList = null;
+        if (this.afterActions != null && !this.afterActions.isEmpty()) {
+            afterActionList = this.afterActions.stream().map(AfterActionDTO::buildObject).collect(Collectors.toList());
+        }
+        if (this.times != null) {
+            times = this.times.buildObject();
+        } else {
+            times = Times.unlimited();
+        }
+        if (this.timeToLive != null) {
+            timeToLive = this.timeToLive.buildObject();
+        } else {
+            timeToLive = TimeToLive.unlimited();
+        }
+        if (this.priority != null) {
+            priority = this.priority;
+        } else {
+            priority = 0;
+        }
+        Expectation expectation = new Expectation(httpRequest, times, timeToLive, priority)
+            .withId(this.id)
+            .withPercentage(this.percentage)
+            .withChaos(this.chaos != null ? this.chaos.buildObject() : null)
+            .withRateLimit(this.rateLimit != null ? this.rateLimit.buildObject() : null)
+            .withNamespace(this.namespace)
+            .withScenarioName(this.scenarioName)
+            .withScenarioState(this.scenarioState)
+            .withNewScenarioState(this.newScenarioState)
+            .thenRespond(httpResponse)
+            .thenRespond(httpResponseTemplate)
+            .thenRespond(httpResponseClassCallback)
+            .thenRespond(httpResponseObjectCallback)
+            .thenForward(httpForward)
+            .thenForward(httpForwardTemplate)
+            .thenForward(httpForwardClassCallback)
+            .thenForward(httpForwardObjectCallback)
+            .thenForward(httpOverrideForwardedRequest)
+            .thenForwardValidate(httpForwardValidateAction)
+            .thenForwardWithFallback(httpForwardWithFallback)
+            .thenRespondWithSse(httpSseResponse)
+            .thenRespondWithLlm(httpLlmResponse)
+            .thenRespondWithWebSocket(httpWebSocketResponse)
+            .thenRespondWithGrpcStream(grpcStreamResponse)
+            .thenRespondWithGrpcBidi(grpcBidiResponse)
+            .thenRespondWithBinary(binaryResponse)
+            .thenRespondWithDns(dnsResponse)
+            .thenError(httpError)
+            .withBeforeActions(beforeActionList)
+            .withAfterActions(afterActionList)
+            .withSteps(this.steps != null ? this.steps.stream().map(ExpectationStepDTO::buildObject).collect(Collectors.toList()) : null)
+            .thenRespond(this.httpResponses != null ? this.httpResponses.stream().map(HttpResponseDTO::buildObject).collect(Collectors.toList()) : null)
+            .withResponseMode(this.responseMode)
+            .withResponseWeights(this.responseWeights)
+            .withSwitchAfter(this.switchAfter)
+            .withCrossProtocolScenarios(this.crossProtocolScenarios)
+            .withCapture(this.capture != null ? this.capture.stream().map(CaptureRuleDTO::buildObject).collect(Collectors.toList()) : null);
+        if (this.crossProtocolScenarios != null) {
+            for (CrossProtocolScenario scenario : this.crossProtocolScenarios) {
+                CrossProtocolEventBus.getInstance().register(scenario);
+            }
+        }
+        return expectation;
+    }
+
+    public String getId() {
+        return id;
+    }
+
+    public ExpectationDTO setId(String id) {
+        this.id = id;
+        return this;
+    }
+
+    public Integer getPriority() {
+        return priority;
+    }
+
+    public ExpectationDTO setPriority(Integer priority) {
+        this.priority = priority;
+        return this;
+    }
+
+    public Integer getPercentage() {
+        return percentage;
+    }
+
+    public ExpectationDTO setPercentage(Integer percentage) {
+        this.percentage = percentage;
+        return this;
+    }
+
+    public HttpChaosProfileDTO getChaos() {
+        return chaos;
+    }
+
+    public ExpectationDTO setChaos(HttpChaosProfileDTO chaos) {
+        this.chaos = chaos;
+        return this;
+    }
+
+    public RateLimitDTO getRateLimit() {
+        return rateLimit;
+    }
+
+    public ExpectationDTO setRateLimit(RateLimitDTO rateLimit) {
+        this.rateLimit = rateLimit;
+        return this;
+    }
+
+    public RequestDefinitionDTO getHttpRequest() {
+        return httpRequest;
+    }
+
+    public ExpectationDTO setHttpRequest(RequestDefinitionDTO httpRequest) {
+        this.httpRequest = httpRequest;
+        return this;
+    }
+
+    public HttpResponseDTO getHttpResponse() {
+        return httpResponse;
+    }
+
+    public ExpectationDTO setHttpResponse(HttpResponseDTO httpResponse) {
+        this.httpResponse = httpResponse;
+        return this;
+    }
+
+    public HttpTemplateDTO getHttpResponseTemplate() {
+        return httpResponseTemplate;
+    }
+
+    public ExpectationDTO setHttpResponseTemplate(HttpTemplateDTO httpResponseTemplate) {
+        this.httpResponseTemplate = httpResponseTemplate;
+        return this;
+    }
+
+    public HttpClassCallbackDTO getHttpResponseClassCallback() {
+        return httpResponseClassCallback;
+    }
+
+    public ExpectationDTO setHttpResponseClassCallback(HttpClassCallbackDTO httpObjectCallback) {
+        this.httpResponseClassCallback = httpObjectCallback;
+        return this;
+    }
+
+    public HttpObjectCallbackDTO getHttpResponseObjectCallback() {
+        return httpResponseObjectCallback;
+    }
+
+    public ExpectationDTO setHttpResponseObjectCallback(HttpObjectCallbackDTO httpObjectCallback) {
+        this.httpResponseObjectCallback = httpObjectCallback;
+        return this;
+    }
+
+    public HttpForwardDTO getHttpForward() {
+        return httpForward;
+    }
+
+    public ExpectationDTO setHttpForward(HttpForwardDTO httpForward) {
+        this.httpForward = httpForward;
+        return this;
+    }
+
+    public HttpTemplateDTO getHttpForwardTemplate() {
+        return httpForwardTemplate;
+    }
+
+    public ExpectationDTO setHttpForwardTemplate(HttpTemplateDTO httpForwardTemplate) {
+        this.httpForwardTemplate = httpForwardTemplate;
+        return this;
+    }
+
+    public HttpClassCallbackDTO getHttpForwardClassCallback() {
+        return httpForwardClassCallback;
+    }
+
+    public ExpectationDTO setHttpForwardClassCallback(HttpClassCallbackDTO httpClassCallback) {
+        this.httpForwardClassCallback = httpClassCallback;
+        return this;
+    }
+
+    public HttpObjectCallbackDTO getHttpForwardObjectCallback() {
+        return httpForwardObjectCallback;
+    }
+
+    public ExpectationDTO setHttpForwardObjectCallback(HttpObjectCallbackDTO httpObjectCallback) {
+        this.httpForwardObjectCallback = httpObjectCallback;
+        return this;
+    }
+
+    public HttpOverrideForwardedRequestDTO getHttpOverrideForwardedRequest() {
+        return httpOverrideForwardedRequest;
+    }
+
+    public ExpectationDTO setHttpOverrideForwardedRequest(HttpOverrideForwardedRequestDTO httpOverrideForwardedRequest) {
+        this.httpOverrideForwardedRequest = httpOverrideForwardedRequest;
+        return this;
+    }
+
+    public HttpForwardValidateActionDTO getHttpForwardValidateAction() {
+        return httpForwardValidateAction;
+    }
+
+    public ExpectationDTO setHttpForwardValidateAction(HttpForwardValidateActionDTO httpForwardValidateAction) {
+        this.httpForwardValidateAction = httpForwardValidateAction;
+        return this;
+    }
+
+    public HttpForwardWithFallbackDTO getHttpForwardWithFallback() {
+        return httpForwardWithFallback;
+    }
+
+    public ExpectationDTO setHttpForwardWithFallback(HttpForwardWithFallbackDTO httpForwardWithFallback) {
+        this.httpForwardWithFallback = httpForwardWithFallback;
+        return this;
+    }
+
+    public HttpSseResponseDTO getHttpSseResponse() {
+        return httpSseResponse;
+    }
+
+    public ExpectationDTO setHttpSseResponse(HttpSseResponseDTO httpSseResponse) {
+        this.httpSseResponse = httpSseResponse;
+        return this;
+    }
+
+    public HttpLlmResponseDTO getHttpLlmResponse() {
+        return httpLlmResponse;
+    }
+
+    public ExpectationDTO setHttpLlmResponse(HttpLlmResponseDTO httpLlmResponse) {
+        this.httpLlmResponse = httpLlmResponse;
+        return this;
+    }
+
+    public HttpWebSocketResponseDTO getHttpWebSocketResponse() {
+        return httpWebSocketResponse;
+    }
+
+    public ExpectationDTO setHttpWebSocketResponse(HttpWebSocketResponseDTO httpWebSocketResponse) {
+        this.httpWebSocketResponse = httpWebSocketResponse;
+        return this;
+    }
+
+    public GrpcStreamResponseDTO getGrpcStreamResponse() {
+        return grpcStreamResponse;
+    }
+
+    public ExpectationDTO setGrpcStreamResponse(GrpcStreamResponseDTO grpcStreamResponse) {
+        this.grpcStreamResponse = grpcStreamResponse;
+        return this;
+    }
+
+    public GrpcBidiResponseDTO getGrpcBidiResponse() {
+        return grpcBidiResponse;
+    }
+
+    public ExpectationDTO setGrpcBidiResponse(GrpcBidiResponseDTO grpcBidiResponse) {
+        this.grpcBidiResponse = grpcBidiResponse;
+        return this;
+    }
+
+    public BinaryResponseDTO getBinaryResponse() {
+        return binaryResponse;
+    }
+
+    public ExpectationDTO setBinaryResponse(BinaryResponseDTO binaryResponse) {
+        this.binaryResponse = binaryResponse;
+        return this;
+    }
+
+    public DnsResponseDTO getDnsResponse() {
+        return dnsResponse;
+    }
+
+    public ExpectationDTO setDnsResponse(DnsResponseDTO dnsResponse) {
+        this.dnsResponse = dnsResponse;
+        return this;
+    }
+
+    public HttpErrorDTO getHttpError() {
+        return httpError;
+    }
+
+    public ExpectationDTO setHttpError(HttpErrorDTO httpError) {
+        this.httpError = httpError;
+        return this;
+    }
+
+    public org.mockserver.serialization.model.TimesDTO getTimes() {
+        return times;
+    }
+
+    public ExpectationDTO setTimes(org.mockserver.serialization.model.TimesDTO times) {
+        this.times = times;
+        return this;
+    }
+
+    public TimeToLiveDTO getTimeToLive() {
+        return timeToLive;
+    }
+
+    public ExpectationDTO setTimeToLive(TimeToLiveDTO timeToLive) {
+        this.timeToLive = timeToLive;
+        return this;
+    }
+
+    public List<AfterActionDTO> getBeforeActions() {
+        return beforeActions;
+    }
+
+    @JsonSetter("beforeActions")
+    public ExpectationDTO setBeforeActions(List<AfterActionDTO> beforeActions) {
+        this.beforeActions = beforeActions;
+        return this;
+    }
+
+    public List<AfterActionDTO> getAfterActions() {
+        return afterActions;
+    }
+
+    @JsonSetter("afterActions")
+    public ExpectationDTO setAfterActions(List<AfterActionDTO> afterActions) {
+        this.afterActions = afterActions;
+        return this;
+    }
+
+    public List<ExpectationStepDTO> getSteps() {
+        return steps;
+    }
+
+    @JsonSetter("steps")
+    public ExpectationDTO setSteps(List<ExpectationStepDTO> steps) {
+        this.steps = steps;
+        return this;
+    }
+
+    public List<HttpResponseDTO> getHttpResponses() {
+        return httpResponses;
+    }
+
+    @JsonSetter("httpResponses")
+    public ExpectationDTO setHttpResponses(List<HttpResponseDTO> httpResponses) {
+        this.httpResponses = httpResponses;
+        return this;
+    }
+
+    public ResponseMode getResponseMode() {
+        return responseMode;
+    }
+
+    public ExpectationDTO setResponseMode(ResponseMode responseMode) {
+        this.responseMode = responseMode;
+        return this;
+    }
+
+    public List<Integer> getResponseWeights() {
+        return responseWeights;
+    }
+
+    @JsonSetter("responseWeights")
+    public ExpectationDTO setResponseWeights(List<Integer> responseWeights) {
+        this.responseWeights = responseWeights;
+        return this;
+    }
+
+    public Integer getSwitchAfter() {
+        return switchAfter;
+    }
+
+    public ExpectationDTO setSwitchAfter(Integer switchAfter) {
+        this.switchAfter = switchAfter;
+        return this;
+    }
+
+    public String getNamespace() {
+        return namespace;
+    }
+
+    public ExpectationDTO setNamespace(String namespace) {
+        this.namespace = namespace;
+        return this;
+    }
+
+    public String getScenarioName() {
+        return scenarioName;
+    }
+
+    public ExpectationDTO setScenarioName(String scenarioName) {
+        this.scenarioName = scenarioName;
+        return this;
+    }
+
+    public String getScenarioState() {
+        return scenarioState;
+    }
+
+    public ExpectationDTO setScenarioState(String scenarioState) {
+        this.scenarioState = scenarioState;
+        return this;
+    }
+
+    public String getNewScenarioState() {
+        return newScenarioState;
+    }
+
+    public ExpectationDTO setNewScenarioState(String newScenarioState) {
+        this.newScenarioState = newScenarioState;
+        return this;
+    }
+
+    public List<CrossProtocolScenario> getCrossProtocolScenarios() {
+        return crossProtocolScenarios;
+    }
+
+    @JsonSetter("crossProtocolScenarios")
+    public ExpectationDTO setCrossProtocolScenarios(List<CrossProtocolScenario> crossProtocolScenarios) {
+        this.crossProtocolScenarios = crossProtocolScenarios;
+        return this;
+    }
+
+    public List<CaptureRuleDTO> getCapture() {
+        return capture;
+    }
+
+    @JsonSetter("capture")
+    public ExpectationDTO setCapture(List<CaptureRuleDTO> capture) {
+        this.capture = capture;
+        return this;
+    }
+
+    @Override
+    @JsonIgnore
+    public String[] fieldsExcludedFromEqualsAndHashCode() {
+        return excludedFields;
+    }
+}

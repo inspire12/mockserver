@@ -1,0 +1,216 @@
+# Website accordions whose .NET tab is allowed to differ from the REST API tab.
+# Same format and rules as allowlist.yml (the Ruby tabs): key, the finding
+# it accepts (status), a reason, and the digest the check prints. Any other
+# finding fails the check, and so does an entry that no longer matches.
+#   ruby spec/website_examples/check_website_examples.rb --lang csharp --verbose
+
+# --- Same as the Ruby tab ---
+mock_server/_includes/grpc_mocking.html#button_grpc_record_replay:
+  status: differs
+  digest: d7e5cdb560d3
+  reason: ".NET replays the expectations it retrieved; the REST API tab saves them
+    to a file and uploads that file."
+mock_server/_includes/load_scenario_code_examples.html#button_load_lifecycle:
+  status: differs
+  digest: d453933386c4
+  reason: ".NET also clears the scenario registry at the end; the REST API tab stops
+    at stop."
+mock_server/_includes/load_scenario_code_examples.html#button_load_rate_soak:
+  status: differs
+  digest: 2a7637c5dc46
+  reason: ".NET also stops the scenario after starting it; the REST API tab registers
+    and starts it."
+mock_server/_includes/load_scenario_code_examples.html#button_load_vu_ramp:
+  status: differs
+  digest: 4f98da7d9e08
+  reason: ".NET also stops the scenario after starting it; the REST API tab registers
+    and starts it."
+mock_server/_includes/openapi_request_matcher_code_examples.html#button_match_by_inline_openapi_json:
+  status: rest_invalid_json
+  digest: 3fda2f398375
+  reason: One REST API tab splices the spec in with a shell backtick cat, which is
+    not JSON as written; .NET reads the spec from a file.
+? mock_server/_includes/stateful_scenarios.html#external_trigger_mdash_flip_a_dependency_from_healthy_to_down_on_demand_from_your_test_harness
+: status: differs
+  digest: 9e853dd5de24
+  reason: ".NET, like the Java tab, shows only the trigger call; the REST API tab
+    also registers the expectations it relies on."
+? mock_server/_includes/stateful_scenarios.html#timed_auto_transition_mdash_model_a_deployment_that_automatically_completes_after_1_second
+: status: differs
+  digest: 5135518949b0
+  reason: ".NET, like the Java tab, shows only the scenario call; the REST API tab
+    also registers the expectations it relies on."
+mock_server/contract_testing.html#button_pact_full_workflow:
+  status: differs
+  digest: 81612ff860c6
+  reason: The REST API tab adds an expectation id and a JSON-object body and reads
+    the contract from a file; .NET follows the Java tab and passes the exported contract
+    on.
+mock_server/load_injection.html#button_load_step_checks:
+  status: differs
+  digest: 4c663b38bea8
+  reason: ".NET also stops the scenario after starting it; the REST API tab registers
+    and starts it."
+mock_server/load_injection.html#in_run_thresholds_fail_the_run_on_a_latency_or_error_budget_breach:
+  status: differs
+  digest: 31686a71eb8b
+  reason: ".NET reads the status once; the REST API tab polls it in a shell loop."
+mock_server/mock_openid_connect_provider.html#button_create_oidc_provider:
+  status: differs
+  digest: 665743e62ea3
+  reason: The REST API tab shows a defaults call and then a configured call; .NET
+    shows the configured one.
+mock_server/using_openapi.html#button_wsdl_inline:
+  status: differs
+  digest: b996b93a35f3
+  reason: The REST API tab abbreviates the WSDL document with "..."; .NET sends it
+    in full.
+
+# --- Intentional: the tab shows the same feature another way ---
+mock_server/_includes/response_action_code_examples.html#button_response_literal_binary_PNG_body:
+  status: differs
+  digest: a9cb6d35fbc3
+  reason: The .NET tab abbreviates the PNG's base64 to its first characters; the REST
+    API tab inlines the whole image.
+mock_server/_includes/response_action_code_examples.html#button_response_recover_after_fail_then_succeed:
+  status: does_not_compile
+  digest: e3cafacbe0ef
+  reason: The tab holds two separate programs; the check joins a tab into one program,
+    which redeclares their names.
+mock_server/_includes/retrieve_code_example.html#button_retrieve_all_recorded_req_res:
+  status: differs
+  digest: bd58d7f98773
+  reason: The .NET client has no request-and-response retrieve, so the tab retrieves
+    requests and says to use the REST API for pairs.
+mock_server/_includes/stateful_scenarios.html#rest_api_reference_mdash_inspect_and_control_scenarios_with_curl:
+  status: differs
+  digest: 5f0cf6f1da06
+  reason: ".NET makes the same calls but lists all scenarios last; the REST API tab
+    lists them first."
+mock_server/load_injection.html#cross_step_capture_login_capture_a_token_reuse_it:
+  status: differs
+  digest: 77fe6b4910fb
+  reason: ".NET sends the login body as a JSON string; the REST API tab as a JSON
+    object. A load step sends the same bytes either way."
+mock_server/load_injection.html#register_start_read_status_then_stop_a_ramp_then_hold_scenario:
+  status: differs
+  digest: 4dc640b80414
+  reason: ".NET reads the scenario status and stops it with its own calls; the REST
+    API tab reads and stops by path (same calls, other order)."
+mock_server/running_tests_in_parallel.html#button_parallel_tests_unique_session_id:
+  status: differs
+  digest: a52815ca8944
+  reason: ".NET generates a fresh session id with Guid.NewGuid(); the REST API tab
+    shows a fixed one."
+
+# --- The check cannot run it ---
+mock_server/CORS_support.html#button_enabled_permissive_cors_for_all_response:
+  status: raised
+  digest: ccfe1dd014fd
+  reason: ".NET starts a server with the CORS properties (the binary launcher, which
+    would download the server); the REST API tab sets them on a running server."
+mock_server/CORS_support.html#button_enabled_permissive_cors_for_control_plane_api:
+  status: raised
+  digest: ccfe1dd014fd
+  reason: ".NET starts a server with the CORS properties (the binary launcher, which
+    would download the server); the REST API tab sets them on a running server."
+mock_server/HTTPS_TLS.html#button_client_mtls_connection:
+  status: raised
+  digest: 7a60944c3fb4
+  reason: Connects over mutual TLS with certificate files at placeholder paths (/path/to/...);
+    the check runs a plain HTTP capture server.
+mock_server/_includes/openapi_request_matcher_code_examples.html#button_match_by_inline_openapi_yaml:
+  status: raised
+  digest: 7a60944c3fb4
+  reason: ".NET reads the YAML spec from a placeholder path (/path/to/...); the REST
+    API tab inlines it."
+mock_server/interactive_breakpoints.html#button_breakpoint_client_api:
+  status: raised
+  digest: a86ddfd46718
+  reason: Opens the breakpoint WebSocket first, which the check does not serve, so
+    nothing is registered.
+mock_server/mockserver_clients.html#button_client_create_expectation_over_tls:
+  status: raised
+  digest: a625ed4216a2
+  reason: Connects over TLS; the check runs a plain HTTP capture server, so the TLS
+    handshake never completes.
+mock_server/using_openapi.html#button_open_api_inline_json_specification:
+  status: raised
+  digest: 7a60944c3fb4
+  reason: ".NET reads the spec from a placeholder path (/path/to/...); the REST API
+    tab splices it in with a shell backtick command."
+mock_server/using_openapi.html#button_wsdl_file:
+  status: raised
+  digest: 7a60944c3fb4
+  reason: ".NET reads the WSDL from a placeholder path (/path/to/...); the REST API
+    tab sends it from a file with -d @."
+
+# --- Not compared ---
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_basic:
+  status: not_compared
+  digest: a4165c7f5d9f
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_handlers:
+  status: not_compared
+  digest: 57bcea23fc1c
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_push:
+  status: not_compared
+  digest: 26eff6df91a9
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_streaming:
+  status: not_compared
+  digest: 407694163f38
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_workflow:
+  status: not_compared
+  digest: ea19ee6d93d4
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_mcp_full:
+  status: not_compared
+  digest: 642cb473d8fd
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_mcp_prompts:
+  status: not_compared
+  digest: e083b13ff5b4
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_mcp_resources:
+  status: not_compared
+  digest: b9e0e5a6c16b
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_mcp_tools:
+  status: not_compared
+  digest: 158a6aa187f8
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/creating_expectations.html#tabs-1:
+  status: not_compared
+  digest: c08bae0fcc09
+  reason: These language tabs have no REST API tab to compare with.
+mock_server/drift_detection.html#tabs-1:
+  status: not_compared
+  digest: 709073c5b0d2
+  reason: These language tabs have no REST API tab to compare with.
+mock_server/drift_detection.html#tabs-2:
+  status: not_compared
+  digest: d8a541944a67
+  reason: These language tabs have no REST API tab to compare with.
+mock_server/mock_openid_connect_provider.html#button_device_flow:
+  status: not_compared
+  digest: d833ff36b6cb
+  reason: The REST API tab calls the mocked OIDC endpoints, not /mockserver/.
+mock_server/mock_openid_connect_provider.html#button_introspect_token:
+  status: not_compared
+  digest: 5e41672d2802
+  reason: The REST API tab calls the mocked OIDC endpoints, not /mockserver/.
+mock_server/mockserver_clients.html#loose-0b82426148df:
+  status: not_compared
+  digest: 0b82426148df
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/mockserver_clients.html#loose-c633344e146a:
+  status: not_compared
+  digest: c633344e146a
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/mockserver_testcontainers.html#loose-46445e783ca4:
+  status: not_compared
+  digest: 46445e783ca4
+  reason: Outside any accordion, so there is no REST API tab to compare with.

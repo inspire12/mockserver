@@ -1,0 +1,532 @@
+package org.mockserver.validator.jsonschema;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.google.common.base.Joiner;
+import com.google.common.hash.Hashing;
+import com.networknt.schema.AbsoluteIri;
+import com.networknt.schema.Error;
+import com.networknt.schema.InputFormat;
+import com.networknt.schema.Schema;
+import com.networknt.schema.SchemaRegistry;
+import com.networknt.schema.SchemaRegistryConfig;
+import com.networknt.schema.SpecificationVersion;
+import com.networknt.schema.path.PathType;
+import org.apache.commons.lang3.StringUtils;
+import org.mockserver.cache.LRUCache;
+import org.mockserver.file.FileReader;
+import org.mockserver.log.model.LogEntry;
+import org.mockserver.logging.MockServerLogger;
+import org.mockserver.model.ObjectWithReflectiveEqualsHashCodeToString;
+import org.mockserver.model.RequestDefinition;
+import org.mockserver.serialization.ObjectMapperFactory;
+import org.mockserver.validator.Validator;
+import org.mockserver.version.Version;
+import org.slf4j.event.Level;
+
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
+
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.mockserver.character.Character.NEW_LINE;
+
+/**
+ * @author jamesdbloom
+ */
+public class JsonSchemaValidator extends ObjectWithReflectiveEqualsHashCodeToString implements Validator<String> {
+
+    public static final String OPEN_API_SPECIFICATION_URL = "OpenAPI Specification: https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/" + Version.getMajorMinorVersion() + ".x" + NEW_LINE +
+        "Documentation: https://mock-server.com/mock_server/creating_expectations.html";
+
+    /**
+     * System property opt-in to allow remote {@code $ref} resolution in JSON schemas.
+     * <p>
+     * SECURITY: by default MockServer blocks resolution of remote {@code $ref}s
+     * (http, https, ftp and external file URIs) when matching a request/response body
+     * against a JSON Schema, to avoid an SSRF / unexpected-network-fetch risk where a
+     * schema could cause the server to fetch arbitrary external resources. Schemas that
+     * use only internal references ({@code #/...}) and inline definitions are unaffected.
+     * <p>
+     * Set {@code -Dmockserver.jsonSchemaAllowRemoteRefs=true} to opt in to remote
+     * {@code $ref} resolution for the rare case where it is genuinely required.
+     */
+    public static final String JSON_SCHEMA_ALLOW_REMOTE_REFS_PROPERTY = "mockserver.jsonSchemaAllowRemoteRefs";
+    private static final Map<String, String> schemaCache = new ConcurrentHashMap<>();
+    // using draft 07 as default due to TLS issues downloading draft 2019-09 which causes errors
+    private static final SpecificationVersion DEFAULT_JSON_SCHEMA_VERSION = SpecificationVersion.DRAFT_7;
+    private final MockServerLogger mockServerLogger;
+    private final Class<?> type;
+    private final String schema;
+    private final JsonNode schemaJsonNode;
+    private Schema validator;
+    private final static ObjectMapper OBJECT_MAPPER = ObjectMapperFactory.createObjectMapper();
+
+    /**
+     * Immutable, thread-safe holder for the result of compiling a schema once: the resolved schema
+     * string, its parsed {@link JsonNode}, and the compiled networknt {@link Schema}. A networknt
+     * {@link Schema} is immutable and safe for concurrent {@code validate} calls, so a single holder
+     * can be shared across request threads. Caching this holder — rather than a whole
+     * {@link JsonSchemaValidator} — keeps each request's validator instance (and therefore its
+     * {@code mockServerLogger} and the post-construction {@code validator}-field reassignment in the
+     * rare "Unknown MetaSchema" recovery branch) thread-confined, so cached reuse is byte-for-byte
+     * equivalent to constructing a fresh validator per request.
+     */
+    private static final class CompiledSchema {
+        private final String schema;
+        private final JsonNode schemaJsonNode;
+        private final Schema validator;
+
+        private CompiledSchema(String schema, JsonNode schemaJsonNode, Schema validator) {
+            this.schema = schema;
+            this.schemaJsonNode = schemaJsonNode;
+            this.validator = validator;
+        }
+    }
+
+    /**
+     * Caches the compiled-schema holder keyed by the SHA-256 of the schema JSON. Compiling a networknt
+     * {@link Schema}/{@link SchemaRegistry} is expensive and allocation-heavy and was previously
+     * repeated per request on the OpenAPI request/response validation hot path even though the
+     * operation schema never changes. Keying by schema <em>content</em> (not operationId/spec) means
+     * identical schemas — within one spec or across specs — share a single compilation with no
+     * cross-spec collisions. The cache is bounded (250 entries / 30 minute TTL, matching
+     * {@code OpenAPIParser}), thread-safe, and participates in {@link LRUCache#clearAllCaches()}.
+     */
+    private final static LRUCache<String, CompiledSchema> COMPILED_SCHEMA_CACHE =
+        new LRUCache<>(new MockServerLogger(), 250, java.util.concurrent.TimeUnit.MINUTES.toMillis(30));
+
+    /**
+     * Returns a {@link JsonSchemaValidator} for {@code schemaJson} that reuses a cached one-time
+     * compilation of the schema when the same content has been seen before. The returned validator is
+     * behaviour-identical to {@code new JsonSchemaValidator(logger, schemaJson)} for the same input —
+     * same validation outcomes and error messages, the caller's own {@code logger}, and an independent
+     * per-call instance — only the expensive {@code Schema}/{@code SchemaRegistry} compilation is
+     * elided on a cache hit. Intended for the per-request OpenAPI validation path.
+     */
+    public static JsonSchemaValidator cachedJsonSchemaValidator(MockServerLogger mockServerLogger, String schemaJson) {
+        String key = Hashing.sha256().hashString(schemaJson, java.nio.charset.StandardCharsets.UTF_8).toString();
+        CompiledSchema compiled = COMPILED_SCHEMA_CACHE.getOrCompute(key, k -> {
+            // compile exactly as the (MockServerLogger, String) constructor does — same resolution,
+            // same registry selection, same getSchema call — but store the result for reuse. A detached
+            // logger is used only for any compile-time logging; per-call validation logging still uses
+            // the caller's logger via the wrapper instance below.
+            JsonSchemaValidator built = new JsonSchemaValidator(new MockServerLogger(), schemaJson);
+            return new CompiledSchema(built.schema, built.schemaJsonNode, built.validator);
+        });
+        // wrap a fresh, thread-confined instance around the shared immutable compilation, carrying the
+        // caller's logger so error-log routing is identical to constructing a validator per request
+        return new JsonSchemaValidator(mockServerLogger, compiled);
+    }
+
+    private JsonSchemaValidator(MockServerLogger mockServerLogger, CompiledSchema compiled) {
+        this.mockServerLogger = mockServerLogger;
+        this.type = null;
+        this.schema = compiled.schema;
+        this.schemaJsonNode = compiled.schemaJsonNode;
+        this.validator = compiled.validator;
+    }
+
+    /**
+     * A validator of {@code compiled}'s schema that logs to {@code mockServerLogger}, sharing {@code compiled}'s
+     * compilation.
+     */
+    protected JsonSchemaValidator(JsonSchemaValidator compiled, MockServerLogger mockServerLogger) {
+        this.mockServerLogger = mockServerLogger;
+        this.type = compiled.type;
+        this.schema = compiled.schema;
+        this.schemaJsonNode = compiled.schemaJsonNode;
+        this.validator = compiled.validator;
+    }
+
+    public JsonSchemaValidator(MockServerLogger mockServerLogger, String schema) {
+        this.mockServerLogger = mockServerLogger;
+        this.type = null;
+        if (schema.trim().endsWith(".json")) {
+            this.schema = FileReader.readFileFromClassPathOrPath(schema);
+        } else if (schema.trim().endsWith("}")) {
+            this.schema = schema;
+        } else {
+            throw new IllegalArgumentException("Schema must either be a path reference to a *.json file or a json string");
+        }
+        this.schemaJsonNode = getSchemaJsonNode();
+        this.validator = getSchemaRegistry(this.schemaJsonNode).getSchema(this.schema, InputFormat.JSON);
+    }
+
+    public JsonSchemaValidator(MockServerLogger mockServerLogger, String schema, JsonNode schemaJsonNode) {
+        this.mockServerLogger = mockServerLogger;
+        this.type = null;
+        this.schema = schema;
+        this.schemaJsonNode = schemaJsonNode;
+        // use the pre-parsed JsonNode serialized to strict JSON for schema loading,
+        // because the raw schema string may contain non-JSON prefixes (e.g. "!" for notted schemas)
+        String schemaJson = schemaJsonNode != null ? schemaJsonNode.toString() : this.schema;
+        this.validator = getSchemaRegistry(this.schemaJsonNode).getSchema(schemaJson, InputFormat.JSON);
+    }
+
+    public JsonSchemaValidator(MockServerLogger mockServerLogger, Class<?> type, String routePath, String mainSchemeFile, String... referenceFiles) {
+        this.mockServerLogger = mockServerLogger;
+        this.type = type;
+        if (!schemaCache.containsKey(mainSchemeFile)) {
+            schemaCache.put(mainSchemeFile, addReferencesIntoSchema(routePath, mainSchemeFile, referenceFiles));
+        }
+        this.schema = schemaCache.get(mainSchemeFile);
+        this.schemaJsonNode = getSchemaJsonNode();
+        this.validator = getSchemaRegistry(this.schemaJsonNode).getSchema(this.schema, InputFormat.JSON);
+    }
+
+    private static final SchemaRegistryConfig SCHEMA_REGISTRY_CONFIG = SchemaRegistryConfig.builder()
+        .pathType(PathType.JSON_PATH)
+        .build();
+
+    private SchemaRegistry getSchemaRegistry(JsonNode schema) {
+        if (schema != null) {
+            JsonNode metaSchema = schema.get("$schema");
+            if (metaSchema != null) {
+                String metaSchemaValue = metaSchema.textValue();
+                if (isNotBlank(metaSchemaValue)) {
+                    return getSchemaRegistry(metaSchemaValue);
+                }
+            }
+        }
+        return createSchemaRegistry(DEFAULT_JSON_SCHEMA_VERSION);
+    }
+
+    private SchemaRegistry getSchemaRegistry(String metaSchemaValue) {
+        if (metaSchemaValue.contains("draft-03") || metaSchemaValue.contains("draft-04")) {
+            return createSchemaRegistry(SpecificationVersion.DRAFT_4);
+        } else if (metaSchemaValue.contains("draft-05") || metaSchemaValue.contains("draft-06")) {
+            return createSchemaRegistry(SpecificationVersion.DRAFT_6);
+        } else if (metaSchemaValue.contains("draft-07")) {
+            return createSchemaRegistry(SpecificationVersion.DRAFT_7);
+        } else if (metaSchemaValue.contains("draft/2019-09")) {
+            return createSchemaRegistry(SpecificationVersion.DRAFT_2019_09);
+        }
+        return createSchemaRegistry(DEFAULT_JSON_SCHEMA_VERSION);
+    }
+
+    // SECURITY: schemes that the IriResourceLoader would fetch over the network or from
+    // the local filesystem. Blocking these prevents a schema $ref from triggering an
+    // outbound request (SSRF) or reading an arbitrary local file during body matching.
+    private static final Set<String> BLOCKED_REF_SCHEMES = new HashSet<>(Arrays.asList(
+        "http", "https", "ftp", "ftps", "file", "jar"
+    ));
+
+    /**
+     * Whether remote {@code $ref} resolution is currently permitted, read at
+     * validator-build time from {@link #JSON_SCHEMA_ALLOW_REMOTE_REFS_PROPERTY}.
+     */
+    static boolean isRemoteRefsAllowed() {
+        return Boolean.parseBoolean(System.getProperty(JSON_SCHEMA_ALLOW_REMOTE_REFS_PROPERTY, "false"));
+    }
+
+    private static SchemaRegistry createSchemaRegistry(SpecificationVersion version) {
+        final boolean allowRemoteRefs = isRemoteRefsAllowed();
+        return SchemaRegistry.withDefaultDialect(version, builder -> {
+            builder.schemaRegistryConfig(SCHEMA_REGISTRY_CONFIG);
+            if (allowRemoteRefs) {
+                // opt-in: register the IriResourceLoader so remote/file $refs are fetched
+                builder.schemaLoader(schemaLoader -> schemaLoader.fetchRemoteResources());
+            } else {
+                // secure default: never fetch remote/file $refs. The networknt default
+                // SchemaLoader already omits the IriResourceLoader, but we also install an
+                // explicit block predicate so any remote/external-file $ref is rejected with
+                // a clear error (treated as unresolved) rather than silently fetched — this
+                // keeps the control independent of the library's default behaviour.
+                builder.schemaLoader(schemaLoader -> schemaLoader.block(JsonSchemaValidator::isRemoteRef));
+            }
+        });
+    }
+
+    private static boolean isRemoteRef(AbsoluteIri absoluteIri) {
+        if (absoluteIri == null) {
+            return false;
+        }
+        String scheme = absoluteIri.getScheme();
+        if (scheme == null || !BLOCKED_REF_SCHEMES.contains(scheme.toLowerCase(Locale.ROOT))) {
+            return false;
+        }
+        // The standard JSON Schema meta-schemas (e.g. http(s)://json-schema.org/draft-07/schema)
+        // are NOT fetched over the network — the library re-maps them to bundled classpath
+        // resources — so they must not be blocked or all validation would fail.
+        String iri = absoluteIri.toString().toLowerCase(Locale.ROOT);
+        return !iri.startsWith("http://json-schema.org/") && !iri.startsWith("https://json-schema.org/");
+    }
+
+    private JsonNode getSchemaJsonNode() {
+        try {
+            return OBJECT_MAPPER.readTree(this.schema);
+        } catch (Throwable throwable) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.ERROR)
+                    .setMessageFormat("exception loading JSON Schema " + throwable.getMessage())
+                    .setThrowable(throwable)
+            );
+            throw new RuntimeException("Unable to parse JSON schema", throwable);
+        }
+    }
+
+    public String getSchema() {
+        return schema;
+    }
+
+    private String addReferencesIntoSchema(String routePath, String mainSchemeFile, String... referenceFiles) {
+        String combinedSchema = "";
+        try {
+            ObjectMapper objectMapper = ObjectMapperFactory.createObjectMapper();
+            JsonNode jsonSchema = objectMapper.readTree(FileReader.readFileFromClassPathOrPath(routePath + mainSchemeFile + ".json"));
+            JsonNode definitions = jsonSchema.get("definitions");
+            if (definitions instanceof ObjectNode) {
+                for (String definitionName : referenceFiles) {
+                    JsonNode definition = objectMapper.readTree(FileReader.readFileFromClassPathOrPath(routePath + definitionName + ".json"));
+                    ((ObjectNode) definitions).set(
+                        definitionName,
+                        definition
+                    );
+                    if (definition != null && definition.get("definitions") != null) {
+                        definition.get("definitions").properties()
+                            .forEach(stringJsonNodeEntry -> ((ObjectNode) definitions).set(stringJsonNodeEntry.getKey(), stringJsonNodeEntry.getValue()));
+                    }
+                }
+            }
+            combinedSchema = ObjectMapperFactory
+                .createObjectMapper(true, false)
+                .writeValueAsString(jsonSchema);
+        } catch (Throwable throwable) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.ERROR)
+                    .setMessageFormat("exception loading JSON Schema " + throwable.getMessage())
+                    .setThrowable(throwable)
+            );
+        }
+        return combinedSchema;
+    }
+
+    @Override
+    public String isValid(String json) {
+        return isValid(json, true);
+    }
+
+    public String isValid(String json, boolean addOpenAPISpecificationMessage) {
+        return isValid(json, addOpenAPISpecificationMessage, true);
+    }
+
+    /**
+     * @param allowMetaSchemaRetry when true, a one-shot "Unknown MetaSchema" failure rebuilds the
+     *                             validator against the dialect named in the error and retries exactly
+     *                             once (with this flag false), so a retry that also fails propagates
+     *                             instead of recursing unboundedly.
+     */
+    private String isValid(String json, boolean addOpenAPISpecificationMessage, boolean allowMetaSchemaRetry) {
+        String validationResult = "";
+        if (isNotBlank(json)) {
+            try {
+                // parse with MockServer's lenient ObjectMapper (unquoted fields, comments, etc.)
+                // then serialize back to strict JSON for the json-schema-validator 3.x parser
+                String strictJson = OBJECT_MAPPER.writeValueAsString(OBJECT_MAPPER.readTree(json));
+                validationResult = formatProcessingReport(validator.validate(strictJson, InputFormat.JSON), addOpenAPISpecificationMessage);
+            } catch (Throwable throwable) {
+                if (allowMetaSchemaRetry && isNotBlank(throwable.getMessage()) && throwable.getMessage().contains("Unknown MetaSchema")) {
+                    validator = getSchemaRegistry(throwable.getMessage()).getSchema(this.schema, InputFormat.JSON);
+                    return isValid(json, addOpenAPISpecificationMessage, false);
+                }
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.ERROR)
+                        .setMessageFormat("exception validating JSON")
+                        .setThrowable(throwable)
+                );
+                return throwable.getClass().getSimpleName() + " - " + throwable.getMessage();
+            }
+        }
+        return validationResult;
+    }
+
+    // json-schema-validator 1.5.x reworded several validation messages; translate them back
+    // to the 1.0.x wording so consumer-visible error text and the downstream message massaging
+    // below stay unchanged. Pure rewording — no information gained or lost.
+    private static String normalizeValidationMessageFormat(String text) {
+        text = text.replaceFirst(
+            "(\\$[^:]*): property '([^']+)' is not defined in the schema and the schema does not allow additional properties",
+            "$1.$2: is not defined in the schema and the schema does not allow additional properties"
+        );
+        text = text.replaceFirst(
+            "(\\$[^:]*): required property '([^']+)' not found",
+            "$1.$2: is missing but it is required"
+        );
+        text = text.replace("must be valid to one and only one schema", "should be valid to one and only one schema");
+        return text;
+    }
+
+    private String formatProcessingReport(List<Error> validationMessages, boolean addOpenAPISpecificationMessage) {
+        if (validationMessages.isEmpty()) {
+            return "";
+        } else {
+            Set<String> extraMessages = new HashSet<>();
+            Set<String> formattedMessages = validationMessages
+                .stream()
+                .map(validationMessage -> {
+                    String validationMessageText = normalizeValidationMessageFormat(String.valueOf(validationMessage));
+                    if (((validationMessageText.startsWith("$.httpRequest") && validationMessageText.contains(".body: ")) || validationMessageText.contains("$.body: "))
+                    && !validationMessageText.contains("is not defined in the schema and the schema does not allow additional properties")) {
+                        return StringUtils.substringBefore(validationMessageText, ":") + ": should match one of its valid types: " + FileReader.readFileFromClassPathOrPath("org/mockserver/model/schema/body.json")
+                            .replaceAll("#/definitions/draft-07", "http://json-schema.org/draft-07/schema")
+                            .replaceAll(NEW_LINE, NEW_LINE + "   ");
+                    }
+                    if (validationMessageText.contains(".specUrlOrPayload: is missing but it is required")) {
+                        return StringUtils.substringBefore(validationMessageText, ":") + ": is missing, but is required, if specifying OpenAPI request matcher";
+                    }
+                    if (validationMessageText.startsWith("$.httpResponse.body: ")) {
+                        return "$.httpResponse.body: should match one of its valid types: " + FileReader.readFileFromClassPathOrPath("org/mockserver/model/schema/bodyWithContentType.json")
+                            .replaceAll(NEW_LINE, NEW_LINE + "   ");
+                    }
+                    if (validationMessageText.contains(".httpRequest") || RequestDefinition.class.equals(type)) {
+                        if (validationMessageText.contains(".secure: is not defined in the schema and the schema does not allow additional properties") ||
+                            validationMessageText.contains(".keepAlive: is not defined in the schema and the schema does not allow additional properties") ||
+                            validationMessageText.contains(".method: is not defined in the schema and the schema does not allow additional properties") ||
+                            validationMessageText.contains(".path: is not defined in the schema and the schema does not allow additional properties") ||
+                            validationMessageText.contains(".pathParameters: is not defined in the schema and the schema does not allow additional properties") ||
+                            validationMessageText.contains(".queryStringParameters: is not defined in the schema and the schema does not allow additional properties") ||
+                            validationMessageText.contains(".body: is not defined in the schema and the schema does not allow additional properties") ||
+                            validationMessageText.contains(".headers: is not defined in the schema and the schema does not allow additional properties") ||
+                            validationMessageText.contains(".cookies: is not defined in the schema and the schema does not allow additional properties") ||
+                            validationMessageText.contains(".socketAddress: is not defined in the schema and the schema does not allow additional properties") ||
+                            validationMessageText.contains(".localAddress: is not defined in the schema and the schema does not allow additional properties") ||
+                            validationMessageText.contains(".remoteAddress: is not defined in the schema and the schema does not allow additional properties") ||
+                            validationMessageText.contains(".specUrlOrPayload: is not defined in the schema and the schema does not allow additional properties") ||
+                            validationMessageText.contains(".operationId: is not defined in the schema and the schema does not allow additional properties")) {
+                            return null;
+                        }
+                    }
+                    if (validationMessageText.endsWith("cookies: object found, array expected")) {
+                        return StringUtils.substringBefore(validationMessageText, ":") + ": invalid cookie format, the following are valid examples: " + NEW_LINE +
+                            "  " + NEW_LINE +
+                            "     {" + NEW_LINE +
+                            "         \"exampleRegexCookie\": \"^some +regex$\", " + NEW_LINE +
+                            "         \"exampleNottedRegexCookie\": \"!notThisValue\", " + NEW_LINE +
+                            "         \"exampleSimpleStringCookie\": \"simpleStringMatch\"" + NEW_LINE +
+                            "     }" + NEW_LINE +
+                            "  " + NEW_LINE +
+                            "  or:" + NEW_LINE +
+                            "  " + NEW_LINE +
+                            "     {" + NEW_LINE +
+                            "         \"exampleNumberSchemaCookie\": {" + NEW_LINE +
+                            "             \"type\": \"number\"" + NEW_LINE +
+                            "         }, " + NEW_LINE +
+                            "         \"examplePatternSchemaCookie\": {" + NEW_LINE +
+                            "             \"type\": \"string\", " + NEW_LINE +
+                            "             \"pattern\": \"^some regex$\"" + NEW_LINE +
+                            "         }, " + NEW_LINE +
+                            "         \"exampleFormatSchemaCookie\": {" + NEW_LINE +
+                            "             \"type\": \"string\", " + NEW_LINE +
+                            "             \"format\": \"ipv4\"" + NEW_LINE +
+                            "         }" + NEW_LINE +
+                            "     }";
+                    }
+                    if (validationMessageText.endsWith("headers: object found, array expected")) {
+                        return StringUtils.substringBefore(validationMessageText, ":") + ": invalid header format, the following are valid examples: " + NEW_LINE +
+                            "  " + NEW_LINE +
+                            "     {" + NEW_LINE +
+                            "         \"exampleRegexHeader\": [" + NEW_LINE +
+                            "             \"^some +regex$\"" + NEW_LINE +
+                            "         ], " + NEW_LINE +
+                            "         \"exampleNottedAndSimpleStringHeader\": [" + NEW_LINE +
+                            "             \"!notThisValue\", " + NEW_LINE +
+                            "             \"simpleStringMatch\"" + NEW_LINE +
+                            "         ]" + NEW_LINE +
+                            "     }" + NEW_LINE +
+                            "  " + NEW_LINE +
+                            "  or:" + NEW_LINE +
+                            "  " + NEW_LINE +
+                            "     {" + NEW_LINE +
+                            "         \"exampleSchemaHeader\": [" + NEW_LINE +
+                            "             {" + NEW_LINE +
+                            "                 \"type\": \"number\"" + NEW_LINE +
+                            "             }" + NEW_LINE +
+                            "         ], " + NEW_LINE +
+                            "         \"exampleMultiSchemaHeader\": [" + NEW_LINE +
+                            "             {" + NEW_LINE +
+                            "                 \"type\": \"string\", " + NEW_LINE +
+                            "                 \"pattern\": \"^some +regex$\"" + NEW_LINE +
+                            "             }, " + NEW_LINE +
+                            "             {" + NEW_LINE +
+                            "                 \"type\": \"string\", " + NEW_LINE +
+                            "                 \"format\": \"ipv4\"" + NEW_LINE +
+                            "             }" + NEW_LINE +
+                            "         ]" + NEW_LINE +
+                            "     }";
+                    }
+                    if (validationMessageText.endsWith("pathParameters: object found, array expected") || validationMessageText.endsWith("queryStringParameters: object found, array expected")) {
+                        return StringUtils.substringBefore(validationMessageText, ":") + ": invalid parameter format, the following are valid examples: " + NEW_LINE +
+                            "  " + NEW_LINE +
+                            "     {" + NEW_LINE +
+                            "         \"exampleRegexParameter\": [" + NEW_LINE +
+                            "             \"^some +regex$\"" + NEW_LINE +
+                            "         ], " + NEW_LINE +
+                            "         \"exampleNottedAndSimpleStringParameter\": [" + NEW_LINE +
+                            "             \"!notThisValue\", " + NEW_LINE +
+                            "             \"simpleStringMatch\"" + NEW_LINE +
+                            "         ]" + NEW_LINE +
+                            "     }" + NEW_LINE +
+                            "  " + NEW_LINE +
+                            "  or:" + NEW_LINE +
+                            "  " + NEW_LINE +
+                            "     {" + NEW_LINE +
+                            "         \"exampleSchemaParameter\": [" + NEW_LINE +
+                            "             {" + NEW_LINE +
+                            "                 \"type\": \"number\"" + NEW_LINE +
+                            "             }" + NEW_LINE +
+                            "         ], " + NEW_LINE +
+                            "         \"exampleMultiSchemaParameter\": [" + NEW_LINE +
+                            "             {" + NEW_LINE +
+                            "                 \"type\": \"string\", " + NEW_LINE +
+                            "                 \"pattern\": \"^some +regex$\"" + NEW_LINE +
+                            "             }, " + NEW_LINE +
+                            "             {" + NEW_LINE +
+                            "                 \"type\": \"string\", " + NEW_LINE +
+                            "                 \"format\": \"ipv4\"" + NEW_LINE +
+                            "             }" + NEW_LINE +
+                            "         ]" + NEW_LINE +
+                            "     }";
+                    }
+                    if (validationMessageText.startsWith("$.http") && validationMessageText.endsWith(": is missing but it is required")) {
+                        extraMessages.add("oneOf of the following must be specified [" +
+                            "httpError, " +
+                            "httpForward, " +
+                            "httpForwardClassCallback, " +
+                            "httpForwardObjectCallback, " +
+                            "httpForwardTemplate, " +
+                            "httpForwardValidateAction, " +
+                            "httpForwardWithFallback, " +
+                            "httpOverrideForwardedRequest, " +
+                            "httpResponse, " +
+                            "httpResponseClassCallback, " +
+                            "httpResponseObjectCallback, " +
+                            "httpResponseTemplate" +
+                            "]");
+                        return StringUtils.substringBefore(validationMessageText, ":") + ": is missing, but is required, if specifying action of type " + StringUtils.substringBefore(StringUtils.substringAfter(validationMessageText, "$.http"), ":");
+                    }
+                    if (validationMessageText.startsWith("$.grpc") && validationMessageText.endsWith(": is missing but it is required")) {
+                        String fieldName = StringUtils.substringBefore(StringUtils.substringAfter(validationMessageText, "$."), ":");
+                        String actionType = fieldName.substring(0, 1).toUpperCase() + fieldName.substring(1);
+                        return StringUtils.substringBefore(validationMessageText, ":") + ": is missing, but is required, if specifying action of type " + actionType;
+                    }
+                    return validationMessageText;
+                })
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+            formattedMessages.addAll(extraMessages);
+            List<String> validationMessageTexts = formattedMessages
+                .stream()
+                .filter(formattedMessage -> !formattedMessage.endsWith("object expected") || !formattedMessages.contains(formattedMessage.replace("object expected", "string expected")))
+                .sorted().collect(Collectors.toList());
+            return validationMessageTexts.size() + " error" + (validationMessageTexts.size() > 1 ? "s" : "") + ":" + NEW_LINE
+                + " - " + Joiner.on(NEW_LINE + " - ").join(validationMessageTexts) +
+                (addOpenAPISpecificationMessage ? NEW_LINE + NEW_LINE + OPEN_API_SPECIFICATION_URL : "");
+        }
+    }
+
+}

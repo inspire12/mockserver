@@ -67,14 +67,43 @@ function logTestResult() {
   TEST_CASE="${2}"
   if [[ "${TEST_EXIT_CODE}" != "0" ]]; then
     printFailureMessage "Failed: ${TEST_CASE}"
-    if [ -n "${3:-}" ]; then
-      container-logs "${3:-}"
-    fi
-    container-logs
-    printFailureMessage "Failed: ${TEST_CASE}"
+    # Record the failure BEFORE dumping diagnostics so a failing diagnostic
+    # (e.g. container-logs on a crashed project) can never, under the caller's
+    # `set -e`, abort this function before the failure is tallied.
     printPlainFailureMessage "  - ${TEST_CASE}" >>${FAIL_LOG_FILE} 2>&1
+    if [ -n "${3:-}" ]; then
+      container-logs "${3:-}" || true
+    fi
+    container-logs || true
+    printFailureMessage "Failed: ${TEST_CASE}"
   else
     printPassMessage "Passed: ${TEST_CASE}"
     printPlainPassMessage "  - ${TEST_CASE}" >>${PASS_LOG_FILE} 2>&1
   fi
+}
+
+# Non-blocking variant: records pass to PASS_LOG but failure to WARN_LOG
+# instead of FAIL_LOG. Does NOT set EXIT_CODE — the check is advisory.
+# An optional third argument (the failure reason) is appended to the WARN_LOG line.
+function logTestResultNonBlocking() {
+  local exit_code="${1}"
+  local test_case="${2}"
+  local reason="${3:-}"
+  reason="${reason//$'\n'/ }"
+  if [[ "${exit_code}" != "0" ]]; then
+    printMessageWithColourAndBorders >&2 "Warning (non-blocking): ${test_case}" "\e[0;33m"
+    printMessageWithColour >&2 "  - ${test_case}${reason:+: ${reason}}" "\e[0;33m" >>"${WARN_LOG_FILE}" 2>&1
+  else
+    printPassMessage "Passed: ${test_case}"
+    printPlainPassMessage "  - ${test_case}" >>"${PASS_LOG_FILE}" 2>&1
+  fi
+}
+
+# Skip: records the test as skipped in the SKIP_LOG without recording
+# a pass or a failure. Mirrors the variant-skip pattern.
+function logTestSkip() {
+  local test_case="${1}"
+  local reason="${2:-skipped}"
+  printMessageWithColourAndBorders >&2 "Skipped: ${test_case} (${reason})" "\e[0;36m"
+  printMessageWithColour >&2 "  - ${test_case}: ${reason}" "\e[0;36m" >>"${SKIP_LOG_FILE}" 2>&1
 }

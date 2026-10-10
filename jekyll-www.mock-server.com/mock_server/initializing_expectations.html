@@ -1,13 +1,14 @@
 ---
 title: Expectation Initializers
+description: Load expectations automatically when MockServer starts using a Java initializer class, JSON file, OpenAPI spec, or Maven plugin initializer.
 layout: page
-pageOrder: 6
-section: 'Mock Server'
+pageOrder: 7
+section: 'Creating Mocks'
 subsection: true
 sitemap:
   priority: 0.7
   changefreq: 'monthly'
-  lastmod: 2019-11-10T08:00:00+01:00
+  lastmod: 2026-06-24T00:00:00+00:00
 ---
 
 <p>To ensure expectations are available as soon as MockServer is started it is possible to use an expectation initializer, there are four options:</p>
@@ -21,13 +22,22 @@ sitemap:
 
 <p><strong>Note:</strong> all four options require the class or file to be available to the MockServer, i.e. in the local classpath or filesystem.  To remotely initialise the MockServer a client is required to connect to the MockServer after it has started and submit one or more expectations.</p>
 
-<a id="expectation_initializer_class" class="anchor" href="#expectation_initializer_class">&nbsp</a>
+<p><strong>Tip:</strong> a <a href="#expectation_initializer_json_schema">published JSON Schema</a> gives JSON initializer files autocompletion and validation in IDEs such as VS Code and IntelliJ &mdash; so you can author expectation files with editor support and catch mistakes before MockServer loads them.</p>
+
+<a id="expectation_initializer_class" class="anchor" href="#expectation_initializer_class">&nbsp;</a>
 
 <h2>Expectation Initializer Class</h2>
 
 <p>MockServer expectations can be initialized when the MockServer starts, using a class, by specified the <strong>initializationClass</strong> configuration property as described in the <a href="/mock_server/configuration_properties.html#button_configuration_initialization_class">Configuration Properties</a> page, for example:</p>
 <pre class="prettyprint lang-java code"><code class="code">System.setProperty("mockserver.initializationClass", ExpectationInitializerExample.class.getName());
 int mockServerPort = new ClientAndServer().getLocalPort();</code></pre>
+
+<p>When using Spring's <code>@MockServerTest</code>, the initializer class can be configured directly in the annotation:</p>
+<pre class="prettyprint lang-java code"><code class="code">@MockServerTest("mockserver.initializationClass=org.mockserver.server.initialize.ExpectationInitializerExample")
+@ExtendWith(SpringExtension.class) // JUnit 5; use @RunWith(SpringRunner.class) on JUnit 4
+public class MyTest {
+    private MockServerClient mockServerClient;  // auto-injected with expectations already loaded
+}</code></pre>
 
 <p>The class must implement the <strong>org.mockserver.server.initialize.ExpectationInitializer</strong> interface and have a default constructor with zero arguments, for example:</p>
 
@@ -65,10 +75,14 @@ int mockServerPort = new ClientAndServer().getLocalPort();</code></pre>
 <p><strong>initializationJsonPath</strong> supports:</p>
 
 <ul>
-    <li>related or absolute paths</li>
+    <li>relative or absolute paths</li>
     <li>both filesystem and classpath locations</li>
     <li>multiple files by using glob patterns that can expand a wildcard pattern into a list of paths that match the given pattern using characters such as *, **, ?, [] and {}, for more details see <a href="#expectation_initializer_json_glob_patterns">glob patterns</a></li>
 </ul>
+
+<p><strong>Supported action types in JSON initializer files:</strong> any expectation action that can be expressed in JSON is supported &mdash; the JSON initializer accepts the same expectation shape as the REST API and Java client. This includes, but is not limited to, <span class="inline_code">httpResponse</span>, <span class="inline_code">httpResponseTemplate</span>, <span class="inline_code">httpResponseClassCallback</span>, <span class="inline_code">httpForward</span>, <span class="inline_code">httpForwardTemplate</span>, <span class="inline_code">httpForwardClassCallback</span>, <span class="inline_code">httpForwardWithFallback</span>, <span class="inline_code">httpForwardValidateAction</span>, <span class="inline_code">httpOverrideForwardedRequest</span>, <span class="inline_code">httpError</span>, <span class="inline_code">httpSseResponse</span>, <span class="inline_code">grpcStreamResponse</span>, and <span class="inline_code">grpcBidiResponse</span>, as well as <span class="inline_code">beforeActions</span>, <span class="inline_code">afterActions</span>, and <span class="inline_code">steps</span>.</p>
+
+<p>The exception is the WebSocket-based object callbacks (<span class="inline_code">httpResponseObjectCallback</span> and <span class="inline_code">httpForwardObjectCallback</span>): although they serialise to JSON, they cannot do anything useful when loaded from an initializer file because they require an active WebSocket connection from a running client to dispatch to.</p>
 
 <p>The JSON file should contain an array of serialised expectations, for example:</p>
 
@@ -91,6 +105,31 @@ int mockServerPort = new ClientAndServer().getLocalPort();</code></pre>
   }
 ]</code></pre>
 
+<a id="expectation_initializer_json_schema" class="anchor" href="#expectation_initializer_json_schema">&nbsp;</a>
+
+<h3>JSON Schema for IDE Support</h3>
+
+<p>A self-contained JSON Schema is published for MockServer expectations, providing autocompletion and validation in IDEs such as VS Code, IntelliJ, and any editor that supports <a href="https://json-schema.org/">JSON Schema</a>.</p>
+
+<p>The schema is available at:</p>
+<ul>
+    <li><strong>Single expectation:</strong> <a href="https://www.mock-server.com/schema/expectation.json">https://www.mock-server.com/schema/expectation.json</a></li>
+    <li><strong>Array of expectations:</strong> <a href="https://www.mock-server.com/schema/expectations.json">https://www.mock-server.com/schema/expectations.json</a></li>
+</ul>
+
+<p>The schema is also registered with the <a href="https://www.schemastore.org/json/">JSON Schema Store</a>, which means IDEs will automatically apply the schema to files matching these patterns:</p>
+<ul>
+    <li><span class="inline_code">mockserverInitialization.json</span> — the default MockServer initialization file</li>
+    <li><span class="inline_code">*mockserver*Initialization.json</span> — any initialization file containing "mockserver" and "Initialization" in the name</li>
+    <li><span class="inline_code">mockserver*.json</span> — any JSON file starting with "mockserver"</li>
+</ul>
+
+<p>To manually reference the schema in a JSON file, add a <span class="inline_code">$schema</span> property at the top level:</p>
+<pre class="prettyprint lang-java code"><code class="code">{
+  "$schema": "https://www.mock-server.com/schema/expectations.json",
+  ...
+}</code></pre>
+
 <a id="expectation_initializer_json_glob_patterns" class="anchor" href="#expectation_initializer_json_glob_patterns">&nbsp;</a>
 
 <h3>Multiple Files (Glob Patterns)</h3>
@@ -112,7 +151,7 @@ int mockServerPort = new ClientAndServer().getLocalPort();</code></pre>
 
 <p>If a JSON expectation initializer or OpenAPI initializer is specified, a file watcher can be enabled that watches for changes in the initialization files and updates the expectations when a file is modified.  Changes are detected at most after 5 seconds if the file contents has changed.</p>
 <p>If enabled the initialization JSON and OpenAPI files will be watched for changes, any changes found will result in expectations being created, removed or updated by matching against their key.</p>
-<p>If duplicate keys exist only the first duplicate key in the file will be processed and all duplicates except the first duplicate will be ignored.</p>
+<p>If duplicate keys exist only the last duplicate key in the file will be processed and all duplicates except the last duplicate will be removed.</p>
 <p>The order of expectations in the file is the order in which they are created if they are new, however, re-ordering existing expectations does not change the order they are matched against incoming requests.</p>
 
 <pre class="prettyprint lang-javascript code"><code class="code">MOCKSERVER_WATCH_INITIALIZATION_JSON=true \
@@ -191,6 +230,13 @@ java -jar ~/Downloads/mockserver-netty-{{ site.mockserver_version }}-no-dependen
     &lt;/<span class="element">executions</span>&gt;
 &lt;/<span class="element">plugin</span>&gt;</code></pre>
 
+<p><strong>Note:</strong> the <span class="inline_code">initializationJson</span> parameter in the Maven plugin also supports <a href="#expectation_initializer_json_glob_patterns">glob patterns</a>, allowing you to load expectations from multiple files using wildcards. For example:</p>
+
+<pre><code class="code xml">&lt;<span class="element">configuration</span>&gt;
+    &lt;<span class="element">serverPort</span>&gt;<span class="element_value">1080</span>&lt;/<span class="element">serverPort</span>&gt;
+    &lt;<span class="element">initializationJson</span>&gt;<span class="element_value">src/test/resources/expectations/**/*.json</span>&lt;/<span class="element">initializationJson</span>&gt;
+&lt;/<span class="element">configuration</span>&gt;</code></pre>
+
 <p>The class must implement the <strong>org.mockserver.client.initialize.PluginExpectationInitializer</strong> interface and have a default constructor with zero arguments, for example:</p>
 
 <pre class="prettyprint lang-java code"><code class="code">public class ExampleInitializationClass implements PluginExpectationInitializer {
@@ -219,3 +265,13 @@ java -jar ~/Downloads/mockserver-netty-{{ site.mockserver_version }}-no-dependen
 }</code></pre>
 
 {% include_subpage _includes/initializer_persistence_configuration.html %}
+
+<a id="related" class="anchor" href="#related">&nbsp;</a>
+
+<h2>Related Pages</h2>
+
+<ul>
+    <li><a href="/mock_server/creating_expectations.html">Creating Expectations</a> &mdash; the full reference for the expectations you load at startup: request matchers and response, forward, callback, and error actions</li>
+    <li><a href="/mock_server/persisting_expectations.html">Persisting Expectations</a> &mdash; write expectations back out so they survive a restart and can be reloaded</li>
+    <li><a href="/mock_server/file_storage.html">File Storage</a> &mdash; manage the files on disk that initializers and persisted expectations read from and write to</li>
+</ul>

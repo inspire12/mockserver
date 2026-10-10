@@ -1,19 +1,22 @@
 ---
 title: Getting Started Proxying
+description: Start MockServer as an HTTP/HTTPS proxy, configure clients to send traffic through it, and analyse or verify recorded requests and responses.
 shortTitle: Getting Started
 layout: page
 pageOrder: 1
-section: 'Proxy'
+section: 'Proxying'
 subsection: true
 sitemap:
   priority: 0.9
   changefreq: 'monthly'
-  lastmod: 2019-11-10T08:00:00+01:00
+  lastmod: 2026-06-24T08:00:00+01:00
 ---
 
 <p style="width: 35%; float: right; margin-right: 5%"><img src="../images/more_detail_available_message.png" alt="Note: this page is a high level overview of each topic, more detail is available for each topic on a linked page." style="float: right; max-width: 100%;"></p>
 
-<p>To use MockServer to analysis an existing system:</p>
+<p>As an in-path HTTP(S) proxy, MockServer records every request and response that flows through it &mdash; including HTTPS, which it can decrypt transparently with an auto-generated certificate. That means you can <strong>capture how a system really behaves and replay it as deterministic mocks without changing a line of application code</strong>: point your clients at MockServer, run your scenarios, then analyse, verify, or record-and-replay the captured traffic.</p>
+
+<p>To use MockServer to analyse an existing system:</p>
 
 <ol start="0">
     <li><a href="#start_mockserver">Start MockServer</a></li>
@@ -35,7 +38,15 @@ sitemap:
 
 <p style="width: 59%; margin-top: 0; padding-top: 0;"><img src="../images/system_under_test_with_mockserver_proxy_different_numbering.png" alt="Mocking service dependencies with MockServer" style="max-width:100%;"></p>
 
-<p>For example code see the <a target="_blank"href="https://github.com/mock-server/mockserver/tree/master/mockserver-examples">code examples folder</a> in the git repository.</p>
+<p>For example code see the <a target="_blank"href="https://github.com/mock-server/mockserver-monorepo/tree/master/examples" rel="noopener noreferrer">code examples folder</a> in the git repository.</p>
+
+<p><strong>Inspecting AI agent traffic?</strong> If you want to see the HTTPS calls that Claude Code, OpenCode, or Python AI libraries send to LLM APIs and MCP servers, see <a href="/mock_server/ai_traffic_inspection.html">Inspect AI Agent Traffic</a>. It covers proxy setup, CA trust, and per-tool configuration for AI tools.</p>
+
+<p><strong>Proxying WebSockets?</strong> MockServer also proxies WebSocket connections. When a client opens a WebSocket (an HTTP <span class="inline_code">Upgrade: websocket</span> request) through MockServer and no matching WebSocket expectation exists, MockServer connects to the real upstream WebSocket server (over <span class="inline_code">ws</span> or <span class="inline_code">wss</span>), relays the handshake, and then relays messages in both directions until either side closes. The client receives the headers the upstream sent with its handshake response, such as <span class="inline_code">Set-Cookie</span> and the agreed subprotocol, except connection-level headers such as <span class="inline_code">Keep-Alive</span> and <span class="inline_code">Proxy-*</span>; WebSocket extensions such as compression are not negotiated through the relay. The relayed frames (text, binary, ping, pong, close) are recorded alongside the connection so you can inspect them with <a href="/mock_server/verification.html">recorded requests</a> and in the dashboard. The number of frames recorded per connection is capped by the <span class="inline_code">webSocketProxyMaxRecordedFrames</span> <a href="/mock_server/configuration_properties.html">configuration property</a> (default 1000; set to 0 to record only the handshake). This currently covers HTTP/1.1 WebSocket upgrades over plain and TLS upstreams.</p>
+
+<a id="compressed_responses" class="anchor" href="#compressed_responses">&nbsp;</a>
+
+<p><strong>Compressed responses.</strong> When MockServer forwards or proxies a request, it passes on the client's own <span class="inline_code">Accept-Encoding</span> header, keeping its order and <span class="inline_code">q</span> values but leaving out any compression MockServer cannot decompress (it decompresses <span class="inline_code">gzip</span>, <span class="inline_code">deflate</span> and <span class="inline_code">zstd</span>, and <span class="inline_code">br</span> when the Brotli4j library is on the classpath). That way the server receives the client's real preferences, and MockServer can still decompress whatever the server sends back, so recorded responses and the dashboard show readable bodies. A client that sends no <span class="inline_code">Accept-Encoding</span> has none sent on its behalf; if none of the client's choices can be decompressed, the server is asked for <span class="inline_code">identity</span> (no compression). A response compressed in one of those ways is passed back to the client decompressed, without its <span class="inline_code">Content-Encoding</span> header, and with any <span class="inline_code">Vary</span> header the server sent. Earlier versions always asked servers for <span class="inline_code">gzip,deflate</span>, whatever the client sent.</p>
 
 <a id="start_mockserver" class="anchor" href="#start_mockserver">&nbsp;</a>
 
@@ -65,10 +76,19 @@ sitemap:
 
 <a id="analysing_behaviour" class="anchor" href="#analysing_behaviour">&nbsp;</a>
 
-<h2>3. Analysing Behaviour</h2>
+<h2>2. Analysing Behaviour</h2>
 
 {% include_subpage _includes/analysing_behaviour.html %}
 
 <h2>3. Verify Requests</h2>
 
 {% include_subpage ../mock_server/_includes/verification_summary.html %}
+
+<h2>Next Steps &amp; Related</h2>
+
+<ul>
+    <li><a href="/proxy/record_and_replay.html">Record &amp; Replay</a> &mdash; turn captured traffic into reusable mock expectations for offline, deterministic testing.</li>
+    <li><a href="/proxy/debugging_proxied_traffic.html">Debugging Proxied Traffic</a> &mdash; inspect and export recorded requests and responses (JSON, HAR, cURL) in the dashboard or via the API.</li>
+    <li><a href="/proxy/network_latency_debugging.html">Network Latency Debugging</a> &mdash; capture per-request timing breakdowns and latency percentiles to find where the time goes.</li>
+    <li><a href="/mock_server/isolating_single_service.html">Isolate a Single Service</a> &mdash; use MockServer as a reverse proxy to route one service to a local debug instance while forwarding the rest to the real environment.</li>
+</ul>

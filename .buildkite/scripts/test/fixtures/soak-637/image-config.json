@@ -1,0 +1,32 @@
+{
+  "architecture": "amd64",
+  "os": "linux",
+  "created": "2026-10-04T04:56:18.146989882Z",
+  "config": {
+    "Env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
+      "LANG=C.UTF-8",
+      "JAVA_TOOL_OPTIONS=-XX:+UseZGC",
+      "SERVER_PORT=1080",
+      "MOCKSERVER_DASHBOARD_ANALYTICS_ENDPOINT=",
+      "MOCKSERVER_DASHBOARD_ANALYTICS_KEY=",
+      "MOCKSERVER_DASHBOARD_ANALYTICS_DISTRIBUTION=docker-standard"
+    ],
+    "Entrypoint": [
+      "/usr/lib/jvm/temurin25-trimmed/bin/java",
+      "-Dfile.encoding=UTF-8",
+      "--enable-native-access=ALL-UNNAMED",
+      "-XX:MaxRAMPercentage=50.0",
+      "-XX:SharedArchiveFile=/mockserver.jsa",
+      "-cp",
+      "/mockserver.jar:/mockserver-deps.jar:/libs/*",
+      "-Dmockserver.propertyFile=/config/mockserver.properties",
+      "org.mockserver.cli.Main"
+    ],
+    "Labels": {
+      "org.opencontainers.image.created": "2026-10-04T04:55:22Z",
+      "org.opencontainers.image.revision": "38dadef60d3f5cf119ccabdbeea40e36285dc5b2"
+    }
+  }
+}

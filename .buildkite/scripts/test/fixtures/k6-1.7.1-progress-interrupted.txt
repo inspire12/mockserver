@@ -1,0 +1,90 @@
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+
+     execution: local
+        script: /k6/sweep.js
+        output: Prometheus remote write (http://rw-prom-550648886:9090/api/v1/write)
+
+     scenarios: (100.00%) 3 scenarios, 97 max VUs, 1m40s max duration (incl. graceful stop):
+              * rate_50: 50.00 iterations/s for 15s (maxVUs: 96, exec: matchAt, gracefulStop: 1s)
+              * rate_100: 100.00 iterations/s for 15s (maxVUs: 96, exec: matchAt, startTime: 20s, gracefulStop: 1s)
+              * quiet_tail: 1 iterations shared among 1 VUs (maxDuration: 35s, exec: quietTail, startTime: 35s, gracefulStop: 30s)
+
+
+Run          [ 100% ] setup()
+rate_50      [   0% ]
+quiet_tail • [   0% ] waiting    05.9s     
+
+running (0m49.0s), 95/97 VUs, 1056 complete and 45 interrupted iterations
+rate_50    ✓ [ 100% ] 45/96 VUs  15s        50.00 iters/s
+rate_100     [  67% ] 95/96 VUs  10.1s/15s  100.00 iters/s
+quiet_tail • [   0% ] waiting    04.9s     
+
+running (0m50.0s), 96/97 VUs, 1149 complete and 45 interrupted iterations
+rate_50    ✓ [ 100% ] 45/96 VUs  15s        50.00 iters/s
+rate_100     [  74% ] 96/96 VUs  11.1s/15s  100.00 iters/s
+quiet_tail • [   0% ] waiting    03.9s     
+
+running (0m51.0s), 95/97 VUs, 1151 complete and 45 interrupted iterations
+rate_50    ✓ [ 100% ] 45/96 VUs  15s        50.00 iters/s
+rate_100     [  81% ] 95/96 VUs  12.1s/15s  100.00 iters/s
+quiet_tail • [   0% ] waiting    02.9s     
+
+running (0m52.0s), 96/97 VUs, 1245 complete and 45 interrupted iterations
+rate_50    ✓ [ 100% ] 45/96 VUs  15s        50.00 iters/s
+rate_100     [  87% ] 96/96 VUs  13.1s/15s  100.00 iters/s
+quiet_tail • [   0% ] waiting    01.9s     
+
+running (0m53.0s), 95/97 VUs, 1246 complete and 45 interrupted iterations
+rate_50    ✓ [ 100% ] 45/96 VUs  15s        50.00 iters/s
+rate_100     [  94% ] 95/96 VUs  14.1s/15s  100.00 iters/s
+quiet_tail • [   0% ] waiting    00.9s     
+
+running (0m54.0s), 92/97 VUs, 1341 complete and 45 interrupted iterations
+rate_50    ✓ [ 100% ] 45/96 VUs  15s        50.00 iters/s
+rate_100   ↓ [ 100% ] 95/96 VUs  15s        100.00 iters/s
+quiet_tail   [   0% ] 1 VUs      00.1s/35s  0/1 shared iters
+
+running (0m55.0s), 01/97 VUs, 1341 complete and 136 interrupted iterations
+rate_50    ✓ [ 100% ] 45/96 VUs  15s        50.00 iters/s
+rate_100   ✓ [ 100% ] 91/96 VUs  15s        100.00 iters/s
+quiet_tail   [   0% ] 1 VUs      01.1s/35s  0/1 shared iters
+
+running (0m56.0s), 01/97 VUs, 1341 complete and 136 interrupted iterations
+rate_50    ✓ [ 100% ] 45/96 VUs  15s        50.00 iters/s
+rate_100   ✓ [ 100% ] 91/96 VUs  15s        100.00 iters/s
+quiet_tail   [   0% ] 1 VUs      02.1s/35s  0/1 shared iters
+
+running (0m57.0s), 01/97 VUs, 1341 complete and 136 interrupted iterations
+rate_50    ✓ [ 100% ] 45/96 VUs  15s        50.00 iters/s
+rate_100   ✓ [ 100% ] 91/96 VUs  15s        100.00 iters/s
+quiet_tail   [   0% ] 1 VUs      03.1s/35s  0/1 shared iters
+
+running (0m58.0s), 01/97 VUs, 1341 complete and 136 interrupted iterations
+rate_50    ✓ [ 100% ] 45/96 VUs  15s        50.00 iters/s
+rate_100   ✓ [ 100% ] 91/96 VUs  15s        100.00 iters/s
+quiet_tail   [   0% ] 1 VUs      04.1s/35s  0/1 shared iters
+
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+
+running (0m58.9s), 00/97 VUs, 1342 complete and 136 interrupted iterations
+rate_50    ✓ [ 100% ] 45/96 VUs  15s        50.00 iters/s
+rate_100   ✓ [ 100% ] 91/96 VUs  15s        100.00 iters/s
+quiet_tail ✓ [ 100% ] 1 VUs      05.0s/35s  1/1 shared iters
+

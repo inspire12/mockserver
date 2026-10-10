@@ -1,0 +1,871 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <groupId>org.mock-server</groupId>
+        <artifactId>mockserver</artifactId>
+        <version>8.0.1-SNAPSHOT</version>
+    </parent>
+
+    <modelVersion>4.0.0</modelVersion>
+
+    <name>MockServer &amp; Proxy Netty</name>
+    <artifactId>mockserver-netty</artifactId>
+    <url>https://www.mock-server.com</url>
+
+    <properties>
+        <module.name>org.mockserver.netty</module.name>
+        <maven-invoker-parallel-threads>2</maven-invoker-parallel-threads>
+        <!-- ByteBuf leak detection for this module's test JVMs: paranoid tracking with the
+             parent pom's file-based gate (check-netty-leaks), which fails the build on a leak. -->
+        <mockserver.leakArgLine>${mockserver.nettyLeakDetectorArgLine}</mockserver.leakArgLine>
+        <mockserver.failIfNoIntegrationTests>true</mockserver.failIfNoIntegrationTests>
+        <!-- Packages of the named CI integration-test shards (see the netty-it-shard-* profiles).
+             Not subpackages: a /**/ include matches nothing in the JUnit Platform fork, which
+             re-applies the pattern, so a subpackage's tests run in netty-it-shard-rest. -->
+        <mockserver.nettyItShard.proxyHttp>org/mockserver/netty/integration/proxy/http</mockserver.nettyItShard.proxyHttp>
+        <mockserver.nettyItShard.mock>org/mockserver/netty/integration/mock</mockserver.nettyItShard.mock>
+    </properties>
+
+    <dependencies>
+        <!-- mockserver -->
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>mockserver-client-java</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>mockserver-core</artifactId>
+        </dependency>
+        <!-- AsyncAPI messaging module — optional feature; wired into the
+             running server so the PUT/GET /mockserver/asyncapi control-plane
+             endpoints are functional. The module self-registers via
+             AsyncApiControlPlaneImpl.registerIfAvailable() at startup. -->
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>mockserver-async</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>mockserver-integration-testing</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>mockserver-testing</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- grpc-java: TEST SCOPE ONLY. Drives MockServer with a real gRPC client
+             (GrpcUnaryClientIntegrationTest) so the gRPC wire contract is verified against an
+             actual client implementation, not just handler-level assertions. Uses
+             grpc-netty-shaded so grpc's bundled Netty 4.1 cannot clash with MockServer's
+             Netty 4.2. Never bundled in a released artifact. -->
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-netty-shaded</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-stub</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Third-party protocol clients, test scope only: independent implementations used to
+             verify wire conformance, rather than asserting MockServer against its own objects. -->
+        <dependency>
+            <groupId>org.java-websocket</groupId>
+            <artifactId>Java-WebSocket</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>okhttp-sse</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-protobuf</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Netty -->
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-buffer</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec-http</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec-http2</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-handler</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec-dns</artifactId>
+        </dependency>
+        <!-- independent DNS wire parser — verifies MockServer's DNS bytes against a real resolver
+             implementation rather than against MockServer's own encoder. Test scope only. -->
+        <dependency>
+            <groupId>dnsjava</groupId>
+            <artifactId>dnsjava</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-tcnative-boringssl-static</artifactId>
+        </dependency>
+        <!-- Epoll API classes (pure Java, no native classifier) — needed at compile
+             time for SoOriginalDstResolver to reference EpollSocketChannel/Epoll.
+             The native .so is only required at runtime on Linux. -->
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport-classes-epoll</artifactId>
+        </dependency>
+        <!-- Epoll native .so — bundles the Linux-specific JNI library that activates
+             io.netty.channel.epoll.Epoll.isAvailable(). Runtime-only; on non-Linux
+             platforms these JARs are inert (no native to load). Both x86_64 and aarch64
+             are included so Docker images work on both AMD64 and ARM64 hosts. -->
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport-native-epoll</artifactId>
+            <classifier>linux-x86_64</classifier>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport-native-epoll</artifactId>
+            <classifier>linux-aarch_64</classifier>
+            <scope>runtime</scope>
+        </dependency>
+        <!-- JNA — used by SoOriginalDstResolver for getsockopt(SO_ORIGINAL_DST)
+             on Linux. On non-Linux platforms the JNA code path is never invoked;
+             the resolver reports unsupported and falls through to conntrack. -->
+        <dependency>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna</artifactId>
+        </dependency>
+
+        <!-- HTTP/3 (QUIC) — graduated from incubator into Netty 4.2; the native
+             QUIC library is bundled transitively by netty-codec-http3 for
+             supported platforms. CI/CD must run on a platform where the native
+             is available (linux-x86_64, osx-x86_64, osx-aarch_64) or the
+             HTTP/3 feature will be unavailable. -->
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec-http3</artifactId>
+        </dependency>
+
+        <!-- CLI -->
+        <dependency>
+            <groupId>info.picocli</groupId>
+            <artifactId>picocli</artifactId>
+        </dependency>
+
+        <!-- commons & guava -->
+        <dependency>
+            <groupId>commons-io</groupId>
+            <artifactId>commons-io</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+        </dependency>
+
+        <!-- logging -->
+        <dependency> <!-- will map to any underlying logging framework -->
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-jdk14</artifactId>
+            <optional>true</optional> <!-- do not impose on project importing mock-server -->
+        </dependency>
+
+        <!-- test -->
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.hamcrest</groupId>
+            <artifactId>hamcrest</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- bytecode analysis for ConfigurationCallSiteGuardTest (test scope only, not shipped) -->
+        <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- in-memory OpenTelemetry span exporter for driving the production forward-path
+             GenAI span emission end-to-end (ForwardPathGenAiSpanEmissionTest). The OTel SDK
+             (trace/api) reaches this module transitively at compile scope via mockserver-core;
+             only the test-support artifact carrying InMemorySpanExporter must be declared here. -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk-testing</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- a real PostgreSQL behind the Docker gate (PostgresThroughMockServerIntegrationTest) -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <version>1.21.4</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.13</version>
+            <scope>test</scope>
+        </dependency>
+        <!--
+            chicory (WASM interpreter) is NOT declared here on purpose. It used to be declared
+            test-scope as a workaround while mockserver-core marked it <optional>true</optional>;
+            core now ships it non-optional so it reaches this module transitively at compile scope.
+            Re-adding a direct test-scope declaration would win Maven's nearest-wins mediation and
+            strip chicory back out of the assembled jar and Docker image, silently reverting the
+            packaging fix that WasmRuntimeShippedWithServerTest guards.
+        -->
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Forked-charset regression guard for issue #2347 (dashboard white page).
+                 The dashboard Content-Length must be the UTF-8 byte count of the body (which is
+                 always written to the wire as UTF-8). A revert to content.getBytes() (JVM default
+                 charset) only differs from getBytes(UTF_8) on a NON-UTF-8-default host, so it is
+                 invisible at runtime on a UTF-8-default CI host. To make the regression catchable in
+                 CI regardless of the host locale we run ONE focused test class
+                 (DashboardContentLengthCharsetForkTest) in a dedicated fork whose default charset is
+                 forced to ISO-8859-1; under that charset a getBytes() revert yields the wrong (ISO)
+                 length and the test turns RED.
+
+                 - The DEFAULT surefire execution is reconfigured to EXCLUDE this class so it does not
+                   run under the normal (UTF-8) charset (where it would vacuously skip) and does not
+                   run twice. All other inherited config (the @{argLine}, systemPropertyVariables,
+                   locale, listener, timeouts) is inherited from the parent surefire <configuration>.
+                 - A new dashboard-charset-fork-test execution runs ONLY this class with a fresh fork
+                   (forkCount=1, reuseForks=false) and -Dfile.encoding=ISO-8859-1
+                   -Dsun.jnu.encoding=ISO-8859-1 appended AFTER the inherited @{argLine}
+                   (last -D wins, so the override beats any inherited file.encoding).
+
+                 On Java 17 (the project floor), and on Java 18+ builds that still honour an explicit
+                 non-UTF-8 file.encoding, the forced charset takes effect and the guard runs RED on a
+                 regression. On any JVM where the override is ignored and Charset.defaultCharset()
+                 stays UTF-8 (JEP 400 behaviour), the test SKIPS itself (org.junit.Assume) rather than
+                 false-passing; the host-dependent DashboardHandlerTest remains the backstop there. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <!-- ClearInlineMocksAfterEachTestClass lets the fork release the mocks, channels and stopped servers
+                     each test class leaves behind; restates the inherited listener. -->
+                <configuration>
+                    <properties>
+                        <property>
+                            <name>listener</name>
+                            <value>org.mockserver.test.PrintOutCurrentTestRunListener,org.mockserver.lifecycle.ClearInlineMocksAfterEachTestClass</value>
+                        </property>
+                    </properties>
+                </configuration>
+                <executions>
+                    <!-- reconfigure the inherited default execution to exclude the forked-charset
+                         class (per-execution includes/excludes replace, not merge, so the inherited
+                         **/*Test.java include and **/*IntegrationTest.java exclude are restated). -->
+                    <execution>
+                        <id>default-test</id>
+                        <configuration>
+                            <includes>
+                                <include>**/*Test.java</include>
+                            </includes>
+                            <excludes>
+                                <exclude>**/*IntegrationTest.java</exclude>
+                                <exclude>**/DashboardContentLengthCharsetForkTest.java</exclude>
+                                <!-- ConfigurationCallSiteGuardTest scans compiled .class output across
+                                     EVERY reactor module. It must run over a fully-built reactor, but at
+                                     netty's own test phase every module downstream of netty (junit-rule,
+                                     junit-jupiter, spring, async, blob-*, state-infinispan, testcontainers,
+                                     k8s-webhook) is not yet compiled — so running it here would silently
+                                     scan only a subset. It is instead run as a standalone, fail-closed step
+                                     over the built tree via the configuration-callsite-guard execution below
+                                     (invoked from scripts/buildkite_quick_build.sh after `clean install`). -->
+                                <exclude>**/ConfigurationCallSiteGuardTest.java</exclude>
+                            </excludes>
+                        </configuration>
+                    </execution>
+                    <!-- Whole-reactor configuration-reachability guard. Bound to phase `none` so it never
+                         runs during a normal build/test; invoked explicitly AFTER `clean install` populates
+                         every module's target/classes:
+                             ./mvnw -pl mockserver-netty surefire:test@configuration-callsite-guard
+                         See ConfigurationCallSiteGuardTest's "Where this guard runs, and why" javadoc. -->
+                    <execution>
+                        <id>configuration-callsite-guard</id>
+                        <phase>none</phase>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <includes>
+                                <include>**/ConfigurationCallSiteGuardTest.java</include>
+                            </includes>
+                            <excludes combine.self="override"/>
+                            <failIfNoTests>true</failIfNoTests>
+                        </configuration>
+                    </execution>
+                    <!-- run ONLY the forked-charset guard, in a fresh fork forced to a non-UTF-8
+                         default charset (ISO-8859-1). -->
+                    <execution>
+                        <id>dashboard-charset-fork-test</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <includes>
+                                <include>**/DashboardContentLengthCharsetForkTest.java</include>
+                            </includes>
+                            <excludes combine.self="override"/>
+                            <forkCount>1</forkCount>
+                            <reuseForks>false</reuseForks>
+                            <!-- Append the charset override AFTER the inherited @{argLine} (jacoco agent
+                                 + locale). The order matters: the last -Dfile.encoding on the command
+                                 line wins, so it MUST stay after @{argLine} — do not move it before, or
+                                 an inherited file.encoding=UTF-8 would win and silently disable the
+                                 guard. On Java 17 this forces Charset.defaultCharset() to ISO-8859-1;
+                                 on any JVM that ignores the override (JEP 400) the test skips itself. -->
+                            <argLine>@{argLine} -Dfile.encoding=ISO-8859-1 -Dsun.jnu.encoding=ISO-8859-1 -Duser.language=en -Duser.country=GB -Dmockserver.testOutput=${mockserver.testOutput} -Dmockserver.maxLogEntries=1000 ${mockserver.leakArgLine} ${mockserver.testArgLine}</argLine>
+                            <!-- never fail the build if this is the only execution targeted (e.g. a
+                                 developer running -Dtest pointed elsewhere) -->
+                            <failIfNoTests>false</failIfNoTests>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- All of this module's integration tests share one failsafe fork, which under the paranoid
+                 leak detector runs close to the parent's 1800 s limit. 2400 s still ends a hung fork
+                 well inside the CI build step's 90-minute timeout. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <forkedProcessTimeoutInSeconds>2400</forkedProcessTimeoutInSeconds>
+                </configuration>
+            </plugin>
+            <!-- Expose the RESOLVED path of every dependency as a Maven property
+                 (io.netty:netty-tcnative-boringssl-static:jar -> its local-repo path)
+                 so the stamp execution below can derive the tcnative version from the
+                 exact same (netty-bom governed) resolution as the bundled tcnative
+                 classes. Mirrors mockserver-netty-no-dependencies/pom.xml. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.11.0</version>
+                <executions>
+                    <execution>
+                        <id>expose-dependency-paths</id>
+                        <phase>initialize</phase>
+                        <goals>
+                            <goal>properties</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- Stamp the resolved netty-tcnative version into the project jar
+                 (META-INF/mockserver-tcnative.version) BEFORE maven-jar-plugin and
+                 maven-assembly-plugin run at package. The assembly descriptor unpacks
+                 the project artifact (useProjectArtifact=true), so the stamp is carried
+                 into mockserver-netty-<ver>-jar-with-dependencies.jar.
+
+                 WHY THIS MODULE TOO: the Dockerfiles' default `ARG source=download`
+                 path fetches THIS assembly artifact
+                 (.../mockserver-netty/<ver>/mockserver-netty-<ver>-jar-with-dependencies.jar)
+                 and reads the stamp back to download the exact-matching native .so.
+                 The mockserver-netty-no-dependencies module stamps its own shade output
+                 for the `source=copy` path (release/snapshot/CI); BOTH artifacts must
+                 carry the stamp or the download path derives an empty version and fails
+                 closed. Reuses the same script + resolution so the two can never drift.
+
+                 Never skipped (skip=false, unlike test-bound executions): release and
+                 Docker builds run with -DskipTests and still must produce the stamp. -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.6.4</version>
+                <executions>
+                    <execution>
+                        <id>stamp-tcnative-version</id>
+                        <phase>prepare-package</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <skip>false</skip>
+                            <workingDirectory>${basedir}</workingDirectory>
+                            <executable>../mockserver-netty-no-dependencies/src/packaging/stamp-tcnative-version.sh</executable>
+                            <arguments>
+                                <argument>${io.netty:netty-tcnative-boringssl-static:jar}</argument>
+                                <argument>${project.build.outputDirectory}</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+
+                    <execution>
+
+                        <!-- Fail the build if a slim jar lost its natives. maven-assembly does NOT fail when an
+
+                             <include> matches nothing, so a future netty rename would silently ship a slim jar
+
+                             with no native libraries: it would build, install and start, while epoll fell back
+
+                             to NIO and tcnative to JDK SSL. docker/Dockerfile's jarprep guards its equivalent
+
+                             trim the same way; this keeps the published artifacts from drifting from it. -->
+
+                        <id>assert-slim-jar-natives-x86_64</id>
+
+                        <phase>verify</phase>
+
+                        <goals>
+
+                            <goal>exec</goal>
+
+                        </goals>
+
+                        <configuration>
+
+                            <workingDirectory>${basedir}</workingDirectory>
+
+                            <executable>../mockserver-netty-no-dependencies/src/packaging/assert-slim-jar-natives.sh</executable>
+
+                            <arguments>
+
+                                <argument>${project.build.directory}/${project.build.finalName}-jar-with-dependencies-linux-x86_64.jar</argument>
+
+                                <argument>x86_64</argument>
+
+                            </arguments>
+
+                        </configuration>
+
+                    </execution>
+
+                    <execution>
+
+                        <id>assert-slim-jar-natives-aarch_64</id>
+
+                        <phase>verify</phase>
+
+                        <goals>
+
+                            <goal>exec</goal>
+
+                        </goals>
+
+                        <configuration>
+
+                            <workingDirectory>${basedir}</workingDirectory>
+
+                            <executable>../mockserver-netty-no-dependencies/src/packaging/assert-slim-jar-natives.sh</executable>
+
+                            <arguments>
+
+                                <argument>${project.build.directory}/${project.build.finalName}-jar-with-dependencies-linux-aarch_64.jar</argument>
+
+                                <argument>aarch_64</argument>
+
+                            </arguments>
+
+                        </configuration>
+
+                    </execution>
+
+
+                    <execution>
+
+                        <!-- The other half of the guard above: the http3 classifier is the ONLY artifact that
+
+                             carries the QUIC natives, so nothing else would notice if they vanished. -->
+
+                        <id>assert-http3-jar-natives</id>
+
+                        <phase>verify</phase>
+
+                        <goals>
+
+                            <goal>exec</goal>
+
+                        </goals>
+
+                        <configuration>
+
+                            <workingDirectory>${basedir}</workingDirectory>
+
+                            <executable>../mockserver-netty-no-dependencies/src/packaging/assert-http3-jar-natives.sh</executable>
+
+                            <arguments>
+
+                                <argument>${project.build.directory}/${project.build.finalName}-jar-with-dependencies-http3.jar</argument>
+
+                            </arguments>
+
+                        </configuration>
+
+                    </execution>
+
+
+                    <execution>
+
+                        <!-- The third half of the guard: the DEFAULT jar-with-dependencies is the most-downloaded
+
+                             artifact and the one the Dockerfiles' source=download path fetches, yet nothing asserted
+
+                             its natives. It carries every platform's tcnative and Linux epoll, and NO quiche (that
+
+                             ships in the http3 classifier). A dropped platform native, or a re-added quiche, would
+
+                             build and publish silently. -->
+
+                        <id>assert-default-jar-natives</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <workingDirectory>${basedir}</workingDirectory>
+                            <executable>../mockserver-netty-no-dependencies/src/packaging/assert-default-jar-natives.sh</executable>
+                            <arguments>
+                                <argument>${project.build.directory}/${project.build.finalName}-jar-with-dependencies.jar</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- make jar executable -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.5.1</version>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <mainClass>org.mockserver.cli.Main</mainClass>
+                            <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+                        </manifest>
+                    </archive>
+                </configuration>
+            </plugin>
+            <!-- generate single runnable jar (assembly:single) -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-assembly-plugin</artifactId>
+                <version>3.8.0</version>
+                <configuration>
+                    <skipAssembly>${skipAssembly}</skipAssembly>
+                    <tarLongFileMode>posix</tarLongFileMode>
+                    <archive>
+                        <manifest>
+                            <mainClass>org.mockserver.cli.Main</mainClass>
+                        </manifest>
+                    </archive>
+                    <descriptors>
+                        <descriptor>src/main/assembly/jar-with-dependencies/jar-with-dependencies.xml</descriptor>
+                        <!-- Additive, single-platform slim variants of the fat jar. They are
+                             attached ALONGSIDE the default jar-with-dependencies artifact above
+                             (which stays byte-for-byte unchanged); each keeps only one Linux arch's
+                             netty ELF .so, which removes ~13.2 MiB per jar. (The ~18 MiB figure quoted
+                             elsewhere is the foreign-native cost across a consumer's WHOLE
+                             162-jar resolution, not this one artifact.) Scope was narrowed
+                             deliberately to the two Linux arches (the empty-disk case) - macOS and
+                             Windows are not built here because those developers pull into a warm
+                             local ~/.m2 once. Each extra artifact must additionally be GPG-signed,
+                             staged, published and verified every release. See each descriptor's
+                             header for the filter rationale (kept in sync with docker/Dockerfile's
+                             jarprep stage). -->
+                        <descriptor>src/main/assembly/jar-with-dependencies-linux-x86_64/jar-with-dependencies-linux-x86_64.xml</descriptor>
+                        <descriptor>src/main/assembly/jar-with-dependencies-linux-aarch_64/jar-with-dependencies-linux-aarch_64.xml</descriptor>
+                        <descriptor>src/main/assembly/jar-with-dependencies-http3/jar-with-dependencies-http3.xml</descriptor>
+                        <descriptor>src/main/assembly/brew-tar/brew-tar.xml</descriptor>
+                    </descriptors>
+                </configuration>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>single</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- shaded dependency maven integration tests -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-invoker-plugin</artifactId>
+                <version>3.10.1</version>
+                <configuration>
+                    <skipInvocation>${skipTests}</skipInvocation>
+                    <debug>false</debug>
+                    <!-- only stream the invoked child Maven build log on
+                         failure (invoker 3.3+) — passing builds stay quiet so
+                         the CI log is not flooded with per-invoker child output. -->
+                    <streamLogs>false</streamLogs>
+                    <streamLogsOnFailures>true</streamLogsOnFailures>
+                    <showErrors>true</showErrors>
+                    <showVersion>true</showVersion>
+                    <disableReports>true</disableReports>
+                    <parallelThreads>${maven-invoker-parallel-threads}</parallelThreads>
+                    <projectsDirectory>${basedir}/src/integration-tests/</projectsDirectory>
+                    <cloneProjectsTo>${project.build.directory}/integration-tests/</cloneProjectsTo>
+                    <reportsDirectory>${project.build.directory}</reportsDirectory>
+                    <cloneClean>true</cloneClean>
+                    <ignoreFailures>false</ignoreFailures>
+                    <addTestClassPath>true</addTestClassPath>
+                    <properties>
+                        <property>
+                            <name>mockserver.version</name>
+                            <value>${project.version}</value>
+                        </property>
+                    </properties>
+                    <environmentVariables>
+                        <mockserver.logLevel>DEBUG</mockserver.logLevel>
+                    </environmentVariables>
+                    <filterProperties>
+                        <mockserver.version>${project.version}</mockserver.version>
+                    </filterProperties>
+                    <settingsFile>src/integration-tests/settings.xml</settingsFile>
+                    <!--<mavenOpts>-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=5005</mavenOpts>-->
+                    <pomIncludes>
+                        <pomInclude>maven-**/pom.xml</pomInclude>
+                    </pomIncludes>
+                    <goals>
+                        <goal>test</goal>
+                    </goals>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>integration-test</id>
+                        <goals>
+                            <goal>install</goal>
+                            <goal>run</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- jacoco:check minimum set ~4 points below the measured unit-test floor of 0.5931 (M6 ratchet, 2026-05-28). Tighter threshold catches genuine coverage regressions without flaking on small natural variation.
+                 BRANCH bundle minimum (0.35) ensures branch coverage doesn't regress. -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>check</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <rule>
+                                    <element>BUNDLE</element>
+                                    <limits>
+                                        <limit>
+                                            <counter>LINE</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>0.55</minimum>
+                                        </limit>
+                                        <limit>
+                                            <counter>BRANCH</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>0.35</minimum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                                <!-- per-CLASS LINE floor removed: not enforceable here (many existing
+                                     handlers have <30% unit-line coverage). BUNDLE LINE+BRANCH retained. -->
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <profile>
+            <id>build-ui</id>
+            <activation>
+                <file>
+                    <exists>../../mockserver-ui/package.json</exists>
+                </file>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>com.github.eirslett</groupId>
+                        <artifactId>frontend-maven-plugin</artifactId>
+                        <version>2.0.2</version>
+                        <configuration>
+                            <workingDirectory>${project.basedir}/../../mockserver-ui</workingDirectory>
+                            <installDirectory>${project.build.directory}/frontend</installDirectory>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>install-node-and-npm</id>
+                                <phase>generate-resources</phase>
+                                <goals>
+                                    <goal>install-node-and-npm</goal>
+                                </goals>
+                                <configuration>
+                                    <nodeVersion>v22.23.1</nodeVersion>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>npm-ci</id>
+                                <phase>generate-resources</phase>
+                                <goals>
+                                    <goal>npm</goal>
+                                </goals>
+                                <configuration>
+                                    <arguments>ci</arguments>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>npm-build</id>
+                                <phase>generate-resources</phase>
+                                <goals>
+                                    <goal>npm</goal>
+                                </goals>
+                                <configuration>
+                                    <arguments>run build</arguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-resources-plugin</artifactId>
+                        <version>3.5.0</version>
+                        <executions>
+                            <execution>
+                                <id>copy-ui-build</id>
+                                <phase>process-resources</phase>
+                                <goals>
+                                    <goal>copy-resources</goal>
+                                </goals>
+                                <configuration>
+                                    <overwrite>true</overwrite>
+                                    <resources>
+                                        <resource>
+                                            <directory>${project.basedir}/../../mockserver-ui/build</directory>
+                                            <filtering>false</filtering>
+                                        </resource>
+                                    </resources>
+                                    <outputDirectory>${project.build.outputDirectory}/org/mockserver/dashboard</outputDirectory>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!-- CI integration-test shards. The reactor build skips this module's integration tests
+             (netty-it-skip) and parallel Buildkite steps run them, one step per netty-it-shard-*
+             profile (.buildkite/scripts/steps/java-netty-it-shard.sh). netty-it-shard-rest
+             excludes exactly the packages the named shards include, so every integration test
+             runs in one shard. To rebalance, change the mockserver.nettyItShard.* patterns. -->
+        <profile>
+            <id>netty-it-skip</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <skipITs>true</skipITs>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>netty-it-shard-proxy-http</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <includes combine.self="override">
+                                <include>${mockserver.nettyItShard.proxyHttp}/*IntegrationTest.java</include>
+                            </includes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>netty-it-shard-mock</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <includes combine.self="override">
+                                <include>${mockserver.nettyItShard.mock}/*IntegrationTest.java</include>
+                            </includes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>netty-it-shard-rest</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <includes combine.self="override">
+                                <include>**/*IntegrationTest.java</include>
+                            </includes>
+                            <!-- **/*$* restates failsafe's default exclude, which an explicit list replaces -->
+                            <excludes combine.self="override">
+                                <exclude>${mockserver.nettyItShard.proxyHttp}/*IntegrationTest.java</exclude>
+                                <exclude>${mockserver.nettyItShard.mock}/*IntegrationTest.java</exclude>
+                                <exclude>**/*$*</exclude>
+                            </excludes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
+</project>

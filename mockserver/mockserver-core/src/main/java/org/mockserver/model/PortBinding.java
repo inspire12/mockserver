@@ -1,0 +1,71 @@
+package org.mockserver.model;
+
+import org.mockserver.version.Version;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+/**
+ * @author jamesdbloom
+ */
+public class PortBinding extends ObjectWithJsonToString {
+
+    private static final String VERSION = Version.getVersion();
+    private static final String ARTIFACT_ID = Version.getArtifactId();
+    private static final String GROUP_ID = Version.getGroupId();
+    private static final String GIT_HASH = Version.getGitHash();
+
+    private List<Integer> ports = new ArrayList<>();
+    private Integer dnsPort;
+    private final String version = VERSION;
+    private final String artifactId = ARTIFACT_ID;
+    private final String groupId = GROUP_ID;
+    private final String gitHash = GIT_HASH;
+
+    public static PortBinding portBinding(Integer... ports) {
+        return portBinding(Arrays.asList(ports));
+    }
+
+    public static PortBinding portBinding(List<Integer> ports) {
+        return new PortBinding().setPorts(ports);
+    }
+
+    public List<Integer> getPorts() {
+        return ports;
+    }
+
+    public PortBinding setPorts(List<Integer> ports) {
+        this.ports = ports;
+        return this;
+    }
+
+    /**
+     * @return the UDP port of the DNS mock server, set only in the answer to a status request and only while DNS
+     * mocking is on
+     */
+    public Integer getDnsPort() {
+        return dnsPort;
+    }
+
+    public PortBinding setDnsPort(Integer dnsPort) {
+        this.dnsPort = dnsPort;
+        return this;
+    }
+
+    public String getVersion() {
+        return version;
+    }
+
+    public String getArtifactId() {
+        return artifactId;
+    }
+
+    public String getGroupId() {
+        return groupId;
+    }
+
+    public String getGitHash() {
+        return gitHash;
+    }
+}

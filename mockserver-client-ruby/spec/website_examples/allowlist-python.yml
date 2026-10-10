@@ -1,0 +1,252 @@
+# Website accordions whose Python tab is allowed to differ from the REST API tab.
+# Same format and rules as allowlist.yml (the Ruby tabs): key, the finding
+# it accepts (status), a reason, and the digest the check prints. Any other
+# finding fails the check, and so does an entry that no longer matches.
+#   ruby spec/website_examples/check_website_examples.rb --lang python --verbose
+
+# --- Same as the Ruby tab ---
+mock_server/_includes/grpc_mocking.html#button_grpc_record_replay:
+  status: differs
+  digest: d7e5cdb560d3
+  reason: Python replays the expectations it retrieved; the REST API tab saves them
+    to a file and uploads that file.
+mock_server/_includes/load_scenario_code_examples.html#button_load_lifecycle:
+  status: differs
+  digest: d453933386c4
+  reason: Python also clears the scenario registry at the end; the REST API tab stops
+    at stop.
+mock_server/_includes/load_scenario_code_examples.html#button_load_rate_soak:
+  status: differs
+  digest: 2a7637c5dc46
+  reason: Python also stops the scenario after starting it; the REST API tab registers
+    and starts it.
+mock_server/_includes/load_scenario_code_examples.html#button_load_vu_ramp:
+  status: differs
+  digest: 4f98da7d9e08
+  reason: Python also stops the scenario after starting it; the REST API tab registers
+    and starts it.
+mock_server/_includes/openapi_request_matcher_code_examples.html#button_match_by_inline_openapi_json:
+  status: rest_invalid_json
+  digest: 3fda2f398375
+  reason: One REST API tab splices the spec in with a shell backtick cat, which is
+    not JSON as written; Python reads the spec from a file.
+? mock_server/_includes/stateful_scenarios.html#external_trigger_mdash_flip_a_dependency_from_healthy_to_down_on_demand_from_your_test_harness
+: status: differs
+  digest: 9e853dd5de24
+  reason: Python, like the Java tab, shows only the trigger call; the REST API tab
+    also registers the expectations it relies on.
+? mock_server/_includes/stateful_scenarios.html#timed_auto_transition_mdash_model_a_deployment_that_automatically_completes_after_1_second
+: status: differs
+  digest: 5135518949b0
+  reason: Python, like the Java tab, shows only the scenario call; the REST API tab
+    also registers the expectations it relies on.
+mock_server/contract_testing.html#button_pact_full_workflow:
+  status: differs
+  digest: 81612ff860c6
+  reason: The REST API tab adds an expectation id and a JSON-object body and reads
+    the contract from a file; Python follows the Java tab and passes the exported
+    contract on.
+mock_server/load_injection.html#button_load_step_checks:
+  status: differs
+  digest: 4c663b38bea8
+  reason: Python also stops the scenario after starting it; the REST API tab registers
+    and starts it.
+mock_server/load_injection.html#in_run_thresholds_fail_the_run_on_a_latency_or_error_budget_breach:
+  status: differs
+  digest: 31686a71eb8b
+  reason: Python reads the status once; the REST API tab polls it in a shell loop.
+mock_server/mock_openid_connect_provider.html#button_create_oidc_provider:
+  status: differs
+  digest: 665743e62ea3
+  reason: The REST API tab shows a defaults call and then a configured call; Python
+    shows the configured one.
+mock_server/using_openapi.html#button_wsdl_inline:
+  status: differs
+  digest: b996b93a35f3
+  reason: The REST API tab abbreviates the WSDL document with "..."; Python sends
+    it in full.
+
+# --- Intentional: the tab shows the same feature another way ---
+mock_server/_includes/response_action_code_examples.html#button_response_literal_binary_PNG_body:
+  status: differs
+  digest: 25b08a4eb2be
+  reason: The Python tab abbreviates the PNG's base64 to its first characters; the
+    REST API tab inlines the whole image.
+mock_server/_includes/stateful_scenarios.html#rest_api_reference_mdash_inspect_and_control_scenarios_with_curl:
+  status: differs
+  digest: 5f0cf6f1da06
+  reason: Python makes the same calls but lists all scenarios last; the REST API tab
+    lists them first.
+mock_server/debugging_issues.html#button_retrieve_active_expectations_as_json:
+  status: differs
+  digest: 48aab88200ea
+  reason: The Python tab, like the Java and JavaScript tabs, also matches POST; the
+    REST API tab and the other language tabs match the path only.
+mock_server/load_injection.html#cross_step_capture_login_capture_a_token_reuse_it:
+  status: differs
+  digest: 7bacfb6e99e9
+  reason: Python sends the login body as a JSON string; the REST API tab as a JSON
+    object. A load step sends the same bytes either way.
+mock_server/load_injection.html#register_start_read_status_then_stop_a_ramp_then_hold_scenario:
+  status: differs
+  digest: 4dc640b80414
+  reason: Python reads the scenario status and stops it with its own calls; the REST
+    API tab reads and stops by path (same calls, other order).
+mock_server/running_tests_in_parallel.html#button_parallel_tests_unique_session_id:
+  status: differs
+  digest: a52815ca8944
+  reason: Python generates a fresh session id with uuid.uuid4(); the REST API tab
+    shows a fixed one.
+mock_server/using_openapi.html#button_generate_response_from_json_schema:
+  status: differs
+  digest: 72928c65b801
+  reason: Python sends the same JSON schema re-serialised (keys reordered, whitespace
+    removed); the REST API tab sends it as written.
+
+# --- The check cannot run it ---
+mock_server/CORS_support.html#button_enabled_permissive_cors_for_all_response:
+  status: raised
+  digest: '08836235c538'
+  reason: Python starts a server with the CORS properties (the binary launcher, which
+    would download the server); the REST API tab sets them on a running server.
+mock_server/CORS_support.html#button_enabled_permissive_cors_for_control_plane_api:
+  status: raised
+  digest: '08836235c538'
+  reason: Python starts a server with the CORS properties (the binary launcher, which
+    would download the server); the REST API tab sets them on a running server.
+mock_server/HTTPS_TLS.html#button_client_mtls_connection:
+  status: raised
+  digest: e17581e458c3
+  reason: Connects over mutual TLS with certificate files at placeholder paths (/path/to/...);
+    the check runs a plain HTTP capture server.
+mock_server/_includes/openapi_request_matcher_code_examples.html#button_match_by_inline_openapi_yaml:
+  status: raised
+  digest: e17581e458c3
+  reason: Python reads the YAML spec from a placeholder path (/path/to/...); the REST
+    API tab inlines it.
+mock_server/interactive_breakpoints.html#button_breakpoint_client_api:
+  status: raised
+  digest: 113e060bc209
+  reason: Opens the breakpoint WebSocket first, which the check does not serve, so
+    nothing is registered.
+mock_server/mockserver_clients.html#button_client_create_expectation_over_tls:
+  status: raised
+  digest: e04e735f2419
+  reason: Connects over TLS; the check runs a plain HTTP capture server, so the TLS
+    handshake never completes.
+mock_server/using_openapi.html#button_open_api_inline_json_specification:
+  status: raised
+  digest: e17581e458c3
+  reason: Python reads the spec from a placeholder path (/path/to/...); the REST API
+    tab splices it in with a shell backtick command.
+mock_server/using_openapi.html#button_wsdl_file:
+  status: raised
+  digest: e17581e458c3
+  reason: Python reads the WSDL from a placeholder path (/path/to/...); the REST API
+    tab sends it from a file with -d @.
+
+# --- Not compared ---
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_basic:
+  status: not_compared
+  digest: eb83b2a2808b
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_handlers:
+  status: not_compared
+  digest: 65395ee628a8
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_push:
+  status: not_compared
+  digest: 4c14b2e7facd
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_streaming:
+  status: not_compared
+  digest: fdf5792c8c72
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_a2a_workflow:
+  status: not_compared
+  digest: 21164c526be0
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_mcp_full:
+  status: not_compared
+  digest: 87797caf522b
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_mcp_prompts:
+  status: not_compared
+  digest: 741d3a3dc952
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_mcp_resources:
+  status: not_compared
+  digest: 2c9b82de87cd
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/ai_protocol_mocking.html#button_mcp_tools:
+  status: not_compared
+  digest: f1f2a49384b8
+  reason: The accordion has no REST API tab to compare with.
+mock_server/_includes/creating_expectations.html#tabs-1:
+  status: not_compared
+  digest: 8f1312ac6aba
+  reason: These language tabs have no REST API tab to compare with.
+mock_server/ai_mcp_setup.html#loose-337a597b4c1e:
+  status: not_compared
+  digest: 337a597b4c1e
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/ai_traffic_inspection.html#loose-3ab5c6fc8c6a:
+  status: not_compared
+  digest: 3ab5c6fc8c6a
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/ai_traffic_inspection.html#loose-3c5f024d4f47:
+  status: not_compared
+  digest: 3c5f024d4f47
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/ai_traffic_inspection.html#loose-5a0767f339e9:
+  status: not_compared
+  digest: 5a0767f339e9
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/ai_traffic_inspection.html#loose-9916f6c128b3:
+  status: not_compared
+  digest: 9916f6c128b3
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/client_compatibility.html#loose-a44c7382f286:
+  status: not_compared
+  digest: a44c7382f286
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/client_compatibility.html#loose-acc37fa08b87:
+  status: not_compared
+  digest: acc37fa08b87
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/drift_detection.html#tabs-1:
+  status: not_compared
+  digest: 68f01f5746c2
+  reason: These language tabs have no REST API tab to compare with.
+mock_server/drift_detection.html#tabs-2:
+  status: not_compared
+  digest: a1c5dcbf23a7
+  reason: These language tabs have no REST API tab to compare with.
+mock_server/mock_openid_connect_provider.html#button_device_flow:
+  status: not_compared
+  digest: 8e3a574ab91a
+  reason: The REST API tab calls the mocked OIDC endpoints, not /mockserver/.
+mock_server/mock_openid_connect_provider.html#button_introspect_token:
+  status: not_compared
+  digest: 5ac37ed921a6
+  reason: The REST API tab calls the mocked OIDC endpoints, not /mockserver/.
+mock_server/mockserver_clients.html#loose-4c1c89943931:
+  status: not_compared
+  digest: 4c1c89943931
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/mockserver_clients.html#loose-7e0cc11e7507:
+  status: not_compared
+  digest: 7e0cc11e7507
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/mockserver_clients.html#loose-8070856883e4:
+  status: not_compared
+  digest: 8070856883e4
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/mockserver_clients.html#loose-c8fc73e61415:
+  status: not_compared
+  digest: c8fc73e61415
+  reason: Outside any accordion, so there is no REST API tab to compare with.
+mock_server/mockserver_testcontainers.html#loose-fb2962a87b11:
+  status: not_compared
+  digest: fb2962a87b11
+  reason: Outside any accordion, so there is no REST API tab to compare with.

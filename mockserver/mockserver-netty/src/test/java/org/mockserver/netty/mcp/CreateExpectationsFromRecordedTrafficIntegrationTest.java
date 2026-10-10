@@ -1,0 +1,396 @@
+package org.mockserver.netty.mcp;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.mockserver.lifecycle.LifeCycle;
+import org.mockserver.log.model.LogEntry;
+import org.mockserver.logging.MockServerLogger;
+import org.mockserver.mock.HttpState;
+import org.mockserver.scheduler.Scheduler;
+import org.mockserver.serialization.ObjectMapperFactory;
+
+import org.mockserver.socket.PortFactory;
+
+import java.util.Arrays;
+import java.util.function.BooleanSupplier;
+
+import static org.hamcrest.CoreMatchers.*;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+import static org.mockserver.configuration.Configuration.configuration;
+import static org.mockserver.log.model.LogEntry.LogMessageType.FORWARDED_REQUEST;
+import static org.mockserver.model.HttpRequest.request;
+import static org.mockserver.model.HttpResponse.response;
+
+/**
+ * Integration test that uses HttpState directly to:
+ * 1. Log FORWARDED_REQUEST entries (simulating proxy/forwarding mode)
+ * 2. Call create_expectations_from_recorded_traffic MCP tool
+ * 3. Verify active expectations are created that match the recorded traffic
+ */
+public class CreateExpectationsFromRecordedTrafficIntegrationTest {
+
+    private HttpState httpState;
+    private McpToolRegistry toolRegistry;
+    private ObjectMapper objectMapper;
+
+    @Before
+    public void setUp() {
+        LifeCycle server = mock(LifeCycle.class);
+        when(server.getScheduler()).thenReturn(mock(Scheduler.class));
+        when(server.getLocalPorts()).thenReturn(Arrays.asList(PortFactory.findFreePort()));
+        when(server.isRunning()).thenReturn(true);
+
+        httpState = new HttpState(configuration(), new MockServerLogger(), mock(Scheduler.class));
+        toolRegistry = new McpToolRegistry(httpState, server);
+        objectMapper = ObjectMapperFactory.buildObjectMapperWithoutRemovingEmptyValues();
+    }
+
+    @After
+    public void stopHttpState() {
+        httpState.stop();
+    }
+
+    /**
+     * Polls until the condition is true or the deadline (5 seconds) is exceeded.
+     */
+    private void pollUntilTrue(BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 5000;
+        while (!condition.getAsBoolean()) {
+            if (System.currentTimeMillis() > deadline) {
+                throw new AssertionError("Timed out waiting for condition to become true");
+            }
+            Thread.sleep(50);
+        }
+    }
+
+    private int retrieveRecordedExpectationCount() {
+        ObjectNode params = objectMapper.createObjectNode();
+        params.put("type", "RECORDED_EXPECTATIONS");
+        params.put("format", "JSON");
+        JsonNode result = toolRegistry.callTool("raw_retrieve", params);
+        JsonNode data = result.path("data");
+        if (data.isArray()) {
+            return data.size();
+        }
+        return 0;
+    }
+
+    @Test
+    public void shouldCreateActiveExpectationsFromForwardedRequests() throws Exception {
+        // given - simulate forwarded traffic (as if MockServer proxied to a real API)
+        httpState.log(new LogEntry()
+            .setType(FORWARDED_REQUEST)
+            .setLogLevel(org.slf4j.event.Level.INFO)
+            .setHttpRequest(request().withMethod("GET").withPath("/api/users"))
+            .setHttpResponse(response().withStatusCode(200).withBody("[{\"id\":1,\"name\":\"Alice\"}]"))
+            .setExpectation(request().withMethod("GET").withPath("/api/users"),
+                response().withStatusCode(200).withBody("[{\"id\":1,\"name\":\"Alice\"}]"))
+            .setMessageFormat("returning response:{}for forwarded request")
+            .setArguments(response().withStatusCode(200).withBody("[{\"id\":1,\"name\":\"Alice\"}]"))
+        );
+
+        httpState.log(new LogEntry()
+            .setType(FORWARDED_REQUEST)
+            .setLogLevel(org.slf4j.event.Level.INFO)
+            .setHttpRequest(request().withMethod("POST").withPath("/api/orders"))
+            .setHttpResponse(response().withStatusCode(201).withBody("{\"orderId\":42}"))
+            .setExpectation(request().withMethod("POST").withPath("/api/orders"),
+                response().withStatusCode(201).withBody("{\"orderId\":42}"))
+            .setMessageFormat("returning response:{}for forwarded request")
+            .setArguments(response().withStatusCode(201).withBody("{\"orderId\":42}"))
+        );
+
+        // poll until both recorded expectations are visible
+        pollUntilTrue(() -> retrieveRecordedExpectationCount() >= 2);
+
+        // when - create expectations from recorded traffic
+        ObjectNode params = objectMapper.createObjectNode();
+        JsonNode result = toolRegistry.callTool("create_expectations_from_recorded_traffic", params);
+
+        // then - expectations should be created
+        assertThat(result.path("status").asText(), is("created"));
+        assertThat(result.path("count").asInt(), is(2));
+        assertThat(result.path("ids").isArray(), is(true));
+        assertThat(result.path("ids").size(), is(2));
+
+        // verify the expectations are now active
+        ObjectNode retrieveParams = objectMapper.createObjectNode();
+        retrieveParams.put("type", "ACTIVE_EXPECTATIONS");
+        retrieveParams.put("format", "JSON");
+        JsonNode activeResult = toolRegistry.callTool("raw_retrieve", retrieveParams);
+        assertThat(activeResult.path("data").isArray(), is(true));
+        assertThat(activeResult.path("data").size(), is(2));
+
+        // verify the expectations have the correct request/response details
+        boolean foundUsersExpectation = false;
+        boolean foundOrdersExpectation = false;
+        for (JsonNode exp : activeResult.path("data")) {
+            String path = exp.path("httpRequest").path("path").asText();
+            if ("/api/users".equals(path)) {
+                foundUsersExpectation = true;
+                assertThat(exp.path("httpRequest").path("method").asText(), is("GET"));
+                assertThat(exp.path("httpResponse").path("statusCode").asInt(), is(200));
+            } else if ("/api/orders".equals(path)) {
+                foundOrdersExpectation = true;
+                assertThat(exp.path("httpRequest").path("method").asText(), is("POST"));
+                assertThat(exp.path("httpResponse").path("statusCode").asInt(), is(201));
+            }
+        }
+        assertThat("should find /api/users expectation", foundUsersExpectation, is(true));
+        assertThat("should find /api/orders expectation", foundOrdersExpectation, is(true));
+    }
+
+    @Test
+    public void shouldCreateAndPreviewMocksThatMatchADirectRequestWithAnotherHost() throws Exception {
+        // given - traffic recorded through the proxy from curl -x, carrying the upstream's Host
+        org.mockserver.model.HttpRequest recorded = request().withMethod("GET").withPath("/api/direct")
+            .withHeader("Host", "127.0.0.1:1134")
+            .withHeader("Proxy-Connection", "Keep-Alive")
+            .withHeader("X-Api-Version", "2");
+        httpState.log(new LogEntry()
+            .setType(FORWARDED_REQUEST)
+            .setLogLevel(org.slf4j.event.Level.INFO)
+            .setHttpRequest(recorded)
+            .setHttpResponse(response().withStatusCode(200).withBody("direct"))
+            .setExpectation(recorded, response().withStatusCode(200).withBody("direct"))
+            .setMessageFormat("returning response:{}for forwarded request")
+            .setArguments(response().withStatusCode(200))
+        );
+        pollUntilTrue(() -> retrieveRecordedExpectationCount() >= 1);
+
+        // when - preview, then create
+        ObjectNode previewParams = objectMapper.createObjectNode();
+        previewParams.put("preview", true);
+        JsonNode preview = toolRegistry.callTool("create_expectations_from_recorded_traffic", previewParams);
+        JsonNode created = toolRegistry.callTool("create_expectations_from_recorded_traffic", objectMapper.createObjectNode());
+
+        // then - neither pins Host nor Proxy-Connection, and an application calling MockServer directly matches
+        String previewRequest = preview.path("expectations").get(0).path("httpRequest").toString().toLowerCase(java.util.Locale.ROOT);
+        assertThat(previewRequest, not(containsString("\"host\"")));
+        assertThat(previewRequest, not(containsString("proxy-connection")));
+        assertThat(previewRequest, containsString("x-api-version"));
+        assertThat(created.path("status").asText(), is("created"));
+        org.mockserver.model.HttpRequest direct = request().withMethod("GET").withPath("/api/direct")
+            .withHeader("Host", "localhost:1124")
+            .withHeader("X-Api-Version", "2");
+        assertThat(httpState.firstMatchingExpectation(direct), is(notNullValue()));
+    }
+
+    @Test
+    public void shouldPreviewWithoutCreatingExpectations() throws Exception {
+        // given - simulate forwarded traffic
+        httpState.log(new LogEntry()
+            .setType(FORWARDED_REQUEST)
+            .setLogLevel(org.slf4j.event.Level.INFO)
+            .setHttpRequest(request().withMethod("GET").withPath("/api/health"))
+            .setHttpResponse(response().withStatusCode(200).withBody("{\"status\":\"ok\"}"))
+            .setExpectation(request().withMethod("GET").withPath("/api/health"),
+                response().withStatusCode(200).withBody("{\"status\":\"ok\"}"))
+            .setMessageFormat("returning response:{}for forwarded request")
+            .setArguments(response().withStatusCode(200).withBody("{\"status\":\"ok\"}"))
+        );
+
+        // poll until the recorded expectation is visible
+        pollUntilTrue(() -> retrieveRecordedExpectationCount() >= 1);
+
+        // when - preview the expectations
+        ObjectNode params = objectMapper.createObjectNode();
+        params.put("preview", true);
+        JsonNode result = toolRegistry.callTool("create_expectations_from_recorded_traffic", params);
+
+        // then - preview should return expectations
+        assertThat(result.path("status").asText(), is("preview"));
+        assertThat(result.path("count").asInt(), is(1));
+        assertThat(result.path("expectations").isArray(), is(true));
+        assertThat(result.path("expectations").size(), is(1));
+
+        // the expectation JSON should contain the request/response
+        JsonNode previewExp = result.path("expectations").get(0);
+        assertThat(previewExp.has("httpRequest"), is(true));
+        assertThat(previewExp.has("httpResponse"), is(true));
+
+        // verify no active expectations were created
+        ObjectNode retrieveParams = objectMapper.createObjectNode();
+        retrieveParams.put("type", "ACTIVE_EXPECTATIONS");
+        retrieveParams.put("format", "JSON");
+        JsonNode activeResult = toolRegistry.callTool("raw_retrieve", retrieveParams);
+        String data = activeResult.path("data").toString();
+        assertThat("no expectations should be active after preview",
+            data.equals("\"\"") || data.equals("[]"), is(true));
+    }
+
+    @Test
+    public void shouldFilterByMethodAndCreateOnlyMatchingExpectations() throws Exception {
+        // given - simulate multiple forwarded requests with different methods
+        httpState.log(new LogEntry()
+            .setType(FORWARDED_REQUEST)
+            .setLogLevel(org.slf4j.event.Level.INFO)
+            .setHttpRequest(request().withMethod("GET").withPath("/api/products"))
+            .setHttpResponse(response().withStatusCode(200).withBody("[]"))
+            .setExpectation(request().withMethod("GET").withPath("/api/products"),
+                response().withStatusCode(200).withBody("[]"))
+            .setMessageFormat("returning response:{}for forwarded request")
+            .setArguments(response().withStatusCode(200).withBody("[]"))
+        );
+
+        httpState.log(new LogEntry()
+            .setType(FORWARDED_REQUEST)
+            .setLogLevel(org.slf4j.event.Level.INFO)
+            .setHttpRequest(request().withMethod("POST").withPath("/api/products"))
+            .setHttpResponse(response().withStatusCode(201).withBody("{\"id\":1}"))
+            .setExpectation(request().withMethod("POST").withPath("/api/products"),
+                response().withStatusCode(201).withBody("{\"id\":1}"))
+            .setMessageFormat("returning response:{}for forwarded request")
+            .setArguments(response().withStatusCode(201).withBody("{\"id\":1}"))
+        );
+
+        httpState.log(new LogEntry()
+            .setType(FORWARDED_REQUEST)
+            .setLogLevel(org.slf4j.event.Level.INFO)
+            .setHttpRequest(request().withMethod("DELETE").withPath("/api/products/1"))
+            .setHttpResponse(response().withStatusCode(204))
+            .setExpectation(request().withMethod("DELETE").withPath("/api/products/1"),
+                response().withStatusCode(204))
+            .setMessageFormat("returning response:{}for forwarded request")
+            .setArguments(response().withStatusCode(204))
+        );
+
+        // poll until all 3 recorded expectations are visible
+        pollUntilTrue(() -> retrieveRecordedExpectationCount() >= 3);
+
+        // when - create expectations only for GET requests
+        ObjectNode params = objectMapper.createObjectNode();
+        params.put("method", "GET");
+        JsonNode result = toolRegistry.callTool("create_expectations_from_recorded_traffic", params);
+
+        // then - only 1 expectation should be created (GET only)
+        assertThat(result.path("status").asText(), is("created"));
+        assertThat(result.path("count").asInt(), is(1));
+
+        // verify the active expectation is the GET one
+        ObjectNode retrieveParams = objectMapper.createObjectNode();
+        retrieveParams.put("type", "ACTIVE_EXPECTATIONS");
+        retrieveParams.put("format", "JSON");
+        JsonNode activeResult = toolRegistry.callTool("raw_retrieve", retrieveParams);
+        assertThat(activeResult.path("data").isArray(), is(true));
+        assertThat(activeResult.path("data").size(), is(1));
+        assertThat(activeResult.path("data").get(0).path("httpRequest").path("method").asText(), is("GET"));
+    }
+
+    @Test
+    public void shouldFilterByPathAndCreateOnlyMatchingExpectations() throws Exception {
+        // given
+        httpState.log(new LogEntry()
+            .setType(FORWARDED_REQUEST)
+            .setLogLevel(org.slf4j.event.Level.INFO)
+            .setHttpRequest(request().withMethod("GET").withPath("/api/users"))
+            .setHttpResponse(response().withStatusCode(200).withBody("[]"))
+            .setExpectation(request().withMethod("GET").withPath("/api/users"),
+                response().withStatusCode(200).withBody("[]"))
+            .setMessageFormat("returning response:{}for forwarded request")
+            .setArguments(response().withStatusCode(200).withBody("[]"))
+        );
+
+        httpState.log(new LogEntry()
+            .setType(FORWARDED_REQUEST)
+            .setLogLevel(org.slf4j.event.Level.INFO)
+            .setHttpRequest(request().withMethod("GET").withPath("/api/orders"))
+            .setHttpResponse(response().withStatusCode(200).withBody("[]"))
+            .setExpectation(request().withMethod("GET").withPath("/api/orders"),
+                response().withStatusCode(200).withBody("[]"))
+            .setMessageFormat("returning response:{}for forwarded request")
+            .setArguments(response().withStatusCode(200).withBody("[]"))
+        );
+
+        // poll until both recorded expectations are visible
+        pollUntilTrue(() -> retrieveRecordedExpectationCount() >= 2);
+
+        // when - filter by path
+        ObjectNode params = objectMapper.createObjectNode();
+        params.put("path", "/api/orders");
+        JsonNode result = toolRegistry.callTool("create_expectations_from_recorded_traffic", params);
+
+        // then
+        assertThat(result.path("status").asText(), is("created"));
+        assertThat(result.path("count").asInt(), is(1));
+
+        // verify the active expectation is the /api/orders one
+        ObjectNode retrieveParams = objectMapper.createObjectNode();
+        retrieveParams.put("type", "ACTIVE_EXPECTATIONS");
+        retrieveParams.put("format", "JSON");
+        JsonNode activeResult = toolRegistry.callTool("raw_retrieve", retrieveParams);
+        assertThat(activeResult.path("data").get(0).path("httpRequest").path("path").asText(), is("/api/orders"));
+    }
+
+    @Test
+    public void shouldReturnNoRecordedTrafficWhenFilterMatchesNothing() throws Exception {
+        // given - record traffic on one path
+        httpState.log(new LogEntry()
+            .setType(FORWARDED_REQUEST)
+            .setLogLevel(org.slf4j.event.Level.INFO)
+            .setHttpRequest(request().withMethod("GET").withPath("/api/users"))
+            .setHttpResponse(response().withStatusCode(200).withBody("[]"))
+            .setExpectation(request().withMethod("GET").withPath("/api/users"),
+                response().withStatusCode(200).withBody("[]"))
+            .setMessageFormat("returning response:{}for forwarded request")
+            .setArguments(response().withStatusCode(200).withBody("[]"))
+        );
+
+        // poll until the recorded expectation is visible
+        pollUntilTrue(() -> retrieveRecordedExpectationCount() >= 1);
+
+        // when - filter by a path that doesn't match
+        ObjectNode params = objectMapper.createObjectNode();
+        params.put("path", "/api/nonexistent");
+        JsonNode result = toolRegistry.callTool("create_expectations_from_recorded_traffic", params);
+
+        // then
+        assertThat(result.path("status").asText(), is("no_recorded_traffic"));
+        assertThat(result.path("count").asInt(), is(0));
+    }
+
+    @Test
+    public void shouldCreateExpectationsWithUnlimitedTimesAndTtl() throws Exception {
+        // given - simulate a forwarded request (recorded expectations have Times.once())
+        httpState.log(new LogEntry()
+            .setType(FORWARDED_REQUEST)
+            .setLogLevel(org.slf4j.event.Level.INFO)
+            .setHttpRequest(request().withMethod("GET").withPath("/api/config"))
+            .setHttpResponse(response().withStatusCode(200).withBody("{\"key\":\"value\"}"))
+            .setExpectation(request().withMethod("GET").withPath("/api/config"),
+                response().withStatusCode(200).withBody("{\"key\":\"value\"}"))
+            .setMessageFormat("returning response:{}for forwarded request")
+            .setArguments(response().withStatusCode(200).withBody("{\"key\":\"value\"}"))
+        );
+
+        // poll until the recorded expectation is visible
+        pollUntilTrue(() -> retrieveRecordedExpectationCount() >= 1);
+
+        // when - create expectations from recorded traffic
+        ObjectNode params = objectMapper.createObjectNode();
+        JsonNode result = toolRegistry.callTool("create_expectations_from_recorded_traffic", params);
+
+        // then
+        assertThat(result.path("status").asText(), is("created"));
+
+        // verify the created expectation has unlimited times (not once)
+        ObjectNode retrieveParams = objectMapper.createObjectNode();
+        retrieveParams.put("type", "ACTIVE_EXPECTATIONS");
+        retrieveParams.put("format", "JSON");
+        JsonNode activeResult = toolRegistry.callTool("raw_retrieve", retrieveParams);
+        JsonNode expectation = activeResult.path("data").get(0);
+        // unlimited times means the times field is either absent or has unlimited=true
+        JsonNode times = expectation.path("times");
+        if (!times.isMissingNode() && !times.isNull()) {
+            assertThat("created expectation should have unlimited times",
+                times.path("unlimited").asBoolean(), is(true));
+        }
+        // if times is missing, that's also fine (means unlimited)
+    }
+}

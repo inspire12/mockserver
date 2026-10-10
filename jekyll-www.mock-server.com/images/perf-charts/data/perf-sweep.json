@@ -1,0 +1,588 @@
+{
+  "proto": "http",
+  "points": [
+    {
+      "offered_rps": 16000,
+      "achieved_rps": 15986.1,
+      "p50_ms": 0.105,
+      "p90_ms": 0.136,
+      "p95_ms": 0.153,
+      "p99_ms": 0.547,
+      "p999_ms": 32.364,
+      "phase_ms": {
+        "blocked": {
+          "p95_ms": 0.003,
+          "p99_ms": 0.009
+        },
+        "connecting": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "tls": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "sending": {
+          "p95_ms": 0.05,
+          "p99_ms": 0.067
+        },
+        "waiting": {
+          "p95_ms": 0.115,
+          "p99_ms": 0.379
+        },
+        "receiving": {
+          "p95_ms": 0.021,
+          "p99_ms": 0.029
+        }
+      },
+      "sample_count": 239791,
+      "error_rate": 0,
+      "dropped_iterations": 210,
+      "vus_active_max": 1280,
+      "vus_active_p95": 4,
+      "vus_active_avg": 8.8,
+      "stalls": 1642,
+      "stall_ms_threshold": 5,
+      "stall_concurrency_max": 1280,
+      "stall_concurrency_avg": 554.7,
+      "stall_time_buckets": [
+        1642,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "offered_rps": 24000,
+      "achieved_rps": 23911.3,
+      "p50_ms": 0.096,
+      "p90_ms": 0.128,
+      "p95_ms": 0.15,
+      "p99_ms": 10.557,
+      "p999_ms": 46.848,
+      "phase_ms": {
+        "blocked": {
+          "p95_ms": 0.004,
+          "p99_ms": 0.009
+        },
+        "connecting": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "tls": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "sending": {
+          "p95_ms": 0.033,
+          "p99_ms": 0.101
+        },
+        "waiting": {
+          "p95_ms": 0.117,
+          "p99_ms": 9.341
+        },
+        "receiving": {
+          "p95_ms": 0.021,
+          "p99_ms": 0.033
+        }
+      },
+      "sample_count": 358670,
+      "error_rate": 0,
+      "dropped_iterations": 1336,
+      "vus_active_max": 1920,
+      "vus_active_p95": 7,
+      "vus_active_avg": 22.5,
+      "stalls": 5343,
+      "stall_ms_threshold": 5,
+      "stall_concurrency_max": 1920,
+      "stall_concurrency_avg": 1011.6,
+      "stall_time_buckets": [
+        5337,
+        6,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "offered_rps": 32000,
+      "achieved_rps": 31933,
+      "p50_ms": 0.099,
+      "p90_ms": 0.15,
+      "p95_ms": 0.441,
+      "p99_ms": 16.3,
+      "p999_ms": 57.59,
+      "phase_ms": {
+        "blocked": {
+          "p95_ms": 0.004,
+          "p99_ms": 0.009
+        },
+        "connecting": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "tls": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "sending": {
+          "p95_ms": 0.03,
+          "p99_ms": 0.993
+        },
+        "waiting": {
+          "p95_ms": 0.26,
+          "p99_ms": 15.142
+        },
+        "receiving": {
+          "p95_ms": 0.023,
+          "p99_ms": 0.104
+        }
+      },
+      "sample_count": 478995,
+      "error_rate": 0,
+      "dropped_iterations": 1006,
+      "vus_active_max": 2033,
+      "vus_active_p95": 45,
+      "vus_active_avg": 38.2,
+      "stalls": 11720,
+      "stall_ms_threshold": 5,
+      "stall_concurrency_max": 2034,
+      "stall_concurrency_avg": 1063.6,
+      "stall_time_buckets": [
+        10355,
+        500,
+        506,
+        131,
+        153,
+        75
+      ]
+    },
+    {
+      "offered_rps": 36000,
+      "achieved_rps": 36000.9,
+      "p50_ms": 0.099,
+      "p90_ms": 0.155,
+      "p95_ms": 0.626,
+      "p99_ms": 10.685,
+      "p999_ms": 25.332,
+      "phase_ms": {
+        "blocked": {
+          "p95_ms": 0.004,
+          "p99_ms": 0.008
+        },
+        "connecting": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "tls": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "sending": {
+          "p95_ms": 0.023,
+          "p99_ms": 0.134
+        },
+        "waiting": {
+          "p95_ms": 0.412,
+          "p99_ms": 9.383
+        },
+        "receiving": {
+          "p95_ms": 0.022,
+          "p99_ms": 0.1
+        }
+      },
+      "sample_count": 540014,
+      "error_rate": 0,
+      "dropped_iterations": 1,
+      "vus_active_max": 2048,
+      "vus_active_p95": 65,
+      "vus_active_avg": 35.5,
+      "stalls": 13331,
+      "stall_ms_threshold": 5,
+      "stall_concurrency_max": 2048,
+      "stall_concurrency_avg": 744.8,
+      "stall_time_buckets": [
+        4913,
+        1807,
+        3478,
+        1004,
+        1152,
+        977
+      ]
+    },
+    {
+      "offered_rps": 40000,
+      "achieved_rps": 39998.3,
+      "p50_ms": 0.101,
+      "p90_ms": 0.255,
+      "p95_ms": 4.974,
+      "p99_ms": 19.459,
+      "p999_ms": 33.943,
+      "phase_ms": {
+        "blocked": {
+          "p95_ms": 0.004,
+          "p99_ms": 0.007
+        },
+        "connecting": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "tls": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "sending": {
+          "p95_ms": 0.02,
+          "p99_ms": 0.335
+        },
+        "waiting": {
+          "p95_ms": 4.379,
+          "p99_ms": 18.159
+        },
+        "receiving": {
+          "p95_ms": 0.021,
+          "p99_ms": 0.094
+        }
+      },
+      "sample_count": 599974,
+      "error_rate": 0,
+      "dropped_iterations": 27,
+      "vus_active_max": 2047,
+      "vus_active_p95": 582,
+      "vus_active_avg": 78.3,
+      "stalls": 29906,
+      "stall_ms_threshold": 5,
+      "stall_concurrency_max": 2047,
+      "stall_concurrency_avg": 1108.9,
+      "stall_time_buckets": [
+        5568,
+        7000,
+        4474,
+        5152,
+        4176,
+        3536
+      ]
+    },
+    {
+      "offered_rps": 44000,
+      "achieved_rps": 43856.7,
+      "p50_ms": 0.106,
+      "p90_ms": 2.016,
+      "p95_ms": 11.378,
+      "p99_ms": 29.933,
+      "p999_ms": 45.691,
+      "phase_ms": {
+        "blocked": {
+          "p95_ms": 0.004,
+          "p99_ms": 0.008
+        },
+        "connecting": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "tls": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "sending": {
+          "p95_ms": 0.022,
+          "p99_ms": 2.907
+        },
+        "waiting": {
+          "p95_ms": 10.903,
+          "p99_ms": 28.431
+        },
+        "receiving": {
+          "p95_ms": 0.021,
+          "p99_ms": 0.097
+        }
+      },
+      "sample_count": 657850,
+      "error_rate": 0,
+      "dropped_iterations": 2159,
+      "vus_active_max": 2048,
+      "vus_active_p95": 1250,
+      "vus_active_avg": 130.2,
+      "stalls": 53255,
+      "stall_ms_threshold": 5,
+      "stall_concurrency_max": 2048,
+      "stall_concurrency_avg": 1297.9,
+      "stall_time_buckets": [
+        11759,
+        8468,
+        6055,
+        6713,
+        8075,
+        12185
+      ]
+    },
+    {
+      "offered_rps": 48000,
+      "achieved_rps": 47715.8,
+      "p50_ms": 0.109,
+      "p90_ms": 3.854,
+      "p95_ms": 12.038,
+      "p99_ms": 30.096,
+      "p999_ms": 45.498,
+      "phase_ms": {
+        "blocked": {
+          "p95_ms": 0.004,
+          "p99_ms": 0.007
+        },
+        "connecting": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "tls": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "sending": {
+          "p95_ms": 0.019,
+          "p99_ms": 3.538
+        },
+        "waiting": {
+          "p95_ms": 11.559,
+          "p99_ms": 28.479
+        },
+        "receiving": {
+          "p95_ms": 0.02,
+          "p99_ms": 0.088
+        }
+      },
+      "sample_count": 715737,
+      "error_rate": 0,
+      "dropped_iterations": 4275,
+      "vus_active_max": 2048,
+      "vus_active_p95": 1432,
+      "vus_active_avg": 154.4,
+      "stalls": 65448,
+      "stall_ms_threshold": 5,
+      "stall_concurrency_max": 2048,
+      "stall_concurrency_avg": 1339.3,
+      "stall_time_buckets": [
+        8342,
+        11007,
+        10531,
+        16650,
+        9388,
+        9530
+      ]
+    },
+    {
+      "offered_rps": 52000,
+      "achieved_rps": 51285.9,
+      "p50_ms": 0.121,
+      "p90_ms": 12.534,
+      "p95_ms": 18.096,
+      "p99_ms": 29.244,
+      "p999_ms": 41.555,
+      "phase_ms": {
+        "blocked": {
+          "p95_ms": 0.004,
+          "p99_ms": 0.007
+        },
+        "connecting": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "tls": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "sending": {
+          "p95_ms": 0.021,
+          "p99_ms": 5.768
+        },
+        "waiting": {
+          "p95_ms": 17.441,
+          "p99_ms": 28.104
+        },
+        "receiving": {
+          "p95_ms": 0.02,
+          "p99_ms": 0.085
+        }
+      },
+      "sample_count": 769288,
+      "error_rate": 0,
+      "dropped_iterations": 10743,
+      "vus_active_max": 2048,
+      "vus_active_p95": 1717,
+      "vus_active_avg": 314.8,
+      "stalls": 144544,
+      "stall_ms_threshold": 5,
+      "stall_concurrency_max": 2048,
+      "stall_concurrency_avg": 1446.3,
+      "stall_time_buckets": [
+        12054,
+        23745,
+        38574,
+        23042,
+        23464,
+        23665
+      ]
+    },
+    {
+      "offered_rps": 56000,
+      "achieved_rps": 54097.3,
+      "p50_ms": 0.138,
+      "p90_ms": 15.624,
+      "p95_ms": 21.002,
+      "p99_ms": 31.964,
+      "p999_ms": 45.842,
+      "phase_ms": {
+        "blocked": {
+          "p95_ms": 0.004,
+          "p99_ms": 0.007
+        },
+        "connecting": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "tls": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "sending": {
+          "p95_ms": 0.016,
+          "p99_ms": 4.394
+        },
+        "waiting": {
+          "p95_ms": 20.496,
+          "p99_ms": 30.729
+        },
+        "receiving": {
+          "p95_ms": 0.019,
+          "p99_ms": 0.083
+        }
+      },
+      "sample_count": 811460,
+      "error_rate": 0,
+      "dropped_iterations": 28546,
+      "vus_active_max": 2048,
+      "vus_active_p95": 1820,
+      "vus_active_avg": 367.5,
+      "stalls": 177556,
+      "stall_ms_threshold": 5,
+      "stall_concurrency_max": 2048,
+      "stall_concurrency_avg": 1509,
+      "stall_time_buckets": [
+        28935,
+        27798,
+        42702,
+        25366,
+        24308,
+        28447
+      ]
+    },
+    {
+      "offered_rps": 60000,
+      "achieved_rps": 57149.3,
+      "p50_ms": 0.179,
+      "p90_ms": 16.167,
+      "p95_ms": 21.893,
+      "p99_ms": 32.624,
+      "p999_ms": 44.921,
+      "phase_ms": {
+        "blocked": {
+          "p95_ms": 0.004,
+          "p99_ms": 0.007
+        },
+        "connecting": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "tls": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "sending": {
+          "p95_ms": 0.016,
+          "p99_ms": 4.105
+        },
+        "waiting": {
+          "p95_ms": 21.473,
+          "p99_ms": 31.433
+        },
+        "receiving": {
+          "p95_ms": 0.02,
+          "p99_ms": 0.077
+        }
+      },
+      "sample_count": 857240,
+      "error_rate": 0,
+      "dropped_iterations": 42796,
+      "vus_active_max": 2048,
+      "vus_active_p95": 1837,
+      "vus_active_avg": 380.4,
+      "stalls": 197347,
+      "stall_ms_threshold": 5,
+      "stall_concurrency_max": 2048,
+      "stall_concurrency_avg": 1444.1,
+      "stall_time_buckets": [
+        28694,
+        30683,
+        40035,
+        38184,
+        26337,
+        33414
+      ]
+    },
+    {
+      "offered_rps": 64000,
+      "achieved_rps": 59905.8,
+      "p50_ms": 0.246,
+      "p90_ms": 15.812,
+      "p95_ms": 20.826,
+      "p99_ms": 30.378,
+      "p999_ms": 42.117,
+      "phase_ms": {
+        "blocked": {
+          "p95_ms": 0.004,
+          "p99_ms": 0.007
+        },
+        "connecting": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "tls": {
+          "p95_ms": 0,
+          "p99_ms": 0
+        },
+        "sending": {
+          "p95_ms": 0.014,
+          "p99_ms": 3.296
+        },
+        "waiting": {
+          "p95_ms": 20.488,
+          "p99_ms": 29.51
+        },
+        "receiving": {
+          "p95_ms": 0.019,
+          "p99_ms": 0.079
+        }
+      },
+      "sample_count": 898587,
+      "error_rate": 0,
+      "dropped_iterations": 61414,
+      "vus_active_max": 2048,
+      "vus_active_p95": 1853,
+      "vus_active_avg": 429.1,
+      "stalls": 231560,
+      "stall_ms_threshold": 5,
+      "stall_concurrency_max": 2048,
+      "stall_concurrency_avg": 1443.6,
+      "stall_time_buckets": [
+        46625,
+        41352,
+        29652,
+        34032,
+        50102,
+        29797
+      ]
+    }
+  ]
+}

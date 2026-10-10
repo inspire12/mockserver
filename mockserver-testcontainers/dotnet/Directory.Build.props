@@ -1,0 +1,5 @@
+<Project>
+  <PropertyGroup>
+    <MockServerVersion>8.0.0</MockServerVersion>
+  </PropertyGroup>
+</Project>

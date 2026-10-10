@@ -1,0 +1,29 @@
+{
+  "oneOf": [
+    {
+      "type": "array",
+      "additionalProperties": false,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "$ref": "#/definitions/stringOrJsonSchema"
+          },
+          "value": {
+            "$ref": "#/definitions/stringOrJsonSchema"
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^\\S+$": {
+          "$ref": "#/definitions/stringOrJsonSchema"
+        }
+      }
+    }
+  ]
+}

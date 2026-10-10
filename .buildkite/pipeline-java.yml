@@ -1,0 +1,440 @@
+steps:
+  - label: ":s3: restore maven cache"
+    command: ".buildkite/scripts/cache-restore.sh maven"
+    timeout_in_minutes: 10
+    soft_fail: true
+
+  # Restore the Gradle distribution + dependency cache under the "java" scope. The
+  # maven reactor runs a Gradle integration test (mockserver-netty-no-dependencies),
+  # whose wrapper otherwise re-downloads the ~130MB gradle-<ver>-bin.zip from
+  # services.gradle.org on every build -- the CDN stall that timed out the ~25-min
+  # reactor in build mockserver-java #2170. The "java" scope namespaces the S3 object
+  # (gradle/java/<key>) so this pipeline's 8.14 distribution can never collide with
+  # the editors pipeline's 9.5.1 (gradle/editors/<key>) -- both save independently.
+  # soft_fail so a cache miss / missing S3 creds never fails the build.
+  - label: ":s3: restore gradle cache"
+    command: ".buildkite/scripts/cache-restore.sh gradle java"
+    timeout_in_minutes: 10
+    soft_fail: true
+
+  - wait
+
+  - label: ":lint-roller: opencode config"
+    command: ".buildkite/scripts/steps/java-validate-config.sh"
+    timeout_in_minutes: 5
+
+  - label: ":robot_face: AI eval gate"
+    command: ".buildkite/scripts/steps/validate-ai-evals.sh"
+    timeout_in_minutes: 5
+
+  # Early-warning guard for the committed TLS/mTLS test certificates. Cert expiry
+  # has historically been discovered only by the build going red (2021-06, 2022-01,
+  # 2023-02, 2026-05); some fixtures are PKIX TrustAnchors that RFC 5280 does NOT
+  # date-check, so an expired one goes silently stale instead of failing cleanly.
+  # This hard-fails under 30 days / already-expired, warns (build annotation) under
+  # 180 days, and asserts leaf notAfter <= sibling CA notAfter. Needs only
+  # openssl + git, so it runs directly on the agent as a fast pre-build gate.
+  - label: ":lock: certificate expiry guard"
+    command: ".buildkite/scripts/steps/check-certificate-expiry.sh"
+    timeout_in_minutes: 5
+
+  - label: ":docker: update docker image"
+    command: "docker pull mockserver/mockserver:maven"
+    timeout_in_minutes: 10
+
+  - label: ":maven: build"
+    # Wrapper runs the build, then collects failing-test artefacts + prints an
+    # end-of-log pass/fail summary. The wrapper preserves and re-raises the
+    # build's own exit code so a red build stays red, and the collector itself
+    # never fails the build. Kept in a script (not inline YAML) so the shell -
+    # not Buildkite's pipeline-upload interpolation - owns the `$?`/`$rc`.
+    command: ".buildkite/scripts/steps/java-build-and-collect.sh"
+    # mockserver-netty's integration tests run in the ":maven: netty IT" steps below, not
+    # here. Remove this together with those steps to run them here again.
+    env:
+      MOCKSERVER_NETTY_ITS_IN_SHARDS: "true"
+    artifact_paths:
+      - "**/*.log"
+      # ONLY failing tests are uploaded as JUnit XML - the artefact tab stays a
+      # clean, short list of just what broke. java-collect-failures.sh scans every
+      # **/target/{surefire,failsafe}-reports/TEST-*.xml and copies ONLY the
+      # FAILING classes' XML + matching -output.txt into target/failed-tests/.
+      # We deliberately do NOT upload the broad per-class
+      # **/target/surefire-reports/TEST-*.xml / failsafe globs (~648 files / ~37MB
+      # of mostly-passing classes). The end-of-log pass/fail summary printed by
+      # java-build-and-collect.sh still reports the full counts and does not depend
+      # on any uploaded artefact.
+      - "mockserver/target/failed-tests/**/*"
+      # Upload only the machine-readable jacoco XML data files - per-class HTML
+      # reports under jacoco/**/* produce hundreds of artifacts per module and
+      # blow past Buildkite's 5000-artifact-per-job limit. The XML is what
+      # downstream coverage tooling consumes; jacoco:check enforces the gate.
+      - "**/target/site/jacoco/jacoco.xml"
+      - "**/target/site/jacoco-it/jacoco.xml"
+      # Bundled per-class jacoco HTML reports - one tarball for the whole reactor.
+      # Download + extract to browse the rich coverage UI.
+      - "mockserver/jacoco-html-reports.tar.gz"
+      - "mockserver/mockserver-netty-no-dependencies/target/mockserver-netty-no-dependencies-*.jar"
+      # The images' jar (the shaded jar with JNA unrelocated), consumed by java-docker-push-snapshot.sh.
+      - "mockserver/mockserver-netty-docker/target/mockserver-netty-docker-*.jar"
+      # The DEFAULT fat jar (assembly output), kept as a published build output. The
+      # container-tests step no longer consumes THIS copy - ":maven: container-test jars"
+      # builds its own so the tests can run alongside this step, and container-tests-run.sh
+      # downloads from that step by key. It is not interchangeable with the shaded
+      # mockserver-netty-docker jar above (docker/local's), for which jarprep skips the tcnative check.
+      # The glob matches only the plain jar-with-dependencies, not the classifier variants.
+      - "mockserver/mockserver-netty/target/mockserver-netty-*-jar-with-dependencies.jar"
+      - "mockserver/mockserver-k8s-webhook/target/mockserver-k8s-webhook-*-jar-with-dependencies.jar"
+      # The Infinispan /libs classpath for the `-clustered` image variant, staged by
+      # the `-P clustered-libs` profile in scripts/buildkite_quick_build.sh (the module
+      # jar is copied in alongside its runtime deps there, so this ONE directory is the
+      # image's /libs verbatim). Consumed by the ":docker: build and push :snapshot"
+      # step to build `mockserver/mockserver:mockserver-snapshot-clustered` from the
+      # SAME commit and the SAME shaded jar as the other snapshot images. That
+      # same-commit pairing is load-bearing: the perf harness runs the item-13
+      # clustered A/B against this tag while attributing the run to the graaljs SUT
+      # image's commit, so a clustered image from a different commit would file a
+      # clustered ratio under code it never ran. ~160 jars / ~85 MB.
+      - "mockserver/mockserver-state-infinispan/target/clustered-libs/*.jar"
+      # The WAR built by the reactor, kept as a published build output. The container-tests
+      # step's WAR case now takes its copy from ":maven: container-test jars" instead.
+      - "mockserver/mockserver-war/target/mockserver-war-*.war"
+    timeout_in_minutes: 90
+    # The default queue is partly Spot; a reclaim mid-build kills the agent
+    # (exit -1 / agent lost). Auto-retry so an infra eviction re-runs the long
+    # build instead of failing it. Real test failures exit 1 and are NOT retried.
+    #
+    # NOTE: deliberately NO `exit_status: 42` (transient-Maven-Central) retry here.
+    # Unlike the client jar-build steps -- which isolate a `-DskipTests` Maven
+    # resolution in its own run-in-docker.sh invocation, separate from their test
+    # run -- this step runs `clean install` (resolution AND the whole unit +
+    # Failsafe reactor) in ONE classified invocation. Under `-T 1C` fail-fast a
+    # transient transfer line in one module can co-occur in the same log with a
+    # genuine test failure in another, so the "a test failure can never reach 42"
+    # invariant does NOT hold for this step and a 42-retry could re-run a real
+    # (flaky) test failure. This reactor build instead relies on the in-Maven
+    # retry (.mvn/maven.config) and the warm maven cache (restored above); see
+    # docs/infrastructure/ci-cd.md -> Transient Maven Central Resilience.
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  # mockserver-netty's integration tests, split into parallel shards so they leave the
+  # ":maven: build" critical path. The prebuild compiles netty and its upstream modules
+  # once (no tests) and uploads them; each shard downloads them and runs only failsafe for
+  # its profile in mockserver-netty/pom.xml, with the netty leak gate. netty-it-shard-rest
+  # excludes the named shards' packages, so every test runs exactly once. A failing shard
+  # fails the build like any other step. See docs/infrastructure/ci-cd.md.
+  - label: ":maven: netty IT prebuild"
+    key: "netty-it-prebuild"
+    command: ".buildkite/scripts/steps/java-netty-it-prebuild.sh"
+    artifact_paths:
+      - "mockserver/target/netty-it/*.tar*"
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":maven: netty IT {{matrix}}"
+    depends_on: "netty-it-prebuild"
+    command: ".buildkite/scripts/steps/java-netty-it-shard.sh {{matrix}}"
+    matrix:
+      - "proxy-http"
+      - "mock"
+      - "rest"
+    artifact_paths:
+      - "**/*.log"
+      - "mockserver/target/failed-tests/**/*"
+      - "mockserver/mockserver-netty/target/jacoco-it-*.exec"
+    # headroom over the slowest shard on the slowest agent type; the fork stops at 2400 s
+    timeout_in_minutes: 45
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  # Compile the dashboard composer's GENERATED Java against the real client jar.
+  # standardToJava() (mockserver-ui) is otherwise only verified by string-assertion
+  # tests, so a rename of a client/model fluent method (mockserver-core or
+  # mockserver-client-java) would ship broken generated code silently. This gate
+  # emits a kitchen-sink matrix of standardToJava outputs and javac-compiles them.
+  # Runs in THIS parallel group (alongside the :maven: build, on its own agent) so
+  # it adds no critical-path time; it does its own quick client-java install
+  # (-DskipTests) reusing the restored maven cache. The mockserver-java pipeline is
+  # already path-gated (generate-pipeline.sh) to mockserver/ + mockserver-ui/
+  # changes — the two drift inputs — so no per-step path filter is needed.
+  # Cloud blob-store contract suites (S3/s3mock, GCS/fake-gcs, Azure/Azurite).
+  # Split out of the main build because it needs the Docker socket, and
+  # run-in-docker.sh exit-0s a socket step on PR builds — putting `-s` on the
+  # main build would silently skip the ENTIRE Java reactor on every PR.
+  # Runs in this parallel group so it adds no critical-path time.
+  # The step asserts the suites actually executed (assert-suite-ran.sh) rather
+  # than trusting Maven's exit code, because the suites' `Assume` Docker guards
+  # otherwise turn an unusable socket into a green build of zero tests.
+  - label: ":cloud: cloud blob-store contract tests"
+    command: ".buildkite/scripts/steps/java-cloud-store-test.sh"
+    # Opt this Docker-gated step into the ECR pull-through cache for Docker Hub
+    # rate-limit/availability protection. Fail-safe: any ECR or login problem
+    # leaves images on their public registries (see ecr-pull-through-login.sh).
+    env:
+      MOCKSERVER_ECR_PULL_THROUGH: "true"
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  # AsyncAPI live-broker integration suites (Kafka, Kafka+Avro, AMQP, MQTT 3.1.1,
+  # MQTT 5). Same rationale as the cloud step above: these are Docker-gated and the
+  # main build has no socket, so they were COLLECTED by Failsafe but skipped every
+  # test on every build while the job still went green (the ":maven: build" job
+  # passed, exit 0, in builds #1580 and #1583, each reporting "Tests run: 5,
+  # Skipped: 5"). Being matched by an include is not the same as testing anything.
+  # This step gives them a socket and then asserts they really ran, so the skip can
+  # no longer pass as a pass. ~75s of real broker tests locally.
+  - label: ":envelope: asyncapi live-broker tests"
+    command: ".buildkite/scripts/steps/java-async-broker-test.sh"
+    # ECR pull-through cache opt-in, fail-safe as above — all three broker
+    # images are on Docker Hub, so this is pure rate-limit/availability cover.
+    env:
+      MOCKSERVER_ECR_PULL_THROUGH: "true"
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  # mockserver-testcontainers integration suite (MockServerContainerIntegrationTest),
+  # which starts a real MockServer container via Testcontainers. Same rationale as the
+  # cloud/async steps above: it is Docker-gated and the main build has no socket, so
+  # once renamed from *IT to *IntegrationTest (making Failsafe collect it) it would
+  # SKIP every test on every build while the job still went green (Tests run: 1,
+  # Skipped: 1). Being collected by an include is not the same as testing anything.
+  # This step gives it a socket and then asserts it really ran, so the skip can no
+  # longer pass as a pass.
+  - label: ":whale: testcontainers integration test"
+    command: ".buildkite/scripts/steps/java-testcontainers-test.sh"
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  # PostgresThroughMockServerIntegrationTest (mockserver-netty): a real PostgreSQL
+  # server proxied through MockServer. Docker-gated, so it skips in the socket-free
+  # main build; this step gives it a socket and fails if it skipped.
+  - label: ":elephant: binary proxy real-PostgreSQL test"
+    command: ".buildkite/scripts/steps/java-binary-proxy-docker-test.sh"
+    env:
+      MOCKSERVER_ECR_PULL_THROUGH: "true"
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  # Transparent-proxy original-destination end-to-end suites (SO_ORIGINAL_DST,
+  # TPROXY, eBPF). These were named *EndToEndIT, matching NEITHER Surefire
+  # (**/*Test.java) NOR Failsafe (**/*IntegrationTest.java), so they never ran on
+  # any build. Renamed to *EndToEndIntegrationTest so Failsafe collects them.
+  #
+  # Unlike the cloud/async Docker-gated suites, these shell out to the `docker`
+  # CLI and need NET_ADMIN / --privileged SIBLING containers. The maven image has
+  # no docker CLI, and the userns-remapped agents reject --privileged, so on the
+  # current agents every suite would SKIP — and a fail-closed assert over
+  # skip-only suites is permanently red for no coverage (see DockerAvailability
+  # javadoc: "only safe once the suite can actually pass"). The step therefore
+  # defaults to a LOUD, VISIBLE notice that the suites were not executed, and runs
+  # + asserts them only when RUN_TRANSPARENT_PROXY_E2E=true on a capable agent.
+  # See the script header and docs/infrastructure/ci-cd.md.
+  - label: ":shield: transparent-proxy e2e tests (opt-in)"
+    command: ".buildkite/scripts/steps/java-transparent-proxy-test.sh"
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":test_tube: dashboard generated-Java compile gate"
+    command: ".buildkite/scripts/steps/ui-java-codegen-compile.sh"
+    timeout_in_minutes: 20
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  # Container tests need only the fat jar and the WAR, so a test-free package step feeds
+  # them and they run alongside ":maven: build" rather than after it. They sit before the
+  # wait below; depends_on, not the wait, orders them after their jars.
+  - label: ":maven: container-test jars"
+    key: "container-test-jars"
+    if: "build.branch == 'master'"
+    command: ".buildkite/scripts/steps/container-tests-build-jars.sh"
+    artifact_paths:
+      - "mockserver/mockserver-netty/target/mockserver-netty-*-jar-with-dependencies.jar"
+      - "mockserver/mockserver-war/target/mockserver-war-*.war"
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":docker: container integration tests"
+    if: "build.branch == 'master'"
+    depends_on: "container-test-jars"
+    command: ".buildkite/scripts/steps/container-tests-run.sh"
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  # PER-MERGE allocation backstop (performance-programme item 16). Runs the three
+  # allocation JMH benchmarks (MatchingBenchmark, InboundDecodeBenchmark,
+  # ResponseWriteBenchmark) at pinned params and FAILS the build if any allocates
+  # more bytes/op than its ABSOLUTE committed floor in perf-budgets.json. This is
+  # DELIBERATELY:
+  #   * In the build's parallel group: it builds its own reactor from the restored
+  #     cache and consumes nothing from ":maven: build", so waiting for the build
+  #     only delayed the deploy. The plain `- wait` before the deploy still gates on it.
+  #   * UNCONDITIONAL (no `if: build.branch == 'master'`) and placed BEFORE the
+  #     `- wait` that precedes the master-only block below, so it runs on BOTH PR
+  #     builds and the master build. What "BLOCKS" means depends on the path, and
+  #     this project commits directly to master for its own work (PRs are dependabot
+  #     + community):
+  #       - On a PR build it runs PRE-merge and genuinely BLOCKS the PR — the
+  #         regression is stopped before it reaches master.
+  #       - On a direct-to-master commit (the normal path here) the commit has
+  #         ALREADY landed, so this gate cannot block it: it is a POST-merge DETECTOR
+  #         that reds the master build after the fact (as it did on build 2262). A
+  #         regression CAN reach master this way; the gate reports it, not prevents.
+  #     Keep it UNCONDITIONAL. A branch condition, or moving it into the master-only
+  #     container-integration suite, would silently make it master-only — it would
+  #     stop running on PRs entirely (nothing would tell us) — see item 16.
+  #   * NOT soft_fail — the whole point is that a real allocation regression a
+  #     matcher-only or rolling-median gate would miss goes RED here.
+  # Note: pipeline-java.yml is itself orchestrator-path-filtered (generate-pipeline.sh)
+  # to mockserver/ + mockserver-ui/ changes, so a JDK / base-image bump that shifts
+  # allocation reaches this gate only via the daily run, not per-merge.
+  - label: ":scales: per-merge allocation gate (item 16)"
+    command: ".buildkite/scripts/steps/perf-alloc-gate.sh"
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+        # Transient Maven Central sentinel (run-in-docker.sh remaps a registry
+        # transfer failure to 42). SAFE to retry here — unlike the main `:maven
+        # build` step (which mixes resolution with the whole test reactor, so a
+        # real test failure can co-occur with a transfer blip and reach 42), this
+        # gate's Docker command is `-DskipTests` resolution + JMH only, and the
+        # pass/fail decision is made on the HOST in evaluate(), OUTSIDE Docker. So
+        # a real allocation regression can never surface as 42 — it always exits 1
+        # from evaluate(). Mirrors the isolated-resolution client jar-build steps
+        # that already carry this retry, and keeps a registry hiccup from redding
+        # a PR gate on shared agents.
+        - exit_status: 42   # transient Maven Central resolution failure
+          limit: 2
+
+  - wait: ~
+    continue_on_failure: true
+
+  # NOTE: the junit-annotate plugin step was intentionally removed - per-class
+  # TEST-*.xml are no longer uploaded (only failing-test artefacts under
+  # mockserver/target/failed-tests/** are), so the plugin would have nothing to
+  # consume. The end-of-log pass/fail summary (java-build-and-collect.sh) plus the
+  # failing-test artefacts cover what the annotation used to surface.
+
+  - label: ":chart_with_upwards_trend: coverage summary"
+    command: ".buildkite/scripts/steps/java-summarize.sh"
+    timeout_in_minutes: 5
+    soft_fail: true
+
+  - label: ":shield: diff-coverage gate (70%)"
+    command: ".buildkite/scripts/steps/diff-coverage.sh"
+    timeout_in_minutes: 5
+    soft_fail: true
+
+  - label: ":s3: save maven cache"
+    command: ".buildkite/scripts/cache-save.sh maven"
+    timeout_in_minutes: 15
+    soft_fail: true
+
+  # Save the Gradle distribution + dependency cache populated by the maven reactor's
+  # Gradle integration test, under the "java" scope. This pipeline OWNS the SAVE for
+  # the gradle/java namespace only; the editors pipeline owns gradle/editors, and the
+  # two no longer share a key (see the restore step's note). soft_fail so a failed
+  # upload / missing S3 creds never fails the build.
+  - label: ":s3: save gradle cache"
+    command: ".buildkite/scripts/cache-save.sh gradle java"
+    timeout_in_minutes: 15
+    soft_fail: true
+
+  - wait
+
+  - label: ":nexus: deploy snapshot to Sonatype"
+    if: "build.branch == 'master'"
+    command: ".buildkite/scripts/steps/java-deploy-snapshot.sh"
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":docker: build and push :snapshot"
+    if: "build.branch == 'master'"
+    command: ".buildkite/scripts/steps/java-docker-push-snapshot.sh"
+    # 65 = 45 for the core images (local, graaljs, webhook and the ~620 MB -clustered,
+    # multi-arch) + 20 for the snapshot-http3 block, which runs last under `timeout 20m`.
+    timeout_in_minutes: 65
+    retry:
+      automatic:
+        - exit_status: -1   # agent lost (e.g. Spot reclamation)
+          limit: 2
+        - exit_status: 255  # agent forced shutdown
+          limit: 2
+
+  - label: ":package: publish snapshot binary bundles"
+    if: "build.branch == 'master'"
+    command: ".buildkite/scripts/steps/java-publish-snapshot-bundles.sh"
+    timeout_in_minutes: 45
+    soft_fail: true
+
+  # DRAFT (2026-06-11): opt-in pre-release publish of the language clients so a release can
+  # be smoke-tested from real registries before the release pipeline runs. Triggered by the
+  # PUBLISH_CLIENT_SNAPSHOTS=true build env var (not every master build — pre-releases on
+  # npm/PyPI/crates.io/NuGet are effectively permanent). Each client is gated on its registry
+  # secret + CLI being present, so it soft-skips before the one-time manual provisioning is done.
+  - label: ":package: publish client snapshots (opt-in)"
+    if: "build.branch == 'master' && build.env('PUBLISH_CLIENT_SNAPSHOTS') == 'true'"
+    command: ".buildkite/scripts/steps/clients-publish-snapshot.sh"
+    timeout_in_minutes: 30
+    soft_fail: true

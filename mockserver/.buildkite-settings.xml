@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
+    <servers>
+        <server>
+            <id>central-portal</id>
+            <username>${env.SONATYPE_USERNAME}</username>
+            <password>${env.SONATYPE_PASSWORD}</password>
+        </server>
+    </servers>
+    <!--
+        Publish-side credentials only. The snapshot repository itself is declared by
+        <distributionManagement> in mockserver/pom.xml, so `mvn deploy` needs nothing
+        further here.
+
+        Deliberately NO <repositories> entry for central-portal-snapshots: this build
+        produces every org.mock-server SNAPSHOT it consumes, so declaring the remote
+        repository only adds a network dependency on our own artifacts — and lets a
+        previously published snapshot win whenever the locally installed one is older.
+        See docker_build/maven/settings.xml for the full rationale.
+    -->
+</settings>

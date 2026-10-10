@@ -17,11 +17,11 @@ graph TB
         GI["Gradle — 2 sub-builds"]
     end
     subgraph "Container Integration Tests"
-        DC["Docker Compose — 10 tests"]
-        HT["Helm/Kind — 4 tests"]
+        DC["Docker Compose — 16 tests"]
+        HT["Helm/k3d — 8 tests"]
     end
     subgraph "Performance Tests"
-        PT["Locust"]
+        PT["k6"]
     end
     UT --> IT --> MI & GI --> DC & HT --> PT
 ```
@@ -31,13 +31,13 @@ graph TB
 | Framework | Version | Usage |
 |-----------|---------|-------|
 | JUnit 4 | 4.13.2 | Primary test framework across almost all modules |
-| JUnit Jupiter (JUnit 5) | 5.9.2 | Used exclusively in `mockserver-junit-jupiter` |
-| Mockito Core | 4.11.0 | Mocking framework used in most modules |
-| Mockito JUnit Jupiter | 4.11.0 | JUnit 5 Mockito integration (`mockserver-junit-jupiter` only) |
-| Hamcrest | 2.2 | Assertion matchers used across all modules |
-| JSONAssert | 1.5.1 | JSON assertion library (`mockserver-core`) |
-| Spring Test | 5.3.26 | `mockserver-core`, `mockserver-war`, `mockserver-proxy-war`, `mockserver-spring-test-listener`, `mockserver-examples` |
-| XMLUnit | 2.9.1 | XML comparison (production dependency, also supports test assertions) |
+| JUnit Jupiter (JUnit 5) | 5.14.4 | Used exclusively in `mockserver-junit-jupiter` |
+| Mockito Core | 5.23.0 | Mocking framework used in most modules |
+| Mockito JUnit Jupiter | 5.23.0 | JUnit 5 Mockito integration (`mockserver-junit-jupiter` only) |
+| Hamcrest | 3.0 | Assertion matchers used across all modules |
+| JSONAssert | 1.5.3 | JSON assertion library (`mockserver-core`) |
+| Spring Test | 5.3.39 | `mockserver-core`, `mockserver-war`, `mockserver-proxy-war`, `mockserver-spring-test-listener`, `mockserver-examples` |
+| XMLUnit | 2.11.0 | XML comparison (production dependency, also supports test assertions) |
 
 No TestNG is used anywhere in the project.
 
@@ -47,7 +47,7 @@ No TestNG is used anywhere in the project.
 |--------|-----------|-------------------|-----------------|-------------|
 | `mockserver-core` | ~220 | ~62 | ~282 | Largest suite: matchers, serialization, validators, actions, collections, auth, logging |
 | `mockserver-netty` | ~13 | ~64 | ~77 | Server lifecycle, TLS, proxy, CORS, authenticated control plane |
-| `mockserver-examples` | 0 | ~25 | ~25 | End-to-end examples with various HTTP clients |
+| `mockserver-examples` | 0 | ~25 | ~25 | End-to-end examples with various HTTP clients (sample code, built + tested standalone — not a reactor module) |
 | `mockserver-junit-jupiter` | ~6 | ~12 | ~18 | JUnit 5 extension tests (injection, parallel safety, settings) |
 | `mockserver-junit-rule` | ~4 | ~4 | ~8 | JUnit 4 Rule/ClassRule tests |
 | `mockserver-war` | 0 | ~8 | ~8 | WAR deployment integration tests (embedded Tomcat) |
@@ -66,8 +66,8 @@ Test filtering is done entirely by naming convention — no `@Category` or `@Tag
 
 | Pattern | Runner | Maven Phase | Plugin |
 |---------|--------|-------------|--------|
-| `**/*Test.java` | Surefire | `test` | `maven-surefire-plugin` 3.2.5 |
-| `**/*IntegrationTest.java` | Failsafe | `integration-test` / `verify` | `maven-failsafe-plugin` 3.2.5 |
+| `**/*Test.java` | Surefire | `test` | `maven-surefire-plugin` 3.5.6 |
+| `**/*IntegrationTest.java` | Failsafe | `integration-test` / `verify` | `maven-failsafe-plugin` 3.5.6 |
 
 ### Abstract Base Class Hierarchy
 
@@ -96,7 +96,7 @@ classDiagram
         <<abstract>>
         +shouldForwardRequestInHTTPS()
         +shouldCallbackToSpecifiedClass()
-        ...~150 test methods
+        ...~123 test methods
     }
 
     class AbstractExtendedSameJVMMockingIntegrationTest {
@@ -112,26 +112,37 @@ classDiagram
     }
 
     AbstractMockingIntegrationTestBase <|-- AbstractBasicMockingIntegrationTest
-    AbstractBasicMockingIntegrationTest <|-- AbstractExtendedMockingIntegrationTest
+    AbstractBasicMockingIntegrationTest <|-- AbstractBasicMockingSameJVMIntegrationTest
+    AbstractBasicMockingSameJVMIntegrationTest <|-- AbstractExtendedMockingIntegrationTest
     AbstractExtendedMockingIntegrationTest <|-- AbstractExtendedSameJVMMockingIntegrationTest
     AbstractMockingIntegrationTestBase <|-- AbstractProxyIntegrationTest
+
+    class AbstractBasicMockingSameJVMIntegrationTest {
+        <<abstract>>
+        Basic tests for same-JVM scenarios
+    }
 
     class ClientAndServerMockingIntegrationTest {
         +startServer()
         Concrete: starts Netty server
     }
-    class MockServerWarMockingIntegrationTest {
+    class AbstractExtendedDeployableWARMockingIntegrationTest {
+        <<abstract>>
+        Intermediate: WAR deployment setup
+    }
+    class ExtendedWARMockingIntegrationTest {
         +startServer()
         Concrete: deploys to embedded Tomcat
     }
-    class MockServerRuleMockingIntegrationTest {
+    class JUnitClassRuleIntegrationTest {
         +startServer()
-        Concrete: uses JUnit 4 Rule
+        Concrete: uses JUnit 4 ClassRule
     }
 
-    AbstractExtendedSameJVMMockingIntegrationTest <|-- ClientAndServerMockingIntegrationTest
-    AbstractBasicMockingIntegrationTest <|-- MockServerWarMockingIntegrationTest
-    AbstractBasicMockingIntegrationTest <|-- MockServerRuleMockingIntegrationTest
+    AbstractBasicMockingSameJVMIntegrationTest <|-- ClientAndServerMockingIntegrationTest
+    AbstractExtendedSameJVMMockingIntegrationTest <|-- AbstractExtendedDeployableWARMockingIntegrationTest
+    AbstractExtendedDeployableWARMockingIntegrationTest <|-- ExtendedWARMockingIntegrationTest
+    AbstractBasicMockingSameJVMIntegrationTest <|-- JUnitClassRuleIntegrationTest
 ```
 
 This architecture means a single abstract test class change can affect tests across multiple modules. The `mockserver-integration-testing` module has no tests of its own — it exists solely to provide these shared base classes.
@@ -163,11 +174,12 @@ Unit tests use JUnit 4 (or JUnit 5 in `mockserver-junit-jupiter`) and run via th
 | Naming convention | `*Test.java` |
 | Excludes | `*IntegrationTest.java` |
 | Maven phase | `test` |
-| Plugin | `maven-surefire-plugin` 3.2.5 |
-| Log level | `mockserver.logLevel=ERROR` |
+| Plugin | `maven-surefire-plugin` 3.5.6 |
+| Log level | `mockserver.logLevel=${mockserver.testLogLevel}` (default: `ERROR`) |
 | Locale | `en-GB` (`-Duser.language=en -Duser.country=GB`) |
 | Test listener | `org.mockserver.test.PrintOutCurrentTestRunListener` |
-| XML reports | Disabled (`<disableXmlReport>true</disableXmlReport>`) |
+| XML reports | Controlled by `${disableXmlReport}` (default: `true`) |
+| Forked process timeout | 1800 seconds |
 | Fork count | Default (1 fork per module; `forkCount=0` commented out for debugging) |
 
 ### Running Unit Tests
@@ -188,12 +200,13 @@ Integration tests use JUnit 4 and run via the Maven Failsafe plugin during the `
 |----------|-------|
 | Naming convention | `*IntegrationTest.java` |
 | Maven phase | `integration-test` / `verify` |
-| Plugin | `maven-failsafe-plugin` 3.2.5 |
-| Log level | `mockserver.logLevel=ERROR` |
+| Plugin | `maven-failsafe-plugin` 3.5.6 |
+| Log level | `mockserver.logLevel=${mockserver.testLogLevel}` (default: `ERROR`) |
 | Extra system properties | `project.version`, `project.basedir` |
 | Locale | `en-GB` |
 | Test listener | `org.mockserver.test.PrintOutCurrentTestRunListener` |
-| XML reports | Disabled |
+| XML reports | Controlled by `${disableXmlReport}` (default: `true`) |
+| Forked process timeout | 1800 seconds; 2400 seconds in `mockserver-netty`, whose integration tests all share one fork (see [build-system.md](operations/build-system.md#test-configuration)) |
 
 ### Running Integration Tests
 
@@ -211,7 +224,7 @@ The `mockserver-integration-testing` module provides shared abstract test base c
 |-------|---------|
 | `AbstractMockingIntegrationTestBase` | Base class with common setup/teardown (MockServerClient, EchoServer, NettyHttpClient) |
 | `AbstractBasicMockingIntegrationTest` | Basic mocking test cases (~50 methods) |
-| `AbstractExtendedMockingIntegrationTest` | Extended mocking with all action types (~150 methods) |
+| `AbstractExtendedMockingIntegrationTest` | Extended mocking with all action types (~123 methods) |
 | `AbstractExtendedSameJVMMockingIntegrationTest` | Same-JVM callback testing |
 | `AbstractBasicMockingSameJVMIntegrationTest` | Basic tests for same-JVM scenarios |
 | `AbstractProxyIntegrationTest` | Proxy mode integration tests |
@@ -222,23 +235,21 @@ Integration tests use real embedded servers rather than mocks:
 
 | Server | Module | Purpose |
 |--------|--------|---------|
-| `EchoServer` (Netty) | `mockserver-integration-testing` | Returns request details as response body (secure + insecure instances) |
+| `EchoServer` (Netty) | `mockserver-core` | Returns request details as response body (secure + insecure instances) |
 | Embedded Tomcat 9.0.x | `mockserver-war`, `mockserver-proxy-war` | WAR deployment testing |
 | MockServer (Netty) | `mockserver-netty` | Full server lifecycle testing |
 
-### Shaded JAR Integration Tests
+### Downstream Dependency Integration Tests
 
-`mockserver-netty/src/integration-tests/` contains Maven Invoker and Gradle-based tests that verify the shaded JARs work correctly as dependencies:
+`mockserver/mockserver-netty/src/integration-tests/` contains Maven Invoker and Gradle-based tests that verify the published `mockserver-netty` artifacts work correctly when consumed by a downstream project:
 
 | Directory | Purpose |
 |-----------|---------|
-| `maven-netty-jar-with-dependencies-dependency/` | Tests fat JAR as Maven dependency |
-| `maven-netty-no-dependencies-dependency/` | Tests standard JAR as Maven dependency |
-| `maven-netty-shaded-dependency/` | Tests shaded JAR as Maven dependency |
-| `gradle-netty-shaded-dependencies/` | Tests Gradle dependency resolution (shaded) |
-| `gradle-netty-no-dependencies-dependencies/` | Tests Gradle dependency resolution (no-deps) |
+| `maven-netty-jar-with-dependencies-dependency/` | Tests the `:jar-with-dependencies` classifier as a Maven dependency |
+| `maven-netty-no-dependencies-dependency/` | Tests `mockserver-netty-no-dependencies` as a Maven dependency |
+| `gradle-netty-no-dependencies-dependencies/` | Tests `mockserver-netty-no-dependencies` from Gradle |
 
-These are run by `maven-invoker-plugin` 3.5.1 (Maven variants, `parallelThreads=2`) and `exec-maven-plugin` calling `gradle_integration_tests.sh` (Gradle variants) during the `integration-test`/`install` phases.
+These are run by `maven-invoker-plugin` (Maven variants, `parallelThreads=2`) and `exec-maven-plugin` calling `gradle_integration_tests.sh` (Gradle variant) during the `integration-test`/`install` phases. The legacy `maven-netty-shaded-dependency` and `gradle-netty-shaded-dependencies` directories were removed in 6.0.0 along with the `<classifier>shaded</classifier>` artifact form.
 
 ## Container Integration Tests
 
@@ -263,9 +274,9 @@ SKIP_JAVA_BUILD=true SKIP_DOCKER_BUILD_MOCKSERVER=true container_integration_tes
 | `SKIP_DOCKER_REBUILD_CLIENT` | unset | Skip rebuilding the curl client image |
 | `SKIP_ALL_TESTS` | unset | Skip all tests (build only) |
 | `SKIP_DOCKER_TESTS` | unset | Skip Docker Compose tests |
-| `SKIP_HELM_TESTS` | unset | Skip Helm/Kind tests |
+| `SKIP_HELM_TESTS` | unset | Skip Helm/k3d tests |
 
-### Docker Compose Tests (10)
+### Docker Compose Tests (16)
 
 Each test has its own directory containing a `docker-compose.yml` and `integration_test.sh`:
 
@@ -281,17 +292,27 @@ Each test has its own directory containing a `docker-compose.yml` and `integrati
 | `docker_compose_with_persisted_expectations` | Persisted expectations file |
 | `docker_compose_with_server_port_from_default_properties_file` | Port from `mockserver.properties` |
 | `docker_compose_with_server_port_from_custom_properties_file` | Port from custom properties file |
+| `docker_compose_with_mtls` | Mutual TLS (mTLS) client certificate verification |
+| `docker_compose_jvm_options` | Custom JVM options via `JAVA_OPTS` |
+| `docker_compose_libs_classpath` | Additional JARs on the `/libs` classpath |
+| `docker_compose_graceful_shutdown` | Graceful shutdown on SIGTERM |
+| `docker_compose_metrics` | Prometheus metrics endpoint |
+| `docker_compose_war_tomcat` | WAR deployment on Tomcat |
 
-### Helm Tests (4)
+### Helm Tests (8)
 
-Helm tests use KinD (Kubernetes in Docker) to create a local cluster:
+Helm tests use k3d (k3s in Docker) to create a local cluster:
 
 | Test | Validates |
 |------|-----------|
 | `helm_default_config` | Default Helm chart values |
-| `helm_local_docker_container` | Local Docker image loaded into Kind |
+| `helm_local_docker_container` | Local Docker image loaded into k3d |
 | `helm_custom_server_port` | Custom server port via Helm values |
 | `helm_remote_host_and_port` | Remote host/port via Helm values |
+| `helm_inline_config` | Inline config via Helm values (`app.config.enabled`, `app.config.initializerJson`) |
+| `helm_configmap_injection` | External config via ConfigMap |
+| `helm_mockserver_config_chart` | Standalone MockServer config Helm chart |
+| `helm_clustered_convergence` | Clustered state convergence (Infinispan, non-blocking) |
 
 ### Helper Scripts
 
@@ -299,7 +320,7 @@ Helm tests use KinD (Kubernetes in Docker) to create a local cluster:
 |--------|---------|
 | `integration_tests.sh` | Main orchestrator: builds Docker image, runs all tests, prints summary |
 | `docker-compose.sh` | Docker Compose helper functions (`start-up`, `tear-down`, `docker-exec`, `container-logs`) |
-| `helm-deploy.sh` | Kind cluster lifecycle (`start-up-k8s`, `tear-down-k8s`), Helm install/uninstall |
+| `helm-deploy.sh` | k3d cluster lifecycle (`start-up-k8s`, `tear-down-k8s`), Helm install/uninstall |
 | `logging.sh` | Coloured terminal output, `runCommand`, `retryCommand`, `logTestResult` |
 
 ### Test Flow
@@ -323,7 +344,7 @@ sequenceDiagram
         T->>D: docker-compose -p $TEST_CASE down
     end
 
-    R->>R: Start Kind cluster
+    R->>R: Start k3d cluster
     loop For each Helm test
         R->>T: cd test_dir && ./integration_test.sh
         T->>D: helm install ... && kubectl wait ...
@@ -331,24 +352,27 @@ sequenceDiagram
         T->>R: logTestResult $? $TEST_CASE
         T->>D: helm uninstall
     end
-    R->>R: Tear down Kind cluster
+    R->>R: Tear down k3d cluster
 
     R->>R: Print PASSED/FAILED summary
 ```
 
 ### Docker Image Variant Coverage
 
-There are 5 production Docker image variants. Only the main nonroot variant is tested:
+There are 6 production Docker image variants. Only the main nonroot variant is tested:
 
 | Variant | Dockerfile | Base Image | Tested? |
 |---------|-----------|------------|---------|
-| Main (nonroot) | `docker/Dockerfile` | `distroless/java17:nonroot` | YES (built as `integration_testing` image) |
-| Root | `docker/root/Dockerfile` | `distroless/java17` | NO |
-| Snapshot (debug) | `docker/snapshot/Dockerfile` | `distroless/java17:debug-nonroot` | NO |
-| Root Snapshot | `docker/root-snapshot/Dockerfile` | `distroless/java17` | NO |
-| Local build | `docker/local/Dockerfile` | `distroless/java17:nonroot` | NO |
+| Main (nonroot) | `docker/Dockerfile` | `distroless/java-base` + jlink Temurin 26 | YES — built `source=copy` + native tcnative/TLS verified by `docker-build-verify.sh` in the developer pre-commit gate (not yet wired into CI), plus the `integration_testing` HTTP suite on master |
+| GraalJS | `docker/graaljs/Dockerfile` | `distroless/java25:nonroot` | NO |
+| Root | `docker/root/Dockerfile` | `distroless/java25` | NO |
+| Snapshot (debug) | `docker/snapshot/Dockerfile` | `distroless/java25:debug-nonroot` | NO |
+| Root Snapshot | `docker/root-snapshot/Dockerfile` | `distroless/java25` | NO |
+| Local build | `docker/local/Dockerfile` | `distroless/java-base` + jlink Temurin 26 | NO |
 
-The integration tests always build with `--build-arg source=copy` (local JAR). The default `source=download` mode (downloads from Sonatype) used by real users is never tested.
+**Build coverage of the tcnative path.** `docker-build-verify.sh` builds the image with `--build-arg source=copy` from a locally-built jar. It passes no `--build-arg TARGETARCH`, so BuildKit supplies the arch as it does for the release pushes. It then asserts the runtime actually works: the arch-correct tcnative `.so` is baked in and has the host arch's ELF machine, the **native** TLS provider and epoll transport load in the image JVM (`OpenSsl.isAvailable`, `Epoll.isAvailable`), and the container serves a real TLS handshake. It runs in the developer pre-commit gate (`.opencode/rules/commit-workflow.md`); its **runtime assertions are not yet in CI**, because `pipeline-container-tests.yml` leaves the step out until it has had a green run on a real amd64 `default`-queue agent. CI does **build** images on a `docker/**` change: the `mockserver-container-tests` Helm step (`helm-integration-test.sh`) builds `docker/Dockerfile` (`source=copy`) and `docker/clustered` on an amd64 agent, so their in-build arch and ELF checks run there. The `mockserver-infra` pipeline runs the static `docker-validate-sync.sh` lint. Separately, the fast `verify-tcnative-stamp.sh` gate guards **both** stamped jars (the `source=download` assembly jar and the `source=copy` shaded jar) — non-empty, well-formed, mutually consistent, and equal to the Maven-resolved `netty-tcnative-boringssl-static` version — which is what catches the actual failure mode (a jar shipped without its stamp).
+
+**Residual gap — stated, not implied.** The default `source=download` mode (which pulls the assembly jar from Sonatype) is **not built by CI**: it cannot use a published jar because a pre-stamp release fails the derive check by design, so building it would require standing up a locally-served jar — disproportionate machinery. Instead it is covered two ways short of a full download-mode build: (1) `verify-tcnative-stamp.sh` derive-checks the exact assembly jar that `source=download` consumes (the one broken by the last defect), and (2) `docker-build-verify.sh`, run locally, builds `source=copy` **from that same assembly jar**, faithfully reproducing `source=download`'s native behaviour (the assembly jar bundles the per-platform natives, so the native provider loads exactly as it would in download mode). The `mockserver-infra` pipeline additionally runs the static `docker-validate-sync.sh` lint on every `docker/**` change.
 
 ### What Docker Features Are Tested
 
@@ -358,12 +382,12 @@ The integration tests always build with `--build-arg source=copy` (local JAR). T
 - Command-line argument passing (`-serverPort`)
 - Multi-container networking (bridge network between client and server)
 - HTTP/2 support (via `nghttp` in the forward-with-override test)
+- The image `HEALTHCHECK` reaching healthy (`docker_healthcheck`), and the shipped image surviving sustained load inside the documented 512 MiB floor (`docker_memory_floor_512m`)
 
 ### What Docker Features Are NOT Tested
 
 | Feature | Status |
 |---------|--------|
-| Health checks | No `HEALTHCHECK` instruction in any Dockerfile. `MOCKSERVER_LIVENESS_HTTP_GET_PATH` exists but is disabled by default. |
 | Graceful shutdown (signal handling) | No test verifies `docker stop` drains connections or persists state. |
 | Multi-arch (ARM64) | CI builds `linux/amd64,linux/arm64` but integration tests only run on native arch. |
 | JVM options (`JVM_OPTIONS` env var) | Supported by Helm chart but never tested via Docker Compose. |
@@ -373,7 +397,7 @@ The integration tests always build with `--build-arg source=copy` (local JAR). T
 
 ### What Helm Features Are Tested
 
-The 4 Helm tests cover basic deployment, custom image tags, custom server port, and inter-service proxy forwarding. All use the same validation pattern: create expectation via PUT, verify response via GET.
+The 5 Helm tests cover basic deployment, custom image tags, custom server port, inline configuration, and inter-service proxy forwarding. All use the same validation pattern: create expectation via PUT, verify response via GET.
 
 ### What Helm Features Are NOT Tested
 
@@ -394,7 +418,7 @@ The 4 Helm tests cover basic deployment, custom image tags, custom server port, 
 
 ## Performance Tests
 
-The `docker_build/performance/Dockerfile` provides a Locust-based performance testing image built on `locustio/locust` with `curl` installed.
+The `docker_build/performance/Dockerfile` provides a k6-based performance testing image built on `grafana/k6`. The scenarios (smoke / load / stress / soak) and their threshold gates live in [`mockserver-performance-test/k6/`](../mockserver-performance-test/k6/README.md); CI lints them on every change and runs an opt-in load test on manual/scheduled builds.
 
 ## Test Utilities
 
@@ -434,9 +458,11 @@ Supports three output modes controlled by `-Dmockserver.testOutput`:
 
 ```xml
 <plugin>
+    <groupId>org.apache.maven.plugins</groupId>
     <artifactId>maven-surefire-plugin</artifactId>
-    <version>3.2.5</version>
+    <version>${maven-surefire-plugin.version}</version>
     <configuration>
+        <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
         <includes>
             <include>**/*Test.java</include>
         </includes>
@@ -444,11 +470,20 @@ Supports three output modes controlled by `-Dmockserver.testOutput`:
             <exclude>**/*IntegrationTest.java</exclude>
         </excludes>
         <systemPropertyVariables>
-            <mockserver.logLevel>ERROR</mockserver.logLevel>
+            <mockserver.logLevel>${mockserver.testLogLevel}</mockserver.logLevel>
         </systemPropertyVariables>
-        <argLine>-Duser.language=en -Duser.country=GB
-                 -Dmockserver.testOutput=${mockserver.testOutput}</argLine>
-        <disableXmlReport>true</disableXmlReport>
+        <argLine>@{argLine} -Duser.language=en -Duser.country=GB
+                 -Dmockserver.testOutput=${mockserver.testOutput}
+                 -Dmockserver.maxLogEntries=1000
+                 ${mockserver.leakArgLine} ${mockserver.testArgLine}</argLine>
+        <disableXmlReport>${disableXmlReport}</disableXmlReport>
+        <redirectTestOutputToFile>${redirectTestOutputToFile}</redirectTestOutputToFile>
+        <properties>
+            <property>
+                <name>listener</name>
+                <value>org.mockserver.test.PrintOutCurrentTestRunListener</value>
+            </property>
+        </properties>
     </configuration>
 </plugin>
 ```
@@ -457,20 +492,31 @@ Supports three output modes controlled by `-Dmockserver.testOutput`:
 
 ```xml
 <plugin>
+    <groupId>org.apache.maven.plugins</groupId>
     <artifactId>maven-failsafe-plugin</artifactId>
-    <version>3.2.5</version>
+    <version>${maven-surefire-plugin.version}</version>
     <configuration>
+        <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
         <includes>
             <include>**/*IntegrationTest.java</include>
         </includes>
         <systemPropertyVariables>
-            <mockserver.logLevel>ERROR</mockserver.logLevel>
+            <mockserver.logLevel>${mockserver.testLogLevel}</mockserver.logLevel>
             <project.version>${project.version}</project.version>
             <project.basedir>${project.basedir}</project.basedir>
         </systemPropertyVariables>
-        <argLine>-Duser.language=en -Duser.country=GB
-                 -Dmockserver.testOutput=${mockserver.testOutput}</argLine>
-        <disableXmlReport>true</disableXmlReport>
+        <argLine>@{argLine} -Duser.language=en -Duser.country=GB
+                 -Dmockserver.testOutput=${mockserver.testOutput}
+                 -Dmockserver.maxLogEntries=1000
+                 ${mockserver.leakArgLine} ${mockserver.testArgLine}</argLine>
+        <disableXmlReport>${disableXmlReport}</disableXmlReport>
+        <redirectTestOutputToFile>${redirectTestOutputToFile}</redirectTestOutputToFile>
+        <properties>
+            <property>
+                <name>listener</name>
+                <value>org.mockserver.test.PrintOutCurrentTestRunListener</value>
+            </property>
+        </properties>
     </configuration>
     <executions>
         <execution>
@@ -489,10 +535,10 @@ Supports three output modes controlled by `-Dmockserver.testOutput`:
 |-------|-----------|-----|-------|
 | Module-level | Maven `-T` flag | `-T 1C` (1 thread/core) | `-T 3C` (3 threads/core) |
 | Maven Invoker tests | `<parallelThreads>` | 2 threads | 2 threads |
-| Intra-module test parallelism | None | None | None |
-| Fork count | Default (1 fork/module) | Default | Default |
+| `mockserver-core` unit tests | Two-phase Surefire: phase 1 `parallel=classes/threadCount=4`; phase 2 sequential | 4 threads (phase 1) | 4 threads (phase 1) |
+| Other modules | Default (1 fork/module) | Default | Default |
 
-There is **no intra-module test parallelisation** — no `parallel`, `threadCount`, or `useUnlimitedThreads` settings in Surefire/Failsafe.
+`mockserver-core` uses a two-phase Surefire configuration: the default execution runs most unit tests in parallel (`parallel=classes`, `threadCount=4`), while a second execution (`sequential-tests`) runs a curated list of state-sensitive or timing-sensitive tests single-threaded. Tests excluded from the parallel phase include `MockServerEventLogTest`, `HttpStateTest`, template engine tests, and others that have wall-clock timing assertions or shared static state. All other modules run Surefire with its default (single-threaded) settings.
 
 ### Maven Profiles (Test-Related)
 
@@ -523,19 +569,18 @@ Test resources are located in `src/test/resources/` across modules:
 
 ## Test Coverage Tooling
 
-**No test coverage tooling is configured.** There is no JaCoCo, Cobertura, Clover, or any other coverage plugin in any `pom.xml` file. Coverage is unmeasured.
+**JaCoCo** (`jacoco-maven-plugin`) is configured in the parent `mockserver/pom.xml` with four execution goals:
+
+| Goal | Phase | Purpose |
+|------|-------|---------|
+| `prepare-agent` | `initialize` | Instruments classes for unit test coverage |
+| `prepare-agent-integration` | `pre-integration-test` | Instruments classes for integration test coverage |
+| `report` | `verify` | Generates per-module unit test coverage report |
+| `report-integration` | `verify` | Generates per-module integration test coverage report |
+
+Reports are generated in each module's `target/site/jacoco/` directory. See [AI-Assisted Development](operations/ai-assisted-development.md#code-coverage-unit-tests-jacoco) for current coverage numbers by module.
 
 ## Known Issues
-
-### Disabled Tests
-
-Three tests are `@Ignore`d:
-
-| File | Test | Reason |
-|------|------|--------|
-| `ExpectationSerializerIntegrationTest.java:78` | `shouldAllowSingleOpenAPIObjectForArray()` | Uses external URL (network-dependent) |
-| `ExpectationSerializerIntegrationTest.java:135` | `shouldAllowMixedExpectationTypesForArray()` | Uses external URL (network-dependent) |
-| `AbstractForwardViaHttpsProxyMockingIntegrationTest.java:433` | `shouldForwardOverriddenRequestToHTTP2()` | HTTP/2 forwarding not yet implemented |
 
 ### Test Anti-Patterns
 
@@ -553,18 +598,25 @@ The `scripts/buildkite_quick_build.sh` script runs the full build inside a `mock
 
 ```bash
 ./mvnw -T 1C clean install -Djava.security.egd=file:/dev/./urandom \
-  -Dmockserver.testOutput=quiet -DskipShade=true \
-  -Dshade.install.phase=none -DskipAssembly=true
+  -P "$PROFILES" -Dmockserver.shadeSourcesJar=false \
+  -Dmockserver.testOutput=quiet -DdisableXmlReport=false \
+  -DredirectTestOutputToFile=true -Dmockserver.testLogLevel=INFO \
+  "-Dmockserver.testArgLine=-Dmockserver.maxLogEntries=10000 -Dmockserver.maxExpectations=5000"
 ```
 
 | Property | Value |
 |----------|-------|
-| JVM heap | `-Xms2048m -Xmx8192m` |
+| JVM heap | `-Xms2048m -Xmx6144m` |
 | Maven parallelism | `-T 1C` (1 thread per CPU core) |
+| Profiles (`$PROFILES`) | `clustered-libs`, plus `netty-it-skip` when `MOCKSERVER_NETTY_ITS_IN_SHARDS=true` (CI), whose netty integration tests run in the shard steps |
 | Test output | `quiet` (dots + failure details) |
-| Shading | Skipped (`-DskipShade=true`) |
-| Assembly | Skipped (`-DskipAssembly=true`) |
-| Timeout | 60 minutes |
+| XML reports | Enabled (`-DdisableXmlReport=false`) |
+| Test output redirection | Enabled (`-DredirectTestOutputToFile=true`) |
+| Test log level | `INFO` (`-Dmockserver.testLogLevel=INFO`) |
+| Event log and expectation caps | 10,000 log entries and 5,000 expectations per test server, through `-Dmockserver.testArgLine`, which overrides the poms' `-Dmockserver.maxLogEntries=1000` |
+| Netty leak gate | On: the forks of `mockserver-core` and `mockserver-netty` run the leak detector at `paranoid` (allocation sites only, `targetRecords=0`) and `check-netty-leaks` fails the build on a leaked buffer, or when tests ran but no fork installed the detector. `-Dmockserver.testArgLine` does not remove it (see [ByteBuf Leak Detection in Tests](code/netty-pipeline.md#bytebuf-leak-detection-in-tests)) |
+| `-no-dependencies` source jars | Not built (`-Dmockserver.shadeSourcesJar=false`); the snapshot deploy and the release build them |
+| Timeout | 90 minutes |
 | Build artefacts | `**/*.log` files collected |
 
 All tests (unit + integration + Maven Invoker + Gradle integration) run in a **single monolithic Buildkite step**. There is no separation into different CI jobs for different test types.

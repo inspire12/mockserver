@@ -1,0 +1,1091 @@
+---
+title: Troubleshooting Matching
+description: Step-by-step checklist to diagnose why MockServer returns 404 when a request does not match, including common pitfalls and the debug mismatch endpoint.
+shortTitle: Troubleshooting
+layout: page
+pageOrder: 2
+section: 'Verify & Test'
+subsection: true
+sitemap:
+  priority: 0.8
+  changefreq: 'monthly'
+  lastmod: 2025-05-10T08:00:00+01:00
+---
+
+<p>When an expectation does not match a request, MockServer returns a 404 response. This page explains how to diagnose and fix matching issues.</p>
+
+<a id="debugging_checklist" class="anchor" href="#debugging_checklist">&nbsp;</a>
+
+<h2>Debugging Checklist</h2>
+
+<p>Follow these steps in order when a request is not matching:</p>
+
+<h3>1. Is the expectation active?</h3>
+
+<p>Expectations expire after their configured <code>times</code> limit or <code>timeToLive</code>. Retrieve active expectations to confirm yours is still present:</p>
+
+<button id="button_troubleshoot_retrieve_active_expectations" class="accordion">retrieve active expectations</button>
+<div class="panel">
+    <button class="accordion inner">Java</button>
+    <div class="panel"><pre class="prettyprint lang-java code"><code class="code">Expectation[] active = mockServerClient.retrieveActiveExpectations(null);</code></pre></div>
+    <button class="accordion inner">JavaScript</button>
+    <div class="panel"><pre class="prettyprint lang-javascript code"><code class="code">var mockServerClient = require('mockserver-client').mockServerClient;
+mockServerClient("localhost", 1080)
+  .retrieveActiveExpectations()
+  .then(
+    function (activeExpectations) {
+      console.log(JSON.stringify(activeExpectations));
+    },
+    function (error) {
+      console.log(error);
+    }
+  );</code></pre></div>
+    <button class="accordion inner">Python</button>
+    <div class="panel"><pre class="prettyprint lang-python code"><code class="code">from mockserver import MockServerClient
+
+client = MockServerClient("localhost", 1080)
+active = client.retrieve_active_expectations()</code></pre></div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel"><pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+
+client = MockServer::Client.new('localhost', 1080)
+active = client.retrieve_active_expectations</code></pre></div>
+    <button class="accordion inner">Go</button>
+    <div class="panel"><pre class="prettyprint lang-go code"><code class="code">import (
+    "log"
+
+    mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+)
+
+client := mockserver.New("localhost", 1080)
+active, err := client.RetrieveActiveExpectations(nil)
+if err != nil {
+    log.Fatal(err)
+}</code></pre></div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel"><pre class="prettyprint lang-csharp code"><code class="code">using MockServer.Client;
+
+using var client = new MockServerClient("localhost", 1080);
+var active = client.RetrieveActiveExpectations();</code></pre></div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel"><pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::ClientBuilder;
+
+let client = ClientBuilder::new("localhost", 1080).build().unwrap();
+let active = client.retrieve_active_expectations(None).unwrap();</code></pre></div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel"><pre class="prettyprint lang-php code"><code class="code">use MockServer\MockServerClient;
+
+$client = new MockServerClient('localhost', 1080);
+$active = $client-&gt;retrieveActiveExpectations();</code></pre></div>
+    <button class="accordion inner">REST API</button>
+    <div class="panel"><pre class="prettyprint code"><code class="code">curl -X PUT "http://localhost:1080/mockserver/retrieve?type=ACTIVE_EXPECTATIONS"</code></pre></div>
+</div>
+
+<h3>2. Did the request arrive at MockServer?</h3>
+
+<p>Verify that MockServer received the request:</p>
+
+<button id="button_troubleshoot_retrieve_recorded_requests" class="accordion">retrieve recorded requests</button>
+<div class="panel">
+    <button class="accordion inner">Java</button>
+    <div class="panel"><pre class="prettyprint lang-java code"><code class="code">HttpRequest[] requests = mockServerClient.retrieveRecordedRequests(null);</code></pre></div>
+    <button class="accordion inner">JavaScript</button>
+    <div class="panel"><pre class="prettyprint lang-javascript code"><code class="code">var mockServerClient = require('mockserver-client').mockServerClient;
+mockServerClient("localhost", 1080)
+  .retrieveRecordedRequests()
+  .then(
+    function (recordedRequests) {
+      console.log(JSON.stringify(recordedRequests));
+    },
+    function (error) {
+      console.log(error);
+    }
+  );</code></pre></div>
+    <button class="accordion inner">Python</button>
+    <div class="panel"><pre class="prettyprint lang-python code"><code class="code">from mockserver import MockServerClient
+
+client = MockServerClient("localhost", 1080)
+requests = client.retrieve_recorded_requests()</code></pre></div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel"><pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+
+client = MockServer::Client.new('localhost', 1080)
+requests = client.retrieve_recorded_requests</code></pre></div>
+    <button class="accordion inner">Go</button>
+    <div class="panel"><pre class="prettyprint lang-go code"><code class="code">import (
+    "log"
+
+    mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+)
+
+client := mockserver.New("localhost", 1080)
+requests, err := client.RetrieveRecordedRequests(nil)
+if err != nil {
+    log.Fatal(err)
+}</code></pre></div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel"><pre class="prettyprint lang-csharp code"><code class="code">using MockServer.Client;
+
+using var client = new MockServerClient("localhost", 1080);
+var requests = client.RetrieveRecordedRequests();</code></pre></div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel"><pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::ClientBuilder;
+
+let client = ClientBuilder::new("localhost", 1080).build().unwrap();
+let requests = client.retrieve_recorded_requests(None).unwrap();</code></pre></div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel"><pre class="prettyprint lang-php code"><code class="code">use MockServer\MockServerClient;
+
+$client = new MockServerClient('localhost', 1080);
+$requests = $client-&gt;retrieveRecordedRequests();</code></pre></div>
+    <button class="accordion inner">REST API</button>
+    <div class="panel"><pre class="prettyprint code"><code class="code">curl -X PUT "http://localhost:1080/mockserver/retrieve?type=REQUESTS"</code></pre></div>
+</div>
+
+<h3>3. Check the match failure reason</h3>
+
+<p>MockServer logs an <code>EXPECTATION_NOT_MATCHED</code> event for every expectation that was compared. Each event includes a <strong>because</strong> section explaining which fields matched and which did not:</p>
+
+<pre class="prettyprint code"><code class="code">curl -X PUT "http://localhost:1080/mockserver/retrieve?type=LOGS"</code></pre>
+
+<p>In the <a href="/mock_server/mockserver_ui.html">dashboard UI</a>, look for log entries with the pink/rose colour. Click the <strong>...</strong> to expand the "because" section, which shows each field result colour-coded green (matched) or red (didn't match).</p>
+
+<h3>4. Enable full match diagnostics</h3>
+
+<p>By default, MockServer stops comparing fields at the first mismatch (<code>matchersFailFast=true</code>). To see <strong>all</strong> mismatching fields at once, disable fail-fast:</p>
+
+<pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.matchersFailFast(false);</code></pre>
+
+<pre class="prettyprint code"><code class="code"># System property
+-Dmockserver.matchersFailFast=false
+
+# Environment variable
+MOCKSERVER_MATCHERS_FAIL_FAST=false</code></pre>
+
+<p>This shows every field that does not match in a single log entry, making it much easier to identify all issues at once rather than fixing them one at a time.</p>
+
+<h3>5. Look for the closest match</h3>
+
+<p>When no expectation matches, MockServer logs a <strong>closest match</strong> summary showing which expectation was most similar to the request and how many fields matched (e.g., "matched 14/16 fields"). This immediately tells you which expectation to investigate.</p>
+
+<a id="common_pitfalls" class="anchor" href="#common_pitfalls">&nbsp;</a>
+
+<h2>Common Pitfalls</h2>
+
+<p>These are the most frequent reasons expectations fail to match:</p>
+
+<h3>Trailing slash in path</h3>
+
+<p>A path of <code>/api/users</code> does not match <code>/api/users/</code>. Ensure your expectation path matches exactly, or use a regex:</p>
+
+<pre class="prettyprint lang-java code"><code class="code">// Exact match - will NOT match "/api/users/"
+.withPath("/api/users")
+
+// Match with or without trailing slash
+.withPath("/api/users/?")</code></pre>
+
+<p>MockServer will show a <strong>HINT</strong> in the match failure when it detects a trailing slash mismatch.</p>
+
+<h3>Content-Type charset mismatch</h3>
+
+<p>Many HTTP clients send <code>Content-Type: application/json; charset=utf-8</code> but expectations often specify just <code>application/json</code>. This is a header value mismatch.</p>
+
+<p>Solutions:</p>
+<ul>
+    <li>Include the charset in your expectation: <code>.withHeader("Content-Type", "application/json; charset=utf-8")</code></li>
+    <li>Use a substring header matcher</li>
+    <li>Omit the Content-Type header from your expectation (unspecified headers match anything)</li>
+</ul>
+
+<p>MockServer will show a <strong>HINT</strong> when it detects this pattern.</p>
+
+<h3>JSON body matching semantics</h3>
+
+<p>By default, JSON body matching uses <code>ONLY_MATCHING_FIELDS</code> mode:</p>
+<ul>
+    <li><strong>Extra fields</strong> in the request body are ignored (the expectation is a subset match)</li>
+    <li><strong>Missing fields</strong> (a field specified in the matcher but absent from the request body) cause a failure</li>
+    <li><strong>Array order</strong> does not matter</li>
+    <li><strong>Extra array items</strong> are ignored</li>
+</ul>
+
+<p>If you need an exact match, use <code>STRICT</code> mode:</p>
+
+<pre class="prettyprint lang-java code"><code class="code">// Subset match (default) - extra fields OK
+.withBody(json("{\"name\": \"foo\"}", MatchType.ONLY_MATCHING_FIELDS))
+
+// Strict match - no extra fields allowed
+.withBody(json("{\"name\": \"foo\"}", MatchType.STRICT))</code></pre>
+
+<h3>Regex metacharacters in paths</h3>
+
+<p>Paths are matched as regular expressions. Characters like <code>.</code>, <code>*</code>, <code>+</code>, <code>?</code>, <code>(</code>, <code>)</code>, <code>[</code>, <code>{</code> have special meaning in regex.</p>
+
+<p>For example, <code>/api/v1.0/users</code> will also match <code>/api/v1X0/users</code> because <code>.</code> matches any character. Use <code>\.</code> for a literal dot:</p>
+
+<pre class="prettyprint lang-java code"><code class="code">// This matches "/api/v1X0/users" too
+.withPath("/api/v1.0/users")
+
+// This only matches "/api/v1.0/users"
+.withPath("/api/v1\\.0/users")</code></pre>
+
+<p>MockServer will show a <strong>HINT</strong> when it detects unescaped dots in paths.</p>
+
+<h3>Header name case sensitivity</h3>
+
+<p>HTTP header <strong>names</strong> are matched case-insensitively (per HTTP spec), but header <strong>values</strong> are case-sensitive. For example:</p>
+
+<pre class="prettyprint lang-java code"><code class="code">// Header name "content-type" matches "Content-Type" - OK
+// Header value "Application/JSON" does NOT match "application/json"
+.withHeader("Content-Type", "application/json")</code></pre>
+
+<h3>Query parameter encoding</h3>
+
+<p>Query parameters are decoded before matching. <code>?name=hello%20world</code> is matched against the decoded value <code>hello world</code>:</p>
+
+<pre class="prettyprint lang-java code"><code class="code">// Matches ?name=hello%20world and ?name=hello+world
+.withQueryStringParameter("name", "hello world")</code></pre>
+
+<h3>Body type confusion</h3>
+
+<p>Using the wrong body matcher type is a common mistake:</p>
+
+<pre class="prettyprint lang-java code"><code class="code">// This is an EXACT string match - entire body must match this text exactly
+.withBody("{\"name\": \"foo\"}")
+
+// This is a JSON subset match - only specified fields must be present
+.withBody(json("{\"name\": \"foo\"}"))
+
+// This is a regex match
+.withBody(regex(".*foo.*"))</code></pre>
+
+<p>If your JSON body isn't matching, check that you are using <code>json()</code> and not a plain string body matcher.</p>
+
+<a id="reading_because_output" class="anchor" href="#reading_because_output">&nbsp;</a>
+
+<h2>Reading the "because" Output</h2>
+
+<p>When a request does not match an expectation, the log entry includes a "because" section. Here is an annotated example:</p>
+
+<pre class="prettyprint code"><code class="code">method matched                        &larr; GET matched GET
+path didn't match:                    &larr; path comparison failed
+
+  string or regex match failed        &larr; the matcher type used
+  expected: /api/users                &larr; what the expectation specified
+  found: /api/user                    &larr; what was in the request
+HINT: trailing slash mismatch ...     &larr; actionable suggestion (when applicable)
+body matched                          &larr; body was not checked (no body matcher)
+headers matched                       &larr; all expected headers were found
+cookies matched                       &larr; all expected cookies were found</code></pre>
+
+<p>Fields are listed in matching order. When <code>matchersFailFast=true</code> (default), only fields up to and including the first failure are shown. Set <code>matchersFailFast=false</code> to see all fields.</p>
+
+<a id="configuration_reference" class="anchor" href="#configuration_reference">&nbsp;</a>
+
+<h2>Debugging Configuration Properties</h2>
+
+<table class="table table-bordered table-striped">
+    <thead>
+    <tr>
+        <th>Property</th>
+        <th>Default</th>
+        <th>Description</th>
+    </tr>
+    </thead>
+    <tbody>
+    <tr>
+        <td><code>matchersFailFast</code></td>
+        <td><code>true</code></td>
+        <td>When <code>true</code>, matching stops at the first non-matching field. Set to <code>false</code> to see all mismatching fields in a single log entry.</td>
+    </tr>
+    <tr>
+        <td><code>detailedMatchFailures</code></td>
+        <td><code>true</code></td>
+        <td>When <code>true</code>, match failure log entries include detailed explanations of why each field did not match (expected vs actual values).</td>
+    </tr>
+    <tr>
+        <td><code>logLevel</code></td>
+        <td><code>INFO</code></td>
+        <td>At <code>INFO</code> (default), all match results are logged with full detail. Set to <code>TRACE</code> for internal matcher-level diagnostics &mdash; see <a href="/mock_server/debugging_issues.html#logging-levels">Debugging Issues &rarr; Logging Levels</a> for how to set the log level and what each level reports.</td>
+    </tr>
+    </tbody>
+</table>
+
+<p>For full configuration details, see the <a href="/mock_server/configuration_properties.html">Configuration</a> page.</p>
+
+<a id="debug_mismatch_endpoint" class="anchor" href="#debug_mismatch_endpoint">&nbsp;</a>
+
+<h2>Programmatic Mismatch Debugging</h2>
+
+<p>MockServer provides a dedicated <code>PUT /mockserver/debugMismatch</code> endpoint that analyzes why a request does not match any active expectations. It returns structured JSON showing per-expectation, per-field match results — including the closest match.</p>
+
+<button id="button_troubleshoot_debug_mismatch" class="accordion">debug why a request does not match</button>
+<div class="panel">
+    <button class="accordion inner">Java</button>
+    <div class="panel"><pre class="prettyprint lang-java code"><code class="code">String result = mockServerClient.debugMismatch(
+    request()
+        .withMethod("GET")
+        .withPath("/api/users")
+        .withHeader("Content-Type", "application/json")
+);
+System.out.println(result);</code></pre></div>
+    <button class="accordion inner">JavaScript</button>
+    <div class="panel"><pre class="prettyprint lang-javascript code"><code class="code">// debugMismatch has no typed method in the Node client - call the REST endpoint
+const response = await fetch("http://localhost:1080/mockserver/debugMismatch", {
+  method: "PUT",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    "method": "GET",
+    "path": "/api/users",
+    "headers": { "Content-Type": ["application/json"] }
+  })
+});
+console.log(await response.text());</code></pre></div>
+    <button class="accordion inner">Python</button>
+    <div class="panel"><pre class="prettyprint lang-python code"><code class="code">import requests
+
+# debugMismatch has no typed method - call the REST endpoint directly
+response = requests.put(
+    "http://localhost:1080/mockserver/debugMismatch",
+    json={
+        "method": "GET",
+        "path": "/api/users",
+        "headers": {"Content-Type": ["application/json"]},
+    },
+)
+print(response.text)</code></pre></div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel"><pre class="prettyprint lang-ruby code"><code class="code">require 'net/http'
+require 'json'
+
+# debugMismatch has no typed method - call the REST endpoint directly
+uri = URI('http://localhost:1080/mockserver/debugMismatch')
+req = Net::HTTP::Put.new(uri, 'Content-Type' =&gt; 'application/json')
+req.body = JSON.generate(
+  method: 'GET',
+  path: '/api/users',
+  headers: { 'Content-Type' =&gt; ['application/json'] }
+)
+response = Net::HTTP.start(uri.host, uri.port) { |http| http.request(req) }
+puts response.body</code></pre></div>
+    <button class="accordion inner">Go</button>
+    <div class="panel"><pre class="prettyprint lang-go code"><code class="code">import (
+    "log"
+    "net/http"
+    "strings"
+)
+
+// debugMismatch has no typed method - call the REST endpoint directly
+body := `{"method":"GET","path":"/api/users","headers":{"Content-Type":["application/json"]}}`
+req, _ := http.NewRequest("PUT", "http://localhost:1080/mockserver/debugMismatch", strings.NewReader(body))
+req.Header.Set("Content-Type", "application/json")
+resp, err := http.DefaultClient.Do(req)
+if err != nil {
+    log.Fatal(err)
+}
+defer resp.Body.Close()</code></pre></div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel"><pre class="prettyprint lang-csharp code"><code class="code">using System.Net.Http;
+using System.Text;
+
+// debugMismatch has no typed method - call the REST endpoint directly
+using var http = new HttpClient();
+var body = new StringContent(
+    "{\"method\":\"GET\",\"path\":\"/api/users\",\"headers\":{\"Content-Type\":[\"application/json\"]}}",
+    Encoding.UTF8, "application/json");
+var response = await http.PutAsync("http://localhost:1080/mockserver/debugMismatch", body);
+Console.WriteLine(await response.Content.ReadAsStringAsync());</code></pre></div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel"><pre class="prettyprint lang-rust code"><code class="code">use reqwest::blocking::Client;
+
+// debugMismatch has no typed method - call the REST endpoint directly
+let analysis = Client::new()
+    .put("http://localhost:1080/mockserver/debugMismatch")
+    .header("Content-Type", "application/json")
+    .body(r#"{"method":"GET","path":"/api/users","headers":{"Content-Type":["application/json"]}}"#)
+    .send()
+    .unwrap()
+    .text()
+    .unwrap();
+println!("{}", analysis);</code></pre></div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel"><pre class="prettyprint lang-php code"><code class="code">use GuzzleHttp\Client;
+
+// debugMismatch has no typed method - call the REST endpoint directly
+$http = new Client();
+$response = $http-&gt;put('http://localhost:1080/mockserver/debugMismatch', [
+    'json' =&gt; [
+        'method' =&gt; 'GET',
+        'path' =&gt; '/api/users',
+        'headers' =&gt; ['Content-Type' =&gt; ['application/json']],
+    ],
+]);
+echo (string) $response-&gt;getBody();</code></pre></div>
+    <button class="accordion inner">REST API</button>
+    <div class="panel"><pre class="prettyprint code"><code class="code">curl -X PUT "http://localhost:1080/mockserver/debugMismatch" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "method": "GET",
+    "path": "/api/users",
+    "headers": {
+      "Content-Type": ["application/json"]
+    }
+  }' </code></pre></div>
+</div>
+
+<h3>Response Format</h3>
+
+<p>The response is a JSON object with:</p>
+<ul>
+    <li><code>totalExpectations</code> — the number of active expectations compared</li>
+    <li><code>closestMatch</code> — which expectation had the fewest differences</li>
+    <li><code>results</code> — per-expectation match analysis with field-level differences</li>
+</ul>
+
+<pre class="prettyprint lang-json code"><code class="code">{
+  "totalExpectations": 2,
+  "closestMatch": {
+    "expectationId": "abc-123",
+    "matchedFields": 14,
+    "totalFields": 16
+  },
+  "results": [
+    {
+      "expectationId": "abc-123",
+      "expectationPath": "/api/users",
+      "expectationMethod": "POST",
+      "matches": false,
+      "matchedFieldCount": 14,
+      "totalFieldCount": 16,
+      "differences": {
+        "method": [
+          "string or regex match failed expected: POST found: GET"
+        ]
+      }
+    }
+  ]
+}</code></pre>
+
+<h3>Worked Example: "My test is getting 404"</h3>
+
+<p>When your test receives a 404, use the debug endpoint to find out exactly why:</p>
+
+<button id="button_troubleshoot_debug_mismatch_worked_example" class="accordion">worked example: debug a 404 mismatch</button>
+<div class="panel">
+    <button class="accordion inner">Java</button>
+    <div class="panel"><pre class="prettyprint lang-java code"><code class="code">// 1. Set up your expectation
+mockServerClient.when(
+    request().withMethod("POST").withPath("/api/users")
+        .withBody(json("{\"name\": \"foo\"}"))
+).respond(response().withStatusCode(201));
+
+// 2. Your test sends a request that gets 404 - why?
+// 3. Debug the mismatch
+String analysis = mockServerClient.debugMismatch(
+    request()
+        .withMethod("GET")           // oops - wrong method!
+        .withPath("/api/users")
+        .withBody("{\"name\": \"foo\"}")
+);
+
+// The response will show:
+// - method didn't match: expected POST, found GET
+// - matchedFieldCount: 15/16 (all fields matched except method)</code></pre></div>
+    <button class="accordion inner">JavaScript</button>
+    <div class="panel"><pre class="prettyprint lang-javascript code"><code class="code">var mockServerClient = require('mockserver-client').mockServerClient;
+var client = mockServerClient("localhost", 1080);
+
+// 1. Set up your expectation
+await client.mockAnyResponse({
+  "httpRequest": {
+    "method": "POST",
+    "path": "/api/users",
+    "body": { "type": "JSON", "json": { "name": "foo" } }
+  },
+  "httpResponse": { "statusCode": 201 }
+});
+
+// 2. Your test sends a request that gets 404 - why?
+// 3. Debug the mismatch (no typed method - call the REST endpoint)
+const response = await fetch("http://localhost:1080/mockserver/debugMismatch", {
+  method: "PUT",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    "method": "GET",              // oops - wrong method!
+    "path": "/api/users",
+    "body": "{\"name\": \"foo\"}"
+  })
+});
+console.log(await response.text());</code></pre></div>
+    <button class="accordion inner">Python</button>
+    <div class="panel"><pre class="prettyprint lang-python code"><code class="code">import requests
+from mockserver import MockServerClient, HttpRequest, HttpResponse, Body
+
+client = MockServerClient("localhost", 1080)
+
+# 1. Set up your expectation
+client.when(
+    HttpRequest(method="POST", path="/api/users", body=Body(type="JSON", json={"name": "foo"}))
+).respond(
+    HttpResponse(status_code=201)
+)
+
+# 2. Your test sends a request that gets 404 - why?
+# 3. Debug the mismatch (no typed method - call the REST endpoint)
+response = requests.put(
+    "http://localhost:1080/mockserver/debugMismatch",
+    json={
+        "method": "GET",            # oops - wrong method!
+        "path": "/api/users",
+        "body": '{"name": "foo"}',
+    },
+)
+print(response.text)</code></pre></div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel"><pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+require 'net/http'
+require 'json'
+include MockServer
+
+client = MockServer::Client.new('localhost', 1080)
+
+# 1. Set up your expectation
+client.when(
+  HttpRequest.new(method: 'POST', path: '/api/users', body: Body.json('{"name": "foo"}'))
+).respond(
+  HttpResponse.new(status_code: 201)
+)
+
+# 2. Your test sends a request that gets 404 - why?
+# 3. Debug the mismatch (no typed method - call the REST endpoint)
+uri = URI('http://localhost:1080/mockserver/debugMismatch')
+req = Net::HTTP::Put.new(uri, 'Content-Type' =&gt; 'application/json')
+req.body = JSON.generate(method: 'GET', path: '/api/users', body: '{"name": "foo"}')
+response = Net::HTTP.start(uri.host, uri.port) { |http| http.request(req) }
+puts response.body</code></pre></div>
+    <button class="accordion inner">Go</button>
+    <div class="panel"><pre class="prettyprint lang-go code"><code class="code">import (
+    "net/http"
+    "strings"
+
+    mockserver "github.com/mock-server/mockserver-monorepo/mockserver-client-go/v7"
+)
+
+client := mockserver.New("localhost", 1080)
+
+// 1. Set up your expectation
+client.When(
+    mockserver.Request().Method("POST").Path("/api/users").JSONBody(`{"name":"foo"}`),
+).Respond(
+    mockserver.Response().StatusCode(201),
+)
+
+// 2. Your test sends a request that gets 404 - why?
+// 3. Debug the mismatch (no typed method - call the REST endpoint)
+body := `{"method":"GET","path":"/api/users","body":"{\"name\": \"foo\"}"}`
+req, _ := http.NewRequest("PUT", "http://localhost:1080/mockserver/debugMismatch", strings.NewReader(body))
+req.Header.Set("Content-Type", "application/json")
+resp, _ := http.DefaultClient.Do(req)
+defer resp.Body.Close()</code></pre></div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel"><pre class="prettyprint lang-csharp code"><code class="code">using System.Net.Http;
+using System.Text;
+using MockServer.Client;
+using MockServer.Client.Models;
+
+using var client = new MockServerClient("localhost", 1080);
+
+// 1. Set up your expectation
+client.When(
+    HttpRequest.Request().WithMethod("POST").WithPath("/api/users").WithJsonBody("{\"name\": \"foo\"}")
+).Respond(
+    HttpResponse.Response().WithStatusCode(201)
+);
+
+// 2. Your test sends a request that gets 404 - why?
+// 3. Debug the mismatch (no typed method - call the REST endpoint)
+using var http = new HttpClient();
+var debugBody = new StringContent(
+    "{\"method\":\"GET\",\"path\":\"/api/users\",\"body\":\"{\\\"name\\\": \\\"foo\\\"}\"}",
+    Encoding.UTF8, "application/json");
+var response = await http.PutAsync("http://localhost:1080/mockserver/debugMismatch", debugBody);
+Console.WriteLine(await response.Content.ReadAsStringAsync());</code></pre></div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel"><pre class="prettyprint lang-rust code"><code class="code">use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse};
+use reqwest::blocking::Client;
+
+let client = ClientBuilder::new("localhost", 1080).build().unwrap();
+
+// 1. Set up your expectation
+client.when(
+    HttpRequest::new().method("POST").path("/api/users").json_body(serde_json::json!({"name": "foo"}))
+).respond(
+    HttpResponse::new().status_code(201)
+).unwrap();
+
+// 2. Your test sends a request that gets 404 - why?
+// 3. Debug the mismatch (no typed method - call the REST endpoint)
+let analysis = Client::new()
+    .put("http://localhost:1080/mockserver/debugMismatch")
+    .header("Content-Type", "application/json")
+    .body(r#"{"method":"GET","path":"/api/users","body":"{\"name\": \"foo\"}"}"#)
+    .send()
+    .unwrap()
+    .text()
+    .unwrap();
+println!("{}", analysis);</code></pre></div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel"><pre class="prettyprint lang-php code"><code class="code">use MockServer\MockServerClient;
+use MockServer\HttpRequest;
+use MockServer\HttpResponse;
+use GuzzleHttp\Client;
+
+$client = new MockServerClient('localhost', 1080);
+
+// 1. Set up your expectation
+$client-&gt;when(
+    HttpRequest::request()-&gt;method('POST')-&gt;path('/api/users')-&gt;jsonBody(['name' =&gt; 'foo'])
+)-&gt;respond(
+    HttpResponse::response()-&gt;statusCode(201)
+);
+
+// 2. Your test sends a request that gets 404 - why?
+// 3. Debug the mismatch (no typed method - call the REST endpoint)
+$http = new Client();
+$response = $http-&gt;put('http://localhost:1080/mockserver/debugMismatch', [
+    'json' =&gt; ['method' =&gt; 'GET', 'path' =&gt; '/api/users', 'body' =&gt; '{"name": "foo"}'],
+]);
+echo (string) $response-&gt;getBody();</code></pre></div>
+    <button class="accordion inner">REST API</button>
+    <div class="panel"><pre class="prettyprint code"><code class="code"># 1. Set up your expectation
+curl -v -X PUT "http://localhost:1080/mockserver/expectation" -d '{
+  "httpRequest": {
+    "method": "POST",
+    "path": "/api/users",
+    "body": { "type": "JSON", "json": { "name": "foo" } }
+  },
+  "httpResponse": { "statusCode": 201 }
+}'
+
+# 2. Debug why a GET request does not match
+curl -X PUT "http://localhost:1080/mockserver/debugMismatch" -d '{
+  "method": "GET",
+  "path": "/api/users",
+  "body": "{\"name\": \"foo\"}"
+}' </code></pre></div>
+</div>
+
+<p>This endpoint is also available via the <a href="/mock_server/ai_mcp_tools.html">MCP <code>debug_request_mismatch</code> tool</a> for AI-assisted debugging.</p>
+
+<a id="correlation_id_retrieval" class="anchor" href="#correlation_id_retrieval">&nbsp;</a>
+
+<h2>Retrieving Logs by Correlation ID</h2>
+
+<p>Every incoming HTTP request is assigned a unique <strong>correlation ID</strong>. All log entries for that request's lifecycle (received, match attempts, response) share this ID. This is invaluable when debugging a specific request among many — you can isolate exactly what happened.</p>
+
+<h3>Finding the Correlation ID</h3>
+
+<p>The correlation ID appears in:</p>
+<ul>
+    <li><strong>Dashboard UI</strong> — as a small chip on grouped log entries (click to copy)</li>
+    <li><strong>Log text</strong> — in the prefix of each log message</li>
+    <li><strong>Typed log entries</strong> — as the <code>correlationId</code> field when using <code>format=LOG_ENTRIES</code></li>
+</ul>
+
+<h3>Retrieving by Correlation ID</h3>
+
+<p>Once you have a correlation ID, retrieve all log entries for that request:</p>
+
+<button id="button_troubleshoot_retrieve_logs_by_correlation_id" class="accordion">retrieve logs by correlation ID</button>
+<div class="panel">
+    <button class="accordion inner">Java</button>
+    <div class="panel"><pre class="prettyprint lang-java code"><code class="code">String logs = mockServerClient.retrieveLogsByCorrelationId("abc-123-def-456");</code></pre></div>
+    <button class="accordion inner">JavaScript</button>
+    <div class="panel"><pre class="prettyprint lang-javascript code"><code class="code">// no typed correlationId filter - call the REST endpoint
+const response = await fetch(
+  "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;correlationId=abc-123-def-456",
+  { method: "PUT" }
+);
+console.log(await response.text());</code></pre></div>
+    <button class="accordion inner">Python</button>
+    <div class="panel"><pre class="prettyprint lang-python code"><code class="code">import requests
+
+# no typed correlationId filter - call the REST endpoint
+response = requests.put(
+    "http://localhost:1080/mockserver/retrieve",
+    params={"type": "LOGS", "correlationId": "abc-123-def-456"},
+)
+print(response.text)</code></pre></div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel"><pre class="prettyprint lang-ruby code"><code class="code">require 'net/http'
+
+# no typed correlationId filter - call the REST endpoint
+uri = URI('http://localhost:1080/mockserver/retrieve?type=LOGS&amp;correlationId=abc-123-def-456')
+response = Net::HTTP.start(uri.host, uri.port) { |http| http.request(Net::HTTP::Put.new(uri)) }
+puts response.body</code></pre></div>
+    <button class="accordion inner">Go</button>
+    <div class="panel"><pre class="prettyprint lang-go code"><code class="code">import (
+    "log"
+    "net/http"
+)
+
+// no typed correlationId filter - call the REST endpoint
+url := "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;correlationId=abc-123-def-456"
+req, _ := http.NewRequest("PUT", url, nil)
+resp, err := http.DefaultClient.Do(req)
+if err != nil {
+    log.Fatal(err)
+}
+defer resp.Body.Close()</code></pre></div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel"><pre class="prettyprint lang-csharp code"><code class="code">using System.Net.Http;
+
+// no typed correlationId filter - call the REST endpoint
+using var http = new HttpClient();
+var response = await http.PutAsync(
+    "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;correlationId=abc-123-def-456", null);
+Console.WriteLine(await response.Content.ReadAsStringAsync());</code></pre></div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel"><pre class="prettyprint lang-rust code"><code class="code">use reqwest::blocking::Client;
+
+// no typed correlationId filter - call the REST endpoint
+let logs = Client::new()
+    .put("http://localhost:1080/mockserver/retrieve?type=LOGS&amp;correlationId=abc-123-def-456")
+    .send()
+    .unwrap()
+    .text()
+    .unwrap();
+println!("{}", logs);</code></pre></div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel"><pre class="prettyprint lang-php code"><code class="code">use GuzzleHttp\Client;
+
+// no typed correlationId filter - call the REST endpoint
+$http = new Client();
+$response = $http-&gt;put('http://localhost:1080/mockserver/retrieve', [
+    'query' =&gt; ['type' =&gt; 'LOGS', 'correlationId' =&gt; 'abc-123-def-456'],
+]);
+echo (string) $response-&gt;getBody();</code></pre></div>
+    <button class="accordion inner">REST API</button>
+    <div class="panel"><pre class="prettyprint code"><code class="code">curl -X PUT "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;correlationId=abc-123-def-456"</code></pre></div>
+</div>
+
+<p>The correlation ID is visible in the dashboard UI as a small chip on grouped log entries. Click it to copy the ID.</p>
+
+<a id="typed_log_entries" class="anchor" href="#typed_log_entries">&nbsp;</a>
+
+<h2>Typed Log Entry Retrieval</h2>
+
+<p>Instead of retrieving logs as plain text, you can retrieve structured <code>LogEntry</code> objects. This is useful for programmatic analysis — filtering by type, inspecting expectations, or building custom reports:</p>
+
+<p>Each entry writes its request and response in full once, in <code>httpRequest</code> and <code>httpResponse</code>. Where the <code>message</code> and <code>arguments</code> refer to that same request or response, they show a short form instead: the method and path (<code>"POST /orders"</code>) or the status code (<code>"201"</code>), so a large body is not repeated. For the same reason the <code>expectation</code> recorded for a proxied request is written without its request and response bodies. Read bodies from <code>httpRequest</code> and <code>httpResponse</code>; for the full rendered text of each message, retrieve the logs as plain text (<code>format=JSON</code>, the default). Before 9.0.0 the <code>message</code> and <code>arguments</code> repeated the full request and response.</p>
+
+<button id="button_troubleshoot_retrieve_log_entries" class="accordion">retrieve structured log entries</button>
+<div class="panel">
+    <button class="accordion inner">Java</button>
+    <div class="panel"><pre class="prettyprint lang-java code"><code class="code">LogEntry[] entries = mockServerClient.retrieveLogEntries(null);
+
+LogEntry[] matchEntries = mockServerClient.retrieveLogEntries(
+    request().withPath("/api/users")
+);
+
+// Deserialized entries include: type, logLevel, correlationId, epochTime,
+// timestamp, port, expectationId, messageFormat, arguments, because.
+// An argument that is the entry's own request or response arrives as a
+// short string such as "POST /orders" or "201".
+// Note: httpRequest, httpResponse, expectation, throwable are in the JSON
+// but not deserialized (returned as null on the client).
+for (LogEntry entry : entries) {
+    System.out.println(entry.getType() + " at " + entry.getTimestamp());
+}</code></pre></div>
+    <button class="accordion inner">JavaScript</button>
+    <div class="panel"><pre class="prettyprint lang-javascript code"><code class="code">// structured LOG_ENTRIES have no typed method - call the REST endpoint.
+// Send a request-matcher JSON body to filter (omit for all entries).
+const response = await fetch(
+  "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES",
+  { method: "PUT" }
+);
+const entries = await response.json();
+entries.forEach(function (entry) {
+  console.log(entry.type + " at " + entry.timestamp);
+});</code></pre></div>
+    <button class="accordion inner">Python</button>
+    <div class="panel"><pre class="prettyprint lang-python code"><code class="code">import requests
+
+# structured LOG_ENTRIES have no typed method - call the REST endpoint
+response = requests.put(
+    "http://localhost:1080/mockserver/retrieve",
+    params={"type": "LOGS", "format": "LOG_ENTRIES"},
+)
+for entry in response.json():
+    print(entry["type"], "at", entry["timestamp"])</code></pre></div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel"><pre class="prettyprint lang-ruby code"><code class="code">require 'net/http'
+require 'json'
+
+# structured LOG_ENTRIES have no typed method - call the REST endpoint
+uri = URI('http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES')
+response = Net::HTTP.start(uri.host, uri.port) { |http| http.request(Net::HTTP::Put.new(uri)) }
+JSON.parse(response.body).each do |entry|
+  puts "#{entry['type']} at #{entry['timestamp']}"
+end</code></pre></div>
+    <button class="accordion inner">Go</button>
+    <div class="panel"><pre class="prettyprint lang-go code"><code class="code">import (
+    "encoding/json"
+    "fmt"
+    "net/http"
+)
+
+// structured LOG_ENTRIES have no typed method - call the REST endpoint
+req, _ := http.NewRequest("PUT", "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES", nil)
+resp, _ := http.DefaultClient.Do(req)
+defer resp.Body.Close()
+var entries []map[string]interface{}
+json.NewDecoder(resp.Body).Decode(&amp;entries)
+for _, entry := range entries {
+    fmt.Printf("%v at %v\n", entry["type"], entry["timestamp"])
+}</code></pre></div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel"><pre class="prettyprint lang-csharp code"><code class="code">using System.Net.Http;
+
+// structured LOG_ENTRIES have no typed method - call the REST endpoint
+using var http = new HttpClient();
+var response = await http.PutAsync(
+    "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES", null);
+var entriesJson = await response.Content.ReadAsStringAsync();</code></pre></div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel"><pre class="prettyprint lang-rust code"><code class="code">use reqwest::blocking::Client;
+use serde_json::Value;
+
+// structured LOG_ENTRIES have no typed method - call the REST endpoint
+let entries: Vec&lt;Value&gt; = Client::new()
+    .put("http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES")
+    .send()
+    .unwrap()
+    .json()
+    .unwrap();
+for entry in &amp;entries {
+    println!("{} at {}", entry["type"], entry["timestamp"]);
+}</code></pre></div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel"><pre class="prettyprint lang-php code"><code class="code">use GuzzleHttp\Client;
+
+// structured LOG_ENTRIES have no typed method - call the REST endpoint
+$http = new Client();
+$response = $http-&gt;put('http://localhost:1080/mockserver/retrieve', [
+    'query' =&gt; ['type' =&gt; 'LOGS', 'format' =&gt; 'LOG_ENTRIES'],
+]);
+$entries = json_decode((string) $response-&gt;getBody(), true);</code></pre></div>
+    <button class="accordion inner">REST API</button>
+    <div class="panel"><pre class="prettyprint code"><code class="code"># use format=LOG_ENTRIES to get structured JSON log entries
+curl -X PUT "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES"</code></pre></div>
+</div>
+
+<button id="button_troubleshoot_retrieve_log_entries_by_correlation_id" class="accordion">retrieve structured log entries by correlation ID</button>
+<div class="panel">
+    <button class="accordion inner">Java</button>
+    <div class="panel"><pre class="prettyprint lang-java code"><code class="code">LogEntry[] entries = mockServerClient.retrieveLogEntriesByCorrelationId("abc-123-def-456");</code></pre></div>
+    <button class="accordion inner">JavaScript</button>
+    <div class="panel"><pre class="prettyprint lang-javascript code"><code class="code">// no typed method - call the REST endpoint with correlationId
+const response = await fetch(
+  "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES&amp;correlationId=abc-123-def-456",
+  { method: "PUT" }
+);
+const entries = await response.json();</code></pre></div>
+    <button class="accordion inner">Python</button>
+    <div class="panel"><pre class="prettyprint lang-python code"><code class="code">import requests
+
+# no typed method - call the REST endpoint with correlationId
+response = requests.put(
+    "http://localhost:1080/mockserver/retrieve",
+    params={"type": "LOGS", "format": "LOG_ENTRIES", "correlationId": "abc-123-def-456"},
+)
+entries = response.json()</code></pre></div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel"><pre class="prettyprint lang-ruby code"><code class="code">require 'net/http'
+require 'json'
+
+# no typed method - call the REST endpoint with correlationId
+uri = URI('http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES&amp;correlationId=abc-123-def-456')
+response = Net::HTTP.start(uri.host, uri.port) { |http| http.request(Net::HTTP::Put.new(uri)) }
+entries = JSON.parse(response.body)</code></pre></div>
+    <button class="accordion inner">Go</button>
+    <div class="panel"><pre class="prettyprint lang-go code"><code class="code">import (
+    "encoding/json"
+    "net/http"
+)
+
+// no typed method - call the REST endpoint with correlationId
+url := "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES&amp;correlationId=abc-123-def-456"
+req, _ := http.NewRequest("PUT", url, nil)
+resp, _ := http.DefaultClient.Do(req)
+defer resp.Body.Close()
+var entries []map[string]interface{}
+json.NewDecoder(resp.Body).Decode(&amp;entries)</code></pre></div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel"><pre class="prettyprint lang-csharp code"><code class="code">using System.Net.Http;
+
+// no typed method - call the REST endpoint with correlationId
+using var http = new HttpClient();
+var response = await http.PutAsync(
+    "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES&amp;correlationId=abc-123-def-456",
+    null);
+var entriesJson = await response.Content.ReadAsStringAsync();</code></pre></div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel"><pre class="prettyprint lang-rust code"><code class="code">use reqwest::blocking::Client;
+use serde_json::Value;
+
+// no typed method - call the REST endpoint with correlationId
+let url = "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES&amp;correlationId=abc-123-def-456";
+let entries: Vec&lt;Value&gt; = Client::new().put(url).send().unwrap().json().unwrap();</code></pre></div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel"><pre class="prettyprint lang-php code"><code class="code">use GuzzleHttp\Client;
+
+// no typed method - call the REST endpoint with correlationId
+$http = new Client();
+$response = $http-&gt;put('http://localhost:1080/mockserver/retrieve', [
+    'query' =&gt; [
+        'type' =&gt; 'LOGS',
+        'format' =&gt; 'LOG_ENTRIES',
+        'correlationId' =&gt; 'abc-123-def-456',
+    ],
+]);
+$entries = json_decode((string) $response-&gt;getBody(), true);</code></pre></div>
+    <button class="accordion inner">REST API</button>
+    <div class="panel"><pre class="prettyprint code"><code class="code">curl -X PUT "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES&amp;correlationId=abc-123-def-456"</code></pre></div>
+</div>
+
+<a id="time_filtered_retrieval" class="anchor" href="#time_filtered_retrieval">&nbsp;</a>
+
+<h3>Time-Filtered Retrieval</h3>
+
+<p>When debugging intermittent issues, you can narrow log entries to a specific time window:</p>
+
+<button id="button_troubleshoot_retrieve_log_entries_time_filtered" class="accordion">retrieve log entries within a time window</button>
+<div class="panel">
+    <button class="accordion inner">Java</button>
+    <div class="panel"><pre class="prettyprint lang-java code"><code class="code">long now = System.currentTimeMillis();
+LogEntry[] recentEntries = mockServerClient.retrieveLogEntries(
+    null, now - 30_000, now
+);</code></pre></div>
+    <button class="accordion inner">JavaScript</button>
+    <div class="panel"><pre class="prettyprint lang-javascript code"><code class="code">// time filtering is applied client-side on each entry's epochTime field
+const now = Date.now();
+const response = await fetch(
+  "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES",
+  { method: "PUT" }
+);
+const entries = await response.json();
+const recentEntries = entries.filter(function (entry) {
+  return entry.epochTime &gt;= now - 30000 &amp;&amp; entry.epochTime &lt; now;
+});</code></pre></div>
+    <button class="accordion inner">Python</button>
+    <div class="panel"><pre class="prettyprint lang-python code"><code class="code">import time
+import requests
+
+# time filtering is applied client-side on each entry's epochTime field
+now = int(time.time() * 1000)
+response = requests.put(
+    "http://localhost:1080/mockserver/retrieve",
+    params={"type": "LOGS", "format": "LOG_ENTRIES"},
+)
+recent_entries = [
+    entry for entry in response.json()
+    if now - 30000 &lt;= entry["epochTime"] &lt; now
+]</code></pre></div>
+    <button class="accordion inner">Ruby</button>
+    <div class="panel"><pre class="prettyprint lang-ruby code"><code class="code">require 'net/http'
+require 'json'
+
+# time filtering is applied client-side on each entry's epochTime field
+now = (Time.now.to_f * 1000).to_i
+uri = URI('http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES')
+response = Net::HTTP.start(uri.host, uri.port) { |http| http.request(Net::HTTP::Put.new(uri)) }
+recent_entries = JSON.parse(response.body).select do |entry|
+  entry['epochTime'] &gt;= now - 30_000 &amp;&amp; entry['epochTime'] &lt; now
+end</code></pre></div>
+    <button class="accordion inner">Go</button>
+    <div class="panel"><pre class="prettyprint lang-go code"><code class="code">import (
+    "encoding/json"
+    "net/http"
+    "time"
+)
+
+// time filtering is applied client-side on each entry's epochTime field
+now := time.Now().UnixMilli()
+req, _ := http.NewRequest("PUT", "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES", nil)
+resp, _ := http.DefaultClient.Do(req)
+defer resp.Body.Close()
+var entries []map[string]interface{}
+json.NewDecoder(resp.Body).Decode(&amp;entries)
+var recentEntries []map[string]interface{}
+for _, entry := range entries {
+    epochTime := int64(entry["epochTime"].(float64))
+    if epochTime &gt;= now-30000 &amp;&amp; epochTime &lt; now {
+        recentEntries = append(recentEntries, entry)
+    }
+}</code></pre></div>
+    <button class="accordion inner">.NET</button>
+    <div class="panel"><pre class="prettyprint lang-csharp code"><code class="code">using System.Linq;
+using System.Net.Http;
+using System.Text.Json;
+
+// time filtering is applied client-side on each entry's epochTime field
+var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+using var http = new HttpClient();
+var response = await http.PutAsync(
+    "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES", null);
+var entries = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+var recentEntries = entries.EnumerateArray()
+    .Where(entry =&gt; {
+        var epochTime = entry.GetProperty("epochTime").GetInt64();
+        return epochTime &gt;= now - 30000 &amp;&amp; epochTime &lt; now;
+    })
+    .ToList();</code></pre></div>
+    <button class="accordion inner">Rust</button>
+    <div class="panel"><pre class="prettyprint lang-rust code"><code class="code">use reqwest::blocking::Client;
+use serde_json::Value;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+// time filtering is applied client-side on each entry's epochTime field
+let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+let entries: Vec&lt;Value&gt; = Client::new()
+    .put("http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES")
+    .send()
+    .unwrap()
+    .json()
+    .unwrap();
+let recent_entries: Vec&lt;&amp;Value&gt; = entries
+    .iter()
+    .filter(|entry| {
+        let epoch_time = entry["epochTime"].as_i64().unwrap_or(0);
+        epoch_time &gt;= now - 30_000 &amp;&amp; epoch_time &lt; now
+    })
+    .collect();</code></pre></div>
+    <button class="accordion inner">PHP</button>
+    <div class="panel"><pre class="prettyprint lang-php code"><code class="code">use GuzzleHttp\Client;
+
+// time filtering is applied client-side on each entry's epochTime field
+$now = (int) (microtime(true) * 1000);
+$http = new Client();
+$response = $http-&gt;put('http://localhost:1080/mockserver/retrieve', [
+    'query' =&gt; ['type' =&gt; 'LOGS', 'format' =&gt; 'LOG_ENTRIES'],
+]);
+$entries = json_decode((string) $response-&gt;getBody(), true);
+$recentEntries = array_filter($entries, function ($entry) use ($now) {
+    return $entry['epochTime'] &gt;= $now - 30000 &amp;&amp; $entry['epochTime'] &lt; $now;
+});</code></pre></div>
+    <button class="accordion inner">REST API</button>
+    <div class="panel"><pre class="prettyprint code"><code class="code"># the retrieve endpoint returns all log entries; the time window is applied
+# client-side by filtering each entry on its epochTime field
+curl -X PUT "http://localhost:1080/mockserver/retrieve?type=LOGS&amp;format=LOG_ENTRIES"</code></pre></div>
+</div>
+
+<a id="related" class="anchor" href="#related">&nbsp;</a>
+
+<h2>Related Pages</h2>
+
+<ul>
+    <li><a href="/mock_server/creating_expectations.html">Creating Expectations</a> &mdash; the full reference for request matchers and response actions, so you can correct the expectation that is not matching</li>
+    <li><a href="/mock_server/verification.html">Verify Requests</a> &mdash; confirm which requests actually reached MockServer while diagnosing a mismatch</li>
+    <li><a href="/mock_server/clearing_and_resetting.html">Clearing &amp; Resetting</a> &mdash; rule out stale expectations or recorded requests left over from an earlier test</li>
+</ul>

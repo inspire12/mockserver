@@ -1,0 +1,337 @@
+---
+title: Mock Drift Detection
+shortTitle: Drift Detection
+description: Detect when real upstream services have drifted from your mock stubs — status code mismatches, added or removed JSON fields, type and header changes. Compare two sets of expectations offline with the baseline compare endpoint.
+layout: page
+pageOrder: 5
+section: 'Verify & Test'
+subsection: true
+sitemap:
+  priority: 0.7
+  changefreq: 'monthly'
+  lastmod: 2026-06-17T00:00:00+00:00
+keywords: mock drift detection, stub validation, proxy mode, schema drift, contract testing, response comparison, api evolution, baseline compare
+---
+
+<p><strong>On this page:</strong></p>
+<ul>
+  <li><a href="#what-is-drift">What is mock drift?</a></li>
+  <li><a href="#how-it-works">How it works</a></li>
+  <li><a href="#what-is-detected">What is detected</a></li>
+  <li><a href="#retrieving">Retrieving drift records</a></li>
+  <li><a href="#clearing">Clearing drift records</a></li>
+  <li><a href="#storage">Storage</a></li>
+  <li><a href="#semantic-drift">Semantic drift analysis (LLM-powered)</a></li>
+  <li><a href="#performance-drift">Performance drift detection</a></li>
+  <li><a href="#baseline-compare">Baseline Traffic Comparison</a></li>
+  <li><a href="#llm-drift">Not the same as LLM cassette drift</a></li>
+</ul>
+
+<h2 id="what-is-drift">What is mock drift?</h2>
+
+<p>Mock drift occurs when a real upstream service evolves (adding fields, changing response codes, modifying headers) but the mock stubs used in your tests remain unchanged. This leads to tests that pass against stale stubs but fail against the real service.</p>
+
+<p>MockServer's drift detection automatically compares forwarded (real) upstream responses against your stub expectations and flags structural differences, giving you early warning that your mocks need updating.</p>
+
+<h2 id="how-it-works">How it works</h2>
+
+<p>When MockServer forwards a request to an upstream service (in proxy mode) and there are also response-type stub expectations matching the same request pattern, MockServer compares the real response against each matching stub and records any structural drifts. The analysis runs asynchronously and never slows down the response path.</p>
+
+<p><strong>Structural</strong> drift detection (status, schema and header differences) is automatic and requires no configuration — simply have both forwarding expectations and response-type stub expectations for the same request patterns. The two enrichments described later on this page are opt-in: <a href="#semantic-drift">semantic drift analysis</a> (LLM-powered severity classification) and <a href="#performance-drift">performance drift detection</a> each need to be turned on with a configuration property.</p>
+
+<h2 id="what-is-detected">What is detected</h2>
+
+<table class="table table-striped">
+  <thead>
+    <tr><th>Drift Type</th><th>Description</th><th>Confidence</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>STATUS</code></td><td>HTTP status code differs between stub and real response</td><td>1.0</td></tr>
+    <tr><td><code>SCHEMA_FIELD_ADDED</code></td><td>JSON field present in real response but not in stub</td><td>0.9</td></tr>
+    <tr><td><code>SCHEMA_FIELD_REMOVED</code></td><td>JSON field present in stub but missing from real response</td><td>0.95</td></tr>
+    <tr><td><code>SCHEMA_TYPE_CHANGED</code></td><td>JSON field type changed (e.g. number became string)</td><td>0.95</td></tr>
+    <tr><td><code>HEADER_ADDED</code></td><td>HTTP header present in real response but not in stub</td><td>0.9</td></tr>
+    <tr><td><code>HEADER_REMOVED</code></td><td>HTTP header present in stub but missing from real response</td><td>0.9</td></tr>
+    <tr><td><code>HEADER_CHANGED</code></td><td>HTTP header value differs between stub and real response</td><td>0.85</td></tr>
+    <tr><td><code>PERFORMANCE</code></td><td>p95 response time exceeds the configured threshold</td><td>0.8</td></tr>
+  </tbody>
+</table>
+
+<p>For the three schema drift types, <code>expectedValue</code> and <code>actualValue</code> hold the field's JSON type (<code>string</code>, <code>integer</code>, <code>number</code>, <code>boolean</code>, <code>object</code> or <code>array</code>) rather than its value, because schema drift compares the shape of the two responses, not their data. For example, a stub returning <code>{"id": 7}</code> and a real API returning <code>{"id": "7"}</code> gives a <code>SCHEMA_TYPE_CHANGED</code> drift for <code>$.id</code> with expected <code>integer</code> and actual <code>string</code>.</p>
+
+<p>Non-semantic headers (<code>date</code>, <code>x-request-id</code>, <code>content-length</code>, <code>transfer-encoding</code>, <code>connection</code>, <code>keep-alive</code>, <code>server</code>) are automatically excluded from comparison.</p>
+
+<h2 id="retrieving">Retrieving drift records</h2>
+
+<p>Use the <code>GET /mockserver/drift</code> endpoint to retrieve detected drifts:</p>
+
+<pre class="prettyprint code"><code class="code">curl http://localhost:1080/mockserver/drift</code></pre>
+
+<p>Response:</p>
+
+<pre class="prettyprint code"><code class="code">{
+  "count": 2,
+  "drifts": [
+    {
+      "expectationId": "abc-123",
+      "driftType": "STATUS",
+      "field": "statusCode",
+      "expectedValue": "200",
+      "actualValue": "422",
+      "confidence": 1.0,
+      "epochTimeMs": 1717145600000
+    },
+    {
+      "expectationId": "abc-123",
+      "driftType": "SCHEMA_FIELD_ADDED",
+      "field": "$.newField",
+      "actualValue": "string",
+      "confidence": 0.9,
+      "epochTimeMs": 1717145600000
+    }
+  ]
+}</code></pre>
+
+<h3>Filtering</h3>
+
+<p>Filter by expectation ID:</p>
+
+<pre class="prettyprint code"><code class="code">curl "http://localhost:1080/mockserver/drift?expectationId=abc-123"</code></pre>
+
+<p>Limit the number of results (default 50, max 500):</p>
+
+<pre class="prettyprint code"><code class="code">curl "http://localhost:1080/mockserver/drift?limit=10"</code></pre>
+
+<p>The <code>limit</code> parameter applies only to unfiltered queries (most-recent-first). When you filter by <code>expectationId</code>, <strong>all</strong> matching records are returned and <code>limit</code> is ignored.</p>
+
+<h3>Using a client library</h3>
+
+<p>Each client library exposes a typed method that retrieves the drift report and returns the parsed <code>{ count, drifts }</code> result (or the raw report JSON, matching how that client returns other control-plane results):</p>
+
+<button class="accordion inner">Java</button>
+<div class="panel">
+    <pre class="prettyprint lang-java code"><code class="code">String driftReport = new MockServerClient("localhost", 1080).retrieveDrift();</code></pre>
+</div>
+<button class="accordion inner">JavaScript</button>
+<div class="panel">
+    <pre class="prettyprint lang-javascript code"><code class="code">var mockServerClient = require('mockserver-client').mockServerClient;
+mockServerClient("localhost", 1080).retrieveDrift().then(
+    function (report) { console.log(report.count + " drift(s)", report.drifts); },
+    function (error) { console.log(error); }
+);</code></pre>
+</div>
+<button class="accordion inner">Python</button>
+<div class="panel">
+    <pre class="prettyprint lang-python code"><code class="code">from mockserver import MockServerClient
+
+report = MockServerClient("localhost", 1080).retrieve_drift()
+print(report["count"], report["drifts"])</code></pre>
+</div>
+<button class="accordion inner">Ruby</button>
+<div class="panel">
+    <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+
+report = MockServer::Client.new('localhost', 1080).retrieve_drift
+puts report['count']</code></pre>
+</div>
+<button class="accordion inner">Go</button>
+<div class="panel">
+    <pre class="prettyprint lang-go code"><code class="code">client := mockserver.New("localhost", 1080)
+report, err := client.RetrieveDrift()</code></pre>
+</div>
+<button class="accordion inner">C#</button>
+<div class="panel">
+    <pre class="prettyprint lang-csharp code"><code class="code">var client = new MockServerClient("localhost", 1080);
+string driftReport = client.RetrieveDrift();</code></pre>
+</div>
+<button class="accordion inner">Rust</button>
+<div class="panel">
+    <pre class="prettyprint lang-rust code"><code class="code">let client = ClientBuilder::new("localhost", 1080).build()?;
+let drift_report = client.retrieve_drift()?;</code></pre>
+</div>
+<button class="accordion inner">PHP</button>
+<div class="panel">
+    <pre class="prettyprint lang-php code"><code class="code">$client = new \MockServer\MockServerClient('localhost', 1080);
+$driftReport = $client->retrieveDrift();</code></pre>
+</div>
+
+<h2 id="clearing">Clearing drift records</h2>
+
+<p>To clear all recorded drifts:</p>
+
+<pre class="prettyprint code"><code class="code">curl -X PUT http://localhost:1080/mockserver/drift/clear</code></pre>
+
+<h3>Using a client library</h3>
+
+<p>Each client library exposes a typed method that clears all recorded drift:</p>
+
+<button class="accordion inner">Java</button>
+<div class="panel">
+    <pre class="prettyprint lang-java code"><code class="code">new MockServerClient("localhost", 1080).clearDrift();</code></pre>
+</div>
+<button class="accordion inner">JavaScript</button>
+<div class="panel">
+    <pre class="prettyprint lang-javascript code"><code class="code">var mockServerClient = require('mockserver-client').mockServerClient;
+mockServerClient("localhost", 1080).clearDrift();</code></pre>
+</div>
+<button class="accordion inner">Python</button>
+<div class="panel">
+    <pre class="prettyprint lang-python code"><code class="code">from mockserver import MockServerClient
+
+MockServerClient("localhost", 1080).clear_drift()</code></pre>
+</div>
+<button class="accordion inner">Ruby</button>
+<div class="panel">
+    <pre class="prettyprint lang-ruby code"><code class="code">require 'mockserver-client'
+
+MockServer::Client.new('localhost', 1080).clear_drift</code></pre>
+</div>
+<button class="accordion inner">Go</button>
+<div class="panel">
+    <pre class="prettyprint lang-go code"><code class="code">client := mockserver.New("localhost", 1080)
+err := client.ClearDrift()</code></pre>
+</div>
+<button class="accordion inner">C#</button>
+<div class="panel">
+    <pre class="prettyprint lang-csharp code"><code class="code">var client = new MockServerClient("localhost", 1080);
+client.ClearDrift();</code></pre>
+</div>
+<button class="accordion inner">Rust</button>
+<div class="panel">
+    <pre class="prettyprint lang-rust code"><code class="code">let client = ClientBuilder::new("localhost", 1080).build()?;
+client.clear_drift()?;</code></pre>
+</div>
+<button class="accordion inner">PHP</button>
+<div class="panel">
+    <pre class="prettyprint lang-php code"><code class="code">$client = new \MockServer\MockServerClient('localhost', 1080);
+$client->clearDrift();</code></pre>
+</div>
+
+<p>Drift records are also cleared automatically when MockServer is reset via <code>PUT /mockserver/reset</code>.</p>
+
+<h2 id="storage">Storage</h2>
+
+<p>Drift records are stored in an in-memory LRU (least recently used) buffer with a maximum capacity of 1000 entries. When the buffer is full, the oldest records are evicted to make room for new ones.</p>
+
+<h2 id="semantic-drift">Semantic drift analysis (LLM-powered)</h2>
+
+<p>When you have a runtime LLM backend configured (see <a href="/mock_server/configuration_properties.html">Configuration Properties</a>), you can enable semantic drift analysis to automatically classify each structural drift as <strong>BREAKING</strong>, <strong>WARNING</strong>, or <strong>INFORMATIONAL</strong>.</p>
+
+<p>Enable it with:</p>
+
+<pre class="prettyprint code"><code class="code">-Dmockserver.driftSemanticAnalysisEnabled=true</code></pre>
+
+<p>When enabled, MockServer sends the drift details along with truncated stub and real response bodies to your configured LLM. The LLM classifies each drift and provides a one-sentence explanation. These are added to the drift records as <code>semanticSeverity</code> and <code>semanticExplanation</code> fields.</p>
+
+<p>Semantic analysis is best-effort: if the LLM is unavailable or returns an error, drift records are stored with their original structural data only.</p>
+
+<h3>Example response with semantic fields</h3>
+
+<pre class="prettyprint code"><code class="code">{
+  "count": 1,
+  "drifts": [
+    {
+      "expectationId": "abc-123",
+      "driftType": "SCHEMA_FIELD_REMOVED",
+      "field": "$.role",
+      "expectedValue": "string",
+      "confidence": 0.95,
+      "epochTimeMs": 1717145600000,
+      "semanticSeverity": "BREAKING",
+      "semanticExplanation": "Removing the role field will break clients that depend on it for authorization"
+    }
+  ]
+}</code></pre>
+
+<h2 id="performance-drift">Performance drift detection</h2>
+
+<p>MockServer can track response times per expectation and alert you when the p95 (95th percentile) response time exceeds a threshold. This helps detect performance regressions in upstream services.</p>
+
+<p>Enable it by setting a threshold in milliseconds:</p>
+
+<pre class="prettyprint code"><code class="code">-Dmockserver.driftResponseTimeThresholdMs=500</code></pre>
+
+<p>When the p95 response time for any expectation exceeds 500ms, a <code>PERFORMANCE</code> drift record is emitted. MockServer uses a sliding window of the last 100 response time observations per expectation to calculate percentiles.</p>
+
+<p>Set to <code>0</code> (the default) to disable performance drift detection.</p>
+
+<h2 id="baseline-compare">Baseline Traffic Comparison</h2>
+
+<p>The <code>GET /mockserver/drift</code> endpoint detects drift from live forwarded traffic at runtime. For offline CI use — comparing a committed snapshot of expectations against the current set without running a proxy — use the baseline compare endpoint.</p>
+
+<p>Send a <code>PUT</code> request to <code>/mockserver/baseline/compare</code> with a JSON body containing a <code>baseline</code> array of expectations. MockServer compares the baseline against a <code>current</code> array (if supplied) or against its own live active expectations (if <code>current</code> is omitted). It returns HTTP 200 with a structured drift report.</p>
+
+<h3>Request body</h3>
+
+<pre class="prettyprint code"><code class="code">{
+  "baseline": [ &lt;expectations&gt; ],
+  "current":  [ &lt;expectations&gt; ]
+}</code></pre>
+
+<p>The <code>current</code> field is optional. When omitted, MockServer uses its live active expectations — useful for checking whether newly recorded traffic matches a committed baseline.</p>
+
+<h3>Response body</h3>
+
+<pre class="prettyprint code"><code class="code">{
+  "hasDrift": false,
+  "added":   [],
+  "removed": [],
+  "changed": []
+}</code></pre>
+
+<table class="table table-striped">
+  <thead>
+    <tr><th>Field</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>hasDrift</code></td><td><code>true</code> if any interaction was added, removed, or changed; <code>false</code> when the sets are structurally identical</td></tr>
+    <tr><td><code>added</code></td><td>Interactions present in <code>current</code> but not in <code>baseline</code> (new traffic shapes)</td></tr>
+    <tr><td><code>removed</code></td><td>Interactions present in <code>baseline</code> but not in <code>current</code> (dropped endpoints)</td></tr>
+    <tr><td><code>changed</code></td><td>Interactions present in both whose request fields or response structure differ</td></tr>
+  </tbody>
+</table>
+
+<p>Each entry in <code>added</code> and <code>removed</code> contains only the <code>key</code> (matching key, see below). Each entry in <code>changed</code> also carries <code>requestDiffs</code> and <code>responseDiffs</code> arrays of field-level differences, each with a <code>field</code>, <code>diffType</code> (<code>ADDED</code>, <code>REMOVED</code>, or <code>CHANGED</code>), and <code>expectedValue</code>/<code>actualValue</code>.</p>
+
+<h3>Matching key</h3>
+
+<p>Interactions are correlated across the two sets by a stable key of <code>METHOD normalized-path</code>: method is upper-cased, and a single trailing slash is stripped from the path (but <code>/</code> is preserved). For example, <code>GET /api/users/</code> and <code>GET /api/users</code> share the same key <code>GET /api/users</code>.</p>
+
+<h3>What counts as drift</h3>
+
+<p>The comparison is <strong>value-insensitive for JSON response bodies</strong>: only structural differences are reported. A different value at the same field with the same JSON type is NOT drift. The following ARE drift:</p>
+
+<ul>
+  <li>A new or removed JSON field in the response body</li>
+  <li>A JSON type change at any field (e.g. <code>string</code> became <code>number</code>, <code>object</code> became <code>array</code>)</li>
+  <li>A response status code change</li>
+  <li>A header added, removed, or whose value changed</li>
+  <li>A request field change (method, path, headers, query parameters, body)</li>
+</ul>
+
+<p>Non-JSON response bodies fall back to exact-string comparison.</p>
+
+<h3>CI usage pattern</h3>
+
+<p>A typical CI workflow: commit a baseline expectations file alongside your tests. In CI, start MockServer, run your test suite (which populates expectations via recording or explicit setup), then call <code>PUT /mockserver/baseline/compare</code> with the committed baseline as <code>baseline</code> and no <code>current</code> (so MockServer uses its live expectations). If <code>hasDrift</code> is <code>true</code>, fail the build.</p>
+
+<pre class="prettyprint code"><code class="code">curl -s -X PUT "http://localhost:1080/mockserver/baseline/compare" \
+  -H "Content-Type: application/json" \
+  -d "{\"baseline\": $(cat baseline-expectations.json)}" \
+  | python3 -c "import sys,json; r=json.load(sys.stdin); sys.exit(1 if r['hasDrift'] else 0)"</code></pre>
+
+<h3>Response codes</h3>
+
+<table class="table table-striped">
+  <thead>
+    <tr><th>Status</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>200</code></td><td>Comparison completed. Check <code>hasDrift</code> in the body to determine whether traffic shapes match.</td></tr>
+    <tr><td><code>400</code></td><td>Empty body, invalid JSON, or missing <code>baseline</code> field.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="llm-drift">Not the same as LLM cassette drift</h2>
+
+<p>The drift detection described on this page is for <strong>HTTP mock stubs</strong> — it compares forwarded upstream responses against your stub expectations while MockServer proxies live traffic. It is <strong>separate</strong> from the LLM-specific <code>detect_llm_drift</code> MCP tool, which is a different mechanism: that tool <em>replays a recorded LLM cassette (fixture) against the live LLM provider</em> and reports structural drift (new/removed fields, type changes) in the provider's responses. It requires a configured runtime LLM backend and is intended for an opt-in / scheduled CI lane rather than the per-commit build. If you are validating recorded LLM/MCP traffic against a real provider, use <code>detect_llm_drift</code>; for everything else, use the <code>/mockserver/drift</code> endpoint documented here.</p>

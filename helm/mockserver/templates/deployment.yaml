@@ -15,24 +15,67 @@ spec:
       release: {{ .Release.Name }}
   template:
     metadata:
-{{- if .Values.podAnnotations }}
-      # Allows custom annotations to be specified
+{{- if or .Values.app.config.enabled (and .Values.app.tls.enabled .Values.app.tls.create) .Values.podAnnotations }}
       annotations:
+{{- if .Values.app.config.enabled }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+{{- end }}
+{{- if and .Values.app.tls.enabled .Values.app.tls.create }}
+        checksum/tls: {{ include (print $.Template.BasePath "/secret-tls.yaml") . | sha256sum }}
+{{- end }}
+{{- if .Values.podAnnotations }}
 {{ toYaml .Values.podAnnotations | indent 8 }}
+{{- end }}
 {{- end }}
       name: {{ template "release.name" . }}
       labels:
         app: {{ template "chart.name" . }}
         release: {{ .Release.Name }}
+{{- if .Values.podLabels }}
+{{ toYaml .Values.podLabels | indent 8 }}
+{{- end }}
     spec:
       serviceAccountName: {{ .Values.app.serviceAccountName }}
+      terminationGracePeriodSeconds: {{ .Values.app.terminationGracePeriodSeconds | default 45 }}
+{{- with .Values.podSecurityContext }}
+      securityContext:
+{{ toYaml . | indent 8 }}
+{{- end }}
 {{- if .Values.imagePullSecrets }}
       imagePullSecrets:
 {{ toYaml .Values.imagePullSecrets | indent 8 }}
 {{- end }}
+{{- if and .Values.sidecar.transparentProxy .Values.sidecar.iptables.enabled }}
+      initContainers:
+        # Redirects outbound TCP on the configured ports to MockServer's transparent
+        # proxy port so traffic is intercepted without application changes. Requires
+        # a privileged init container with NET_ADMIN to apply iptables rules. Skip
+        # this init container if the platform applies the rules another way.
+        - name: iptables-init
+          image: {{ .Values.sidecar.iptables.image | quote }}
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              # Exclude MockServer's own egress (by UID) BEFORE any REDIRECT rules
+              # to prevent an infinite redirect loop when MockServer forwards upstream.
+              iptables -t nat -I OUTPUT -m owner --uid-owner {{ .Values.sidecar.iptables.excludeUid | default .Values.app.runAsUser }} -j RETURN
+              for port in $(echo "{{ .Values.sidecar.iptables.redirectPorts }}" | tr ',' ' '); do
+                iptables -t nat -A OUTPUT -p tcp --dport "$port" -j REDIRECT --to-ports {{ .Values.sidecar.iptables.proxyPort }}
+              done
+              echo "iptables REDIRECT rules applied for ports {{ .Values.sidecar.iptables.redirectPorts }} -> {{ .Values.sidecar.iptables.proxyPort }} (excludeUid={{ .Values.sidecar.iptables.excludeUid | default .Values.app.runAsUser }})"
+{{- end }}
       containers:
         - name: {{ template "release.name" . }}
-          image: {{ if .Values.image.repositoryNameAndTag }}{{ .Values.image.repositoryNameAndTag }}{{- else }}{{ .Values.image.repository }}/mockserver:mockserver-{{- if .Values.image.snapshot }}snapshot{{- else }}{{ .Chart.AppVersion }}{{- end }}{{- end }}
+          image: {{ if .Values.image.repositoryNameAndTag }}{{ .Values.image.repositoryNameAndTag }}{{- else }}{{ .Values.image.repository }}/mockserver:mockserver-{{- if .Values.image.snapshot }}snapshot{{- else }}{{ .Chart.AppVersion }}{{- end }}{{- with .Values.image.variant }}-{{ . }}{{- end }}{{- end }}
 {{- if .Values.image.snapshot }}
           imagePullPolicy: Always
 {{- else }}
@@ -44,25 +87,69 @@ spec:
 {{- end }}
             readOnlyRootFilesystem: {{ .Values.app.readOnlyRootFilesystem }}
             allowPrivilegeEscalation: false
+{{- if and .Values.sidecar.transparentProxy .Values.sidecar.netAdmin }}
+            capabilities:
+              add:
+                - NET_ADMIN
+{{- end }}
           ports:
             - name: serviceport
               containerPort: {{ .Values.app.serverPort }}
               protocol: TCP
+{{- if .Values.clustering.enabled }}
+            - name: jgroups
+              containerPort: {{ .Values.clustering.jgroupsPort | default 7800 }}
+              protocol: TCP
+{{- end }}
+          # Readiness gates traffic on startup completion: /mockserver/ready returns 503 until the
+          # expectation initializers and OpenAPI seeding finish, then 200. This is distinct from the
+          # liveness path below (which is 200 the instant the port binds) so the orchestrator does
+          # not route requests before the seeded expectations exist.
+          # Cadence measured, not guessed: the server is serving ~0.4s after the container
+          # starts on a warm node, but initialDelaySeconds: 2 meant the FIRST probe did not
+          # fire until 2s, and periodSeconds: 2 added up to 2s more granularity - so a pod
+          # ready in 0.4s was marked Ready at 2-4s. Probing from 0s at 1s intervals measured
+          # ~2s faster to Ready per pod with no server change. failureThreshold is raised to
+          # keep the SAME ~20s tolerance for a slow start (initializers, OpenAPI seeding, a
+          # cold node) now that each failure costs 1s rather than 2s. Failing readiness only
+          # holds the pod out of the Service endpoints - it never restarts it - so probing
+          # early is free: /mockserver/ready simply answers 503 until seeding finishes.
           readinessProbe:
-            tcpSocket:
+            httpGet:
+              path: /mockserver/ready
               port: serviceport
-            initialDelaySeconds: 2
-            periodSeconds: 2
+            initialDelaySeconds: 0
+            periodSeconds: 1
             successThreshold: 1
-            failureThreshold: 10
+            failureThreshold: 20
+{{- if gt (int (.Values.app.preStopSleepSeconds | default 0)) 0 }}
+          # Pause before SIGTERM so endpoint removal propagates first. Uses the NATIVE sleep
+          # action (Kubernetes 1.30+; Alpha and off by default in 1.29) because this image is
+          # distroless and has no shell for an `exec` hook. The server's in-flight drain covers requests already being served; this
+          # covers requests still arriving because the Service has not stopped routing yet.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ int .Values.app.preStopSleepSeconds }}
+{{- end }}
+          # Liveness only checks the process is alive and serving: the always-200 liveness path is
+          # correct here so a slow initializer does not get the pod killed and restarted in a loop.
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /liveness/probe
               port: serviceport
             initialDelaySeconds: 10
             periodSeconds: 5
             successThreshold: 1
             failureThreshold: 10
           env:
+            # Override the image's baked-in analytics distribution label (docker-standard) so
+            # events from Helm deployments are attributed to "helm". Inert unless analytics is
+            # already active (which still requires the endpoint+key baked into the image).
+            - name: MOCKSERVER_DASHBOARD_ANALYTICS_DISTRIBUTION
+              value: helm
+            - name: MOCKSERVER_LIVENESS_HTTP_GET_PATH
+              value: /liveness/probe
             - name: MOCKSERVER_LOG_LEVEL
               value: {{ .Values.app.logLevel | quote }}
             - name: SERVER_PORT
@@ -76,20 +163,86 @@ spec:
               value: {{ .Values.app.proxyRemotePort | quote }}
 {{- end }}
 {{- if .Values.app.jvmOptions }}
-            - name: JVM_OPTIONS
+            - name: JAVA_TOOL_OPTIONS
               value: {{ .Values.app.jvmOptions | quote }}
 {{- end }}
 {{- if or .Values.app.config.enabled .Values.app.mountConfigMap }}
             - name: MOCKSERVER_PROPERTY_FILE
               value: /config/{{ .Values.app.propertiesFileName }}
 {{- end }}
+{{- if .Values.app.persistence.enabled }}
+            - name: MOCKSERVER_PERSIST_EXPECTATIONS
+              value: "true"
+            - name: MOCKSERVER_PERSISTED_EXPECTATIONS_PATH
+              value: {{ .Values.app.persistence.mountPath }}/persistedExpectations.json
+            - name: MOCKSERVER_INITIALIZATION_JSON_PATH
+              value: {{ .Values.app.persistence.mountPath }}/persistedExpectations.json
+{{- end }}
+{{- if .Values.sidecar.transparentProxy }}
+            - name: MOCKSERVER_TRANSPARENT_PROXY_ENABLED
+              value: "true"
+{{- end }}
+{{- if .Values.clustering.enabled }}
+            - name: MOCKSERVER_STATE_BACKEND
+              value: "infinispan"
+            - name: MOCKSERVER_CLUSTER_ENABLED
+              value: "true"
+            - name: MOCKSERVER_CLUSTER_NAME
+              value: {{ .Values.clustering.clusterName | default "mockserver-cluster" | quote }}
+            - name: MOCKSERVER_CLUSTER_TRANSPORT_CONFIG
+              value: {{ .Values.clustering.transportConfig | default "jgroups-kubernetes.xml" | quote }}
+            - name: JGROUPS_DNS_QUERY
+              value: "{{ template "release.name" . }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
+{{- end }}
+{{- if .Values.app.tls.enabled }}
+            # Shared CA from a mounted Secret so every replica presents certificates
+            # chaining to ONE CA a client can trust (fixes intermittent TLS trust
+            # errors behind a load balancer). Dynamic per-pod CA generation is turned
+            # off; environment values override the same properties in a mounted file.
+            - name: MOCKSERVER_DYNAMICALLY_CREATE_CERTIFICATE_AUTHORITY_CERTIFICATE
+              value: "false"
+            - name: MOCKSERVER_CERTIFICATE_AUTHORITY_X509_CERTIFICATE
+              value: {{ .Values.app.tls.mountPath }}/CertificateAuthorityCertificate.pem
+            - name: MOCKSERVER_CERTIFICATE_AUTHORITY_PRIVATE_KEY
+              value: {{ .Values.app.tls.mountPath }}/CertificateAuthorityPrivateKey.pem
+{{- if and .Values.app.tls.create .Values.app.tls.certificate }}
+            - name: MOCKSERVER_TLS_X509_CERTIFICATE_PATH
+              value: {{ .Values.app.tls.mountPath }}/Certificate.pem
+{{- end }}
+{{- if and .Values.app.tls.create .Values.app.tls.privateKey }}
+            - name: MOCKSERVER_TLS_PRIVATE_KEY_PATH
+              value: {{ .Values.app.tls.mountPath }}/PrivateKey.pem
+{{- end }}
+{{- end }}
+{{- if .Values.app.dynamicCertificateDir.enabled }}
+            # Writable emptyDir so dynamically generated certificates have somewhere to
+            # be written (the default "." is not writable under a non-root uid / cwd "/").
+            - name: MOCKSERVER_CERTIFICATE_DIRECTORY_TO_SAVE_DYNAMIC_SSL_CERTIFICATE
+              value: {{ .Values.app.dynamicCertificateDir.path | quote }}
+{{- end }}
+{{- with .Values.app.extraEnv }}
+{{ toYaml . | indent 12 }}
+{{- end }}
           volumeMounts:
             - name: config-volume
               mountPath: /config
-{{- if .Values.app.mountedLibsConfigMapName}}
+{{- if .Values.app.tls.enabled }}
+            - name: tls-volume
+              mountPath: {{ .Values.app.tls.mountPath }}
+              readOnly: true
+{{- end }}
+{{- if .Values.app.dynamicCertificateDir.enabled }}
+            - name: dynamic-certificates
+              mountPath: {{ .Values.app.dynamicCertificateDir.path }}
+{{- end }}
+{{- if and .Values.app.mountedLibsConfigMapName (not .Values.clustering.enabled) }}
             - name: libs-volume
               mountPath: /libs
 {{- end}}
+{{- if .Values.app.persistence.enabled }}
+            - name: persistence-volume
+              mountPath: {{ .Values.app.persistence.mountPath }}
+{{- end }}
 {{- if .Values.resources }}
           resources:
 {{ toYaml .Values.resources | indent 12 }}
@@ -99,12 +252,26 @@ spec:
           configMap:
             name: {{ .Values.app.mountedConfigMapName }}
             optional: true
-{{- if .Values.app.mountedLibsConfigMapName}}
+{{- if .Values.app.tls.enabled }}
+        - name: tls-volume
+          secret:
+            secretName: {{ if .Values.app.tls.create }}{{ template "release.name" . }}-tls{{ else }}{{ required "app.tls.existingSecretName is required when app.tls.enabled=true and app.tls.create=false" .Values.app.tls.existingSecretName }}{{ end }}
+{{- end }}
+{{- if .Values.app.dynamicCertificateDir.enabled }}
+        - name: dynamic-certificates
+          emptyDir: {}
+{{- end }}
+{{- if and .Values.app.mountedLibsConfigMapName (not .Values.clustering.enabled) }}
         - name: libs-volume
           configMap:
             name: {{ .Values.app.mountedLibsConfigMapName }}
             optional: true
 {{- end}}
+{{- if .Values.app.persistence.enabled }}
+        - name: persistence-volume
+          persistentVolumeClaim:
+            claimName: {{ .Values.app.persistence.existingClaimName | default (include "release.name" .) }}
+{{- end }}
 {{- with .Values.nodeSelector }}
       nodeSelector:
 {{ toYaml . | indent 8 }}

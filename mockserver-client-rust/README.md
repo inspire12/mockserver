@@ -1,0 +1,443 @@
+# mockserver-client
+
+An idiomatic Rust client for [MockServer](https://www.mock-server.com)'s control-plane REST API.
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dev-dependencies]
+mockserver-client = "7.3"
+```
+
+## Quick Start
+
+```rust
+use mockserver_client::{ClientBuilder, HttpRequest, HttpResponse, VerificationTimes};
+
+fn main() -> mockserver_client::Result<()> {
+    let client = ClientBuilder::new("localhost", 1080).build()?;
+
+    // Create an expectation
+    client.when(HttpRequest::new().method("GET").path("/hello"))
+        .respond(HttpResponse::new().status_code(200).body("world"))?;
+
+    // Verify the request was received
+    client.verify(
+        HttpRequest::new().path("/hello"),
+        VerificationTimes::at_least(1),
+    )?;
+
+    // Reset all expectations
+    client.reset()?;
+    Ok(())
+}
+```
+
+## LLM, MCP, and A2A mocking
+
+The [`llm`](src/llm.rs), [`mcp`](src/mcp.rs), and [`a2a`](src/a2a.rs) modules provide
+fluent builders that produce the same expectation wire JSON as the Java, Node, and
+Python clients, so a mock scripted from Rust behaves identically to one scripted from
+any other client.
+
+### LLM completions, embeddings, conversations, and failover
+
+```rust
+use mockserver_client::llm::{
+    completion, conversation, embedding, header, llm_failover, llm_mock, turn, usage, Provider,
+};
+
+// A single chat-completion mock (action carried in `httpLlmResponse`).
+llm_mock("/v1/chat/completions")
+    .with_provider(Provider::OPENAI)
+    .with_model("gpt-4o")
+    .responding_with(completion().with_text("Hello!").with_usage(usage().with_output_tokens(3)))
+    .apply_to(&client)?;
+
+// An embedding mock (clears any completion).
+llm_mock("/v1/embeddings")
+    .with_provider(Provider::OPENAI)
+    .responding_with(embedding().with_dimensions(1536).with_deterministic_from_input(true))
+    .apply_to(&client)?;
+
+// A multi-turn conversation using MockServer scenario-state advancement.
+conversation()
+    .with_path("/v1/chat/completions")
+    .with_provider(Provider::ANTHROPIC)
+    .isolate_by(header("x-session-id")) // optional per-session isolation
+    .turn(turn().responding_with(completion().with_text("Hi, how can I help?")))
+    .turn(
+        turn()
+            .when_latest_message_contains("weather")
+            .responding_with(completion().with_text("It's sunny.")),
+    )
+    .apply_to(&client)?;
+
+// Fail N times (with default provider-shaped error bodies), then succeed.
+llm_failover()
+    .with_path("/v1/chat/completions")
+    .with_provider(Provider::OPENAI)
+    .fail_with_count(429, 2) // coalesced into one expectation with times = 2
+    .fail_with(500)
+    .then_respond_with(completion().with_text("Recovered"))
+    .apply_to(&client)?;
+```
+
+`provider` is serialised UPPERCASE (`OPENAI`, `ANTHROPIC`, ...). Conversation turns
+advance through scenario states `Started -> turn_1 -> ... -> __done`. Each builder also
+has a `build()` method returning the raw `serde_json::Value`(s) if you want to inspect
+or submit them yourself via `client.upsert_raw(...)`.
+
+### MCP (Model Context Protocol) servers
+
+`mcp_mock` builds the set of expectations needed to emulate a Streamable-HTTP MCP
+server speaking JSON-RPC 2.0 (`initialize`, `ping`, `notifications/initialized`,
+`tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`,
+`prompts/get`). Responses use Velocity templates that echo the inbound JSON-RPC id.
+
+```rust
+use mockserver_client::mcp::mcp_mock;
+use mockserver_client::llm::Role;
+
+mcp_mock("/mcp")
+    .with_server_name("MyServer")
+    .with_tool("get_weather")
+        .with_description("Get the weather for a city")
+        .with_input_schema(r#"{"type":"object","properties":{"city":{"type":"string"}}}"#)
+        .responding_with("72F and sunny", false)
+        .and()
+    .with_resource("file:///config.json")
+        .with_name("config")
+        .with_content(r#"{"debug":true}"#)
+        .and()
+    .with_prompt("greeting")
+        .with_argument("name", Some("who to greet".to_string()), true)
+        .responding_with(Role::ASSISTANT, "Hello there")
+        .and()
+    .apply_to(&client)?;
+```
+
+Use `mcp_mock_default()` for the default `/mcp` path. `build()` returns the ordered
+`Vec<serde_json::Value>` of expectations.
+
+### A2A (Agent-to-Agent) agents
+
+`a2a_mock` builds the expectations needed to emulate an A2A agent: a discoverable
+agent card on `GET /.well-known/agent.json` plus a JSON-RPC 2.0 task endpoint
+(`tasks/send`, `tasks/get`, `tasks/cancel`). Task responses use Velocity templates
+that echo the inbound JSON-RPC id. Optional `with_streaming()` advertises and mocks
+SSE streaming (status/artifact updates), and `with_push_notifications(url)` advertises
+push notifications, echoes `tasks/pushNotificationConfig/set`, and POSTs each completed
+task to the webhook via an override-forwarded request while still returning the
+JSON-RPC response to the caller.
+
+```rust
+use mockserver_client::a2a::a2a_mock;
+
+a2a_mock("/agent")
+    .with_agent_name("TranslatorAgent")
+    .with_agent_version("2.0.0")
+    .with_skill("translate")
+        .with_name("Translation")
+        .with_description("Translates text between languages")
+        .with_tag("i18n")
+        .with_example("Translate hello to French")
+        .and()
+    .with_default_task_response("Default done")
+    .on_task_send()
+        .matching_message("translate.*")
+        .responding_with("Bonjour", false) // second arg = is_error
+        .and()
+    .with_streaming()                                   // optional SSE streaming
+    .with_push_notifications("http://localhost:1234/cb") // optional webhook delivery
+    .apply_to(&client)?;
+```
+
+Use `a2a_mock_default()` for the default `/a2a` path. `build()` returns the ordered
+`Vec<serde_json::Value>` of expectations (`try_build()` is the fallible variant that
+surfaces an invalid push-notification webhook URL instead of panicking).
+
+## Features
+
+- **Fluent builder API** — `client.when(request).respond(response)`
+- **Response, Forward, and Error actions** — full MVP control-plane coverage
+- **Verification** — `verify` (count-based) and `verify_sequence` (order-based)
+- **Retrieve** — recorded requests, active expectations, recorded expectations, logs
+- **Clear / Reset** — by request matcher, by expectation ID, or full reset
+- **Status / Bind** — query ports, bind additional ports
+- **LLM, MCP, and A2A builders** — fluent `llm` / `mcp` / `a2a` mock builders, wire-identical to the other clients
+- **Blocking (synchronous)** — uses `reqwest` blocking client; no async runtime needed
+- **TLS support** — optional HTTPS with configurable certificate verification
+- **Secured control plane** — `control_plane_bearer_token(..)` (JWT auth), `ca_cert_pem_path(..)` / `ca_cert_pem(..)` (trust a server CA), and `client_cert_pem(cert, key)` (mTLS)
+
+## API Overview
+
+```rust
+use mockserver_client::*;
+
+let client = ClientBuilder::new("localhost", 1080).build().unwrap();
+
+// Fluent expectation creation
+client.when(HttpRequest::new().method("POST").path("/api/users"))
+    .times(Times::exactly(3))
+    .respond(HttpResponse::new()
+        .status_code(201)
+        .header("Location", "/api/users/1")
+        .body(r#"{"id": 1}"#))?;
+
+// Forward action
+client.when(HttpRequest::new().path("/proxy"))
+    .forward(HttpForward::new("backend.local", 8080).scheme("HTTP"))?;
+
+// Verify
+client.verify(
+    HttpRequest::new().method("POST").path("/api/users"),
+    VerificationTimes::between(1, 3),
+)?;
+
+// Verify sequence
+client.verify_sequence(vec![
+    HttpRequest::new().path("/first"),
+    HttpRequest::new().path("/second"),
+])?;
+
+// Clear by request matcher
+client.clear(
+    Some(&HttpRequest::new().path("/api/users")),
+    Some(ClearType::Expectations),
+)?;
+
+// Clear by ID
+client.clear_by_id("my-expectation-id", None)?;
+
+// Retrieve recorded requests
+let requests = client.retrieve_recorded_requests(None)?;
+
+// Retrieve active expectations
+let expectations = client.retrieve_active_expectations(None)?;
+
+// Server status
+let ports = client.status()?;
+println!("Listening on: {:?}", ports.ports);
+
+// Reset everything
+client.reset()?;
+```
+
+### JWT and composite (ALL_OF) body matchers
+
+Match requests by the claims in a JSON Web Token, and combine several body
+matchers so that **all** of them must match.
+
+```rust
+use mockserver_client::*;
+
+// JWT matcher — claim values are exact-or-regex strings; a leading `!` negates.
+client.when(
+    HttpRequest::new()
+        .method("GET")
+        .path("/secure")
+        .jwt(
+            Jwt::new()
+                .claim("sub", "user-123")
+                .claim("role", "!admin")            // NOT admin
+                .claim("email", "^.+@example.com$") // regex
+                .issuer("https://issuer.example.com")
+                .audience("my-api")
+                .algorithm("RS256")
+                .header("authorization")            // optional (defaults to authorization)
+                .scheme("Bearer"),                  // optional scheme prefix
+        ),
+)
+.respond(HttpResponse::new().status_code(200))?;
+
+// ALL_OF body — every nested matcher must match.
+client.when(
+    HttpRequest::new()
+        .method("POST")
+        .path("/orders")
+        .body_value(Body::all_of(vec![
+            Body::json_path("$.name"),
+            Body::regex(".*active.*"),
+        ])),
+)
+.respond(HttpResponse::new().status_code(201))?;
+```
+
+The JWT matcher serialises under the request's `"jwt"` key, and the composite
+body serialises to `{"type":"ALL_OF","bodyAllOf":[ ... ]}`.
+
+### Conditional (if/then/else) request matchers and load-step checks
+
+`HttpRequest::conditional(if, then, else)` builds an `httpRequest` holding
+`if`, `then` and `else`: when the `if` request matches, `then` must match too,
+otherwise `else` must (leave out `else` with `.if_request(..).then_request(..)`,
+and the matcher matches whenever `if` does not). A branch can be any
+`HttpRequest`, an OpenAPI matcher (`HttpRequest::open_api(spec).operation_id(..)`)
+or another conditional; expectations read back from the server keep them.
+
+A load-scenario `LoadStep` takes per-step response assertions with
+`.check(LoadCheck::status(..))`, `LoadCheck::header(..)` or
+`LoadCheck::body_json_path(..)`; failing checks feed the
+`LoadThresholdMetric::CheckFailureRate` threshold. These need a client released
+after 8.0.0.
+
+```rust
+use mockserver_client::*;
+
+client.when(HttpRequest::conditional(
+    HttpRequest::new().method("POST"),
+    HttpRequest::new().path("/orders"),
+    HttpRequest::new().method("GET"),
+))
+.respond(HttpResponse::new().status_code(200))?;
+
+let step = LoadStep::new(HttpRequest::new().method("GET").path("/api/orders/123"))
+    .check(LoadCheck::status(LoadCheckComparator::Equals, "200"))
+    .check(LoadCheck::body_json_path("$.status", LoadCheckComparator::Equals, "CONFIRMED"));
+```
+
+### Interactive Breakpoints
+
+Register breakpoint matchers to pause forwarded/proxied traffic at REQUEST, RESPONSE, RESPONSE_STREAM, or INBOUND_STREAM phases. A callback WebSocket connection is opened automatically.
+
+```rust
+use mockserver_client::*;
+
+let client = ClientBuilder::new("localhost", 1080).build()?;
+
+// REQUEST-only breakpoint
+let id = client.add_request_breakpoint(
+    HttpRequest::new().path("/api/.*"),
+    Box::new(|req| Some(req)),  // continue with original
+)?;
+
+// REQUEST + RESPONSE breakpoint
+let id2 = client.add_request_response_breakpoint(
+    HttpRequest::new().path("/api/.*"),
+    Box::new(|req| Some(req)),
+    Box::new(|_req, resp| Some(resp)),
+)?;
+
+// Streaming breakpoint
+let id3 = client.add_stream_breakpoint(
+    HttpRequest::new().path("/stream/.*"),
+    &[phase::RESPONSE_STREAM],
+    Box::new(|frame| {
+        Some(StreamFrameDecision::continue_frame(&frame.correlation_id))
+    }),
+)?;
+
+// Manage matchers
+let list = client.list_breakpoint_matchers()?;
+client.remove_breakpoint_matcher(&id)?;
+client.clear_breakpoint_matchers()?;
+client.close_breakpoint_websocket();
+```
+
+**Stream frame decisions:** `StreamFrameDecision::continue_frame`, `::modify`, `::drop_frame`, `::inject`, `::close`.
+
+### Enums and newer MockServer versions
+
+Every public enum is `#[non_exhaustive]`, so a `match` on one needs a `_ =>` arm. New
+values can then be added in a minor release without breaking your code.
+
+Enums that travel over the wire (for example `ResponseMode`, `BinaryUpstream`,
+`CrossProtocolTrigger` and the `Load*` enums) also have an `Unknown` variant. A value
+this client version does not recognise, sent by a newer MockServer, reads as `Unknown`
+instead of failing the whole response. The original value is not kept, so `Unknown`
+cannot be sent back: serialising it, or sending an expectation or load scenario that
+holds it, returns an error and nothing reaches the server. To re-submit server JSON
+unchanged, use `upsert_raw`.
+
+## Start / Launch MockServer
+
+The Rust client can download and launch a local MockServer instance directly -- no Java installation and no Docker required. The launcher downloads a self-contained platform bundle (`mockserver-<version>-<os>-<arch>`) from the GitHub Release, verifies its SHA-256, caches it per-user, and starts it.
+
+### Quick start
+
+```rust
+use mockserver_client::launcher;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut handle = launcher::start(1080)?;
+    println!("MockServer running on port {}", handle.port());
+
+    // ... use MockServer ...
+
+    handle.stop()?;
+    Ok(())
+}
+```
+
+### Just ensure the binary is present
+
+```rust
+let launcher_path = launcher::ensure_launcher()?;
+println!("Launcher at: {}", launcher_path.display());
+```
+
+### Specify a version
+
+```rust
+let mut handle = launcher::start_with_version(
+    "8.0.0", 1080, &launcher::EnsureOptions::default()
+)?;
+```
+
+### API reference
+
+| Function / Type | Description |
+|---|---|
+| `launcher::ensure_launcher()` | Download, verify, cache the default-version binary, and return the launcher `PathBuf`. |
+| `launcher::ensure_binary(version, opts)` | Same as above, but for a specific version. |
+| `launcher::start(port)` | Ensure the binary and start MockServer at the default version. Returns a `ServerHandle`. |
+| `launcher::start_with_version(version, port, opts)` | Start MockServer at a specific version. Returns a `ServerHandle`. |
+| `launcher::ServerHandle` | Handle to the running process. Methods: `stop()`, `wait()`, `port()`. |
+| `launcher::VERSION` | The default MockServer version, derived from `Cargo.toml` at compile time via `env!("CARGO_PKG_VERSION")`. |
+
+### Supported platforms
+
+| OS | Architecture |
+|---|---|
+| Linux | x86_64, aarch64 |
+| macOS (darwin) | x86_64, aarch64 |
+| Windows | x86_64, aarch64 |
+
+### Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `MOCKSERVER_BINARY_BASE_URL` | Mirror host for the release assets (corporate / air-gapped networks) |
+| `MOCKSERVER_BINARY_CACHE` | Override the cache directory (default: `~/.cache/mockserver/binaries` on Unix) |
+| `MOCKSERVER_SKIP_BINARY_DOWNLOAD` | Fail instead of downloading (use with a pre-seeded cache in CI) |
+
+### Version
+
+By default the launcher downloads the MockServer version matching this crate (derived from `Cargo.toml` at compile time via `env!("CARGO_PKG_VERSION")`). Pass an explicit version to override.
+
+## Building
+
+```sh
+cargo build
+cargo test
+cargo clippy
+```
+
+## Integration Tests
+
+Integration tests require a running MockServer and are skipped by default:
+
+```sh
+# Start MockServer (e.g., via Docker)
+docker run -d -p 1080:1080 mockserver/mockserver
+
+# Run integration tests
+MOCKSERVER_URL=http://localhost:1080 cargo test -- --ignored
+```
+
+## License
+
+Apache-2.0

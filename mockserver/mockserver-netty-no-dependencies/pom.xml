@@ -1,0 +1,427 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <groupId>org.mock-server</groupId>
+        <artifactId>mockserver</artifactId>
+        <version>8.0.1-SNAPSHOT</version>
+    </parent>
+
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>mockserver-netty-no-dependencies</artifactId>
+
+    <name>MockServer &amp; Proxy Netty (No Dependencies)</name>
+    <description>MockServer Netty with all dependencies shaded</description>
+    <url>https://www.mock-server.com</url>
+
+    <properties>
+        <module.name>org.mockserver.netty</module.name>
+        <maven-invoker-parallel-threads>2</maven-invoker-parallel-threads>
+    </properties>
+
+    <dependencies>
+        <!-- optional: shade bundles the source module's classes into this
+             self-contained jar, so consumers of this no-dependencies artifact
+             must not also receive the unshaded source module (and its
+             transitive dependencies) on their classpath. Shade still bundles a
+             module's own optional dependencies. -->
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>mockserver-netty</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <!-- AsyncAPI messaging module — declared optional in mockserver-netty,
+             so not transitive. Explicitly included here so the shade plugin
+             bundles it into the standalone jar and the Docker image. -->
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>mockserver-async</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- This jar is also run on its own (the CLI, and the Docker image jar derived from it), so it
+             bundles an SLF4J provider (issue #2097): slf4j-jdk14, declared here because mockserver-netty
+             declares it optional. The shade relocates it and drops its META-INF/services registration, so
+             it never competes with an embedding project's own provider (issue #2772);
+             Slf4jProviderFallback selects it only when no other provider is registered. Optional keeps it
+             off the classpath of anything that consumes this artifact as a Maven dependency. -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-jdk14</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- test scope only: junit drives ExtendedNoDependenciesJarMockingIntegrationTest.
+             The smoke test deliberately uses only the JDK (java.net.http.HttpClient)
+             and ProcessBuilder so it cannot accidentally load mockserver-* classes
+             from both the unshaded mockserver-core and this module's shaded jar at
+             once — see NoDependenciesJarRunner javadoc.
+             mockserver-testing is included so the parent pom's failsafe listener
+             (org.mockserver.test.PrintOutCurrentTestRunListener) is resolvable. It
+             pulls in only junit + hamcrest, no mockserver-core, so no conflict. -->
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>mockserver-testing</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- test scope only: the "project with its own SLF4J provider" in NoDependenciesJarSlf4jProviderIntegrationTest -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Expose the RESOLVED path of every dependency as a Maven property
+                 (io.netty:netty-tcnative-boringssl-static:jar -> its local-repo path).
+                 The stamp execution below reads the tcnative version from that path so
+                 the version bundled for Docker comes from the exact same resolution
+                 (netty-bom governed) as the shaded tcnative classes. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.11.0</version>
+                <executions>
+                    <execution>
+                        <id>expose-dependency-paths</id>
+                        <phase>initialize</phase>
+                        <goals>
+                            <goal>properties</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <!-- inherits the shared shade configuration from the parent pom's
+                     pluginManagement; overrides the transformers (to set the
+                     executable jar's Main-Class) and replaces the inherited filter
+                     list (combine.self="override") to add a filter that strips the
+                     bundled netty-tcnative native libraries — the other
+                     no-dependencies modules ship those libraries, but this
+                     standalone server jar deliberately excludes them. Because the
+                     override replaces rather than appends, the shared filters are
+                     repeated here verbatim. -->
+                <executions>
+                    <execution>
+                        <id>shade-no-dependencies</id>
+                        <configuration>
+                            <transformers combine.self="override">
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>org.mockserver.cli.Main</mainClass>
+                                    <manifestEntries>
+                                        <Automatic-Module-Name>${module.name}</Automatic-Module-Name>
+                                    </manifestEntries>
+                                </transformer>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheLicenseResourceTransformer" />
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer" />
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.AppendingTransformer">
+                                    <resource>META-INF/LICENSE</resource>
+                                </transformer>
+                            </transformers>
+                            <filters combine.self="override">
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                    </excludes>
+                                </filter>
+                                <filter>
+                                    <artifact>com.github.java-json-tools:json-schema-validator</artifact>
+                                    <excludes>
+                                        <exclude>draftv3/**</exclude>
+                                        <exclude>draftv4/**</exclude>
+                                    </excludes>
+                                </filter>
+                                <filter>
+                                    <!-- the provider is selected by Slf4jProviderFallback, never by ServiceLoader (issue #2772) -->
+                                    <artifact>org.slf4j:slf4j-jdk14</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/services/org.slf4j.spi.SLF4JServiceProvider</exclude>
+                                    </excludes>
+                                </filter>
+                                <filter>
+                                    <artifact>io.netty:netty-tcnative-boringssl-static</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/native/**</exclude>
+                                    </excludes>
+                                </filter>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.txt</exclude>
+                                        <exclude>META-INF/*.md</exclude>
+                                        <exclude>META-INF/**/module-info.class</exclude>
+                                        <exclude>META-INF/io.netty.versions.properties</exclude>
+                                        <exclude>META-INF/**/pom.properties</exclude>
+                                        <exclude>META-INF/**/pom.xml</exclude>
+                                        <exclude>META-INF/MANIFEST.MF</exclude>
+                                        <exclude>META-INF/LICENSE</exclude>
+                                        <exclude>META-INF/NOTICE</exclude>
+                                        <exclude>META-INF/license/**</exclude>
+                                        <exclude>META-INF/DEPENDENCIES</exclude>
+                                        <exclude>META-INF/versions/**</exclude>
+                                        <exclude>module-info.java</exclude>
+                                        <exclude>LGPL-3.0.txt</exclude>
+                                        <exclude>LICENSE-ClassGraph.txt</exclude>
+                                        <exclude>hamcrest-core-is-deprecated.txt</exclude>
+                                        <exclude>THIRD-PARTY.txt</exclude>
+                                        <exclude>ASL-2.0.txt</exclude>
+                                        <exclude>samples/**</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables combine.children="append">
+                        <!-- paths resolved by the expose-dependency-paths execution above -->
+                        <slf4jApiJar>${org.slf4j:slf4j-api:jar}</slf4jApiJar>
+                        <slf4jSimpleJar>${org.slf4j:slf4j-simple:jar}</slf4jSimpleJar>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <version>3.12.0</version>
+                <configuration>
+                    <failOnError>false</failOnError>
+                    <doclint>none</doclint>
+                </configuration>
+            </plugin>
+            <!-- shaded dependency maven integration tests -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-invoker-plugin</artifactId>
+                <version>3.10.1</version>
+                <configuration>
+                    <skipInvocation>${skipTests}</skipInvocation>
+                    <debug>false</debug>
+                    <!-- only stream the invoked child Maven build log on
+                         failure (invoker 3.3+) — passing builds stay quiet so
+                         the CI log is not flooded with per-invoker child output. -->
+                    <streamLogs>false</streamLogs>
+                    <streamLogsOnFailures>true</streamLogsOnFailures>
+                    <showErrors>true</showErrors>
+                    <showVersion>true</showVersion>
+                    <disableReports>true</disableReports>
+                    <parallelThreads>${maven-invoker-parallel-threads}</parallelThreads>
+                    <projectsDirectory>${basedir}/src/integration-tests/</projectsDirectory>
+                    <cloneProjectsTo>${project.build.directory}/integration-tests/</cloneProjectsTo>
+                    <reportsDirectory>${project.build.directory}</reportsDirectory>
+                    <cloneClean>true</cloneClean>
+                    <ignoreFailures>false</ignoreFailures>
+                    <addTestClassPath>true</addTestClassPath>
+                    <properties>
+                        <property>
+                            <name>mockserver.version</name>
+                            <value>${project.version}</value>
+                        </property>
+                    </properties>
+                    <environmentVariables>
+                        <mockserver.logLevel>DEBUG</mockserver.logLevel>
+                    </environmentVariables>
+                    <filterProperties>
+                        <mockserver.version>${project.version}</mockserver.version>
+                    </filterProperties>
+                    <settingsFile>src/integration-tests/settings.xml</settingsFile>
+                    <pomIncludes>
+                        <pomInclude>maven-**/pom.xml</pomInclude>
+                    </pomIncludes>
+                    <goals>
+                        <goal>test</goal>
+                    </goals>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>integration-test</id>
+                        <goals>
+                            <goal>install</goal>
+                            <goal>run</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- shaded dependency gradle integration tests -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.6.4</version>
+                <inherited>false</inherited>
+                <configuration>
+                    <skip>${skipTests}</skip>
+                    <workingDirectory>${basedir}</workingDirectory>
+                </configuration>
+                <executions>
+                    <!-- Stamp the resolved netty-tcnative version into the shaded jar
+                         (META-INF/mockserver-tcnative.version) BEFORE shade runs at
+                         package, so the Docker images can read it back and download the
+                         exact-matching native .so. Never skipped (unlike the test
+                         execution below): release and Docker builds run with -DskipTests
+                         and still must produce the stamp, or the jar ships unpairable. -->
+                    <execution>
+                        <id>stamp-tcnative-version</id>
+                        <phase>prepare-package</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <skip>false</skip>
+                            <executable>src/packaging/stamp-tcnative-version.sh</executable>
+                            <arguments>
+                                <argument>${io.netty:netty-tcnative-boringssl-static:jar}</argument>
+                                <argument>${project.build.outputDirectory}</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>gradle_integration_tests</id>
+                        <phase>install</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <executable>src/integration-tests/gradle_integration_tests.sh</executable>
+                            <arguments>${project.version}</arguments>
+                        </configuration>
+                    </execution>
+                    <!-- Fail the build if the shade relocation rewrote a JDK com.sun.* reference
+                         (com.sun.management / net.httpserver / nio.sctp) into shaded_package.*,
+                         which resolves to nothing at runtime and silently kills the feature (this
+                         is how jvm_memory_allocated_bytes was suppressed in the shaded jar). Never
+                         skipped, so release and Docker builds (run with -DskipTests) also catch it. -->
+                    <execution>
+                        <id>assert-jdk-com-sun-not-relocated</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <skip>false</skip>
+                            <executable>src/packaging/assert-jdk-com-sun-not-relocated.sh</executable>
+                            <arguments>
+                                <argument>${project.build.directory}/${project.build.finalName}.jar</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                    <!-- Fail the build if the epoll natives are not under the name relocated netty
+                         loads, which would silently put every Docker image on NIO. Bound to package
+                         (after shade) so the package-only Docker jar builds are guarded too. -->
+                    <execution>
+                        <id>assert-shaded-epoll-natives</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <skip>false</skip>
+                            <executable>src/packaging/assert-shaded-epoll-natives.sh</executable>
+                            <arguments>
+                                <argument>${project.build.directory}/${project.build.finalName}.jar</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                    <!-- Fail the build if a bundled dependency is left unrelocated (issue #2772); the script
+                         holds the shared allow-list and why each entry stays. -->
+                    <execution>
+                        <id>assert-only-relocated-classes</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <skip>false</skip>
+                            <executable>src/packaging/assert-only-relocated-classes.sh</executable>
+                            <arguments>
+                                <argument>${project.build.directory}/${project.build.finalName}.jar</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                    <!-- Fail the build unless JNA stays relocated here (users embed this jar next to their
+                         own JNA); mockserver-netty-docker runs the same script over the image jar. -->
+                    <execution>
+                        <id>assert-jna-relocation</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <skip>false</skip>
+                            <executable>src/packaging/assert-jna-relocation.sh</executable>
+                            <arguments>
+                                <argument>${project.build.directory}/${project.build.finalName}.jar</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                    <!-- Fail the build if a user's -Dio.netty.maxDirectMemory or MockServer's default does not
+                         reach the relocated Netty in the shaded jar (shade rewrites the property name). -->
+                    <execution>
+                        <id>assert-shaded-direct-memory-property</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <skip>false</skip>
+                            <executable>src/packaging/assert-shaded-direct-memory-property.sh</executable>
+                            <arguments>
+                                <argument>${project.build.directory}/${project.build.finalName}.jar</argument>
+                                <argument>${java.home}/bin/java</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- The parent pom's release profile attaches a -javadoc.jar via
+             maven-javadoc-plugin, but these no-dependencies modules have no
+             sources of their own, so nothing is produced and Maven Central
+             rejects the deployment. Build the javadoc jar from the
+             org.mock-server dependency sources that this module shades. -->
+        <profile>
+            <id>release</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>attach-javadocs</id>
+                                <goals>
+                                    <goal>jar</goal>
+                                </goals>
+                                <configuration>
+                                    <includeDependencySources>true</includeDependencySources>
+                                    <dependencySourceIncludes>
+                                        <dependencySourceInclude>org.mock-server:*</dependencySourceInclude>
+                                    </dependencySourceIncludes>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
+</project>

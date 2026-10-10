@@ -1,0 +1,10 @@
+services:
+  mockserver:
+    image: mockserver/mockserver:latest
+    ports:
+      - "1090:1090"
+    environment:
+      MOCKSERVER_LOG_LEVEL: INFO
+      MOCKSERVER_PROPERTY_FILE: "/config/mockserver.custom.properties"
+    volumes:
+      - ./config:/config

@@ -1,0 +1,1993 @@
+---
+title: MockServer MCP Tools Reference for AI Assistants
+description: Full reference for every MCP tool exposed by MockServer, including create_expectation, verify_request, retrieve, debug, OpenAPI, and LLM mocking tools.
+shortTitle: MCP Tools Reference
+layout: page
+pageOrder: 2
+section: 'AI & MCP'
+subsection: true
+sitemap:
+  priority: 0.8
+  changefreq: 'monthly'
+  lastmod: 2026-05-26T00:00:00+00:00
+keywords: "mcp tools, mockserver mcp tools, create_expectation, verify_request, ai testing tools"
+---
+
+<p>MockServer's MCP server exposes a comprehensive set of tools that AI assistants can use to interact with MockServer. Tools are divided into <strong>high-level tools</strong> (simplified parameters for common tasks) and <strong>low-level tools</strong> (full JSON passthrough for advanced use cases).</p>
+
+<h2>Tool Overview</h2>
+
+<table>
+    <thead>
+        <tr>
+            <th>Tool</th>
+            <th>Description</th>
+            <th>Level</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr><td><a href="#create_expectation"><code>create_expectation</code></a></td><td>Create a mock expectation</td><td>High</td></tr>
+        <tr><td><a href="#verify_request"><code>verify_request</code></a></td><td>Verify a request was received N times</td><td>High</td></tr>
+        <tr><td><a href="#verify_request_sequence"><code>verify_request_sequence</code></a></td><td>Verify requests were received in order</td><td>High</td></tr>
+        <tr><td><a href="#retrieve_recorded_requests"><code>retrieve_recorded_requests</code></a></td><td>Get recorded requests</td><td>High</td></tr>
+        <tr><td><a href="#retrieve_request_responses"><code>retrieve_request_responses</code></a></td><td>Get request-response pairs</td><td>High</td></tr>
+        <tr><td><a href="#list_expectations"><code>list_expectations</code></a></td><td>List the active mock expectations, optionally filtered</td><td>High</td></tr>
+        <tr><td><a href="#retrieve_logs"><code>retrieve_logs</code></a></td><td>Get log messages for debugging</td><td>High</td></tr>
+        <tr><td><a href="#clear_expectations"><code>clear_expectations</code></a></td><td>Clear matching expectations and/or logs</td><td>High</td></tr>
+        <tr><td><a href="#set_operating_mode"><code>set_operating_mode</code></a></td><td>Switch operating mode &mdash; SIMULATE, SPY, or CAPTURE</td><td>High</td></tr>
+        <tr><td><a href="#promote_recordings"><code>promote_recordings</code></a></td><td>Promote recorded traffic into active mocks (redact, consolidate, parameterize)</td><td>High</td></tr>
+        <tr><td><a href="#reset"><code>reset</code></a></td><td>Reset all MockServer state</td><td>High</td></tr>
+        <tr><td><a href="#get_status"><code>get_status</code></a></td><td>Server status and ports</td><td>High</td></tr>
+        <tr><td><a href="#manage_service_chaos"><code>manage_service_chaos</code></a></td><td>Register, remove, or clear service-scoped HTTP chaos per upstream host</td><td>High</td></tr>
+        <tr><td><a href="#create_forward_expectation"><code>create_forward_expectation</code></a></td><td>Create a forwarding proxy expectation</td><td>High</td></tr>
+        <tr><td><a href="#debug_request_mismatch"><code>debug_request_mismatch</code></a></td><td>Diagnose why a request did not match</td><td>High</td></tr>
+        <tr><td><a href="#explain_unmatched_requests"><code>explain_unmatched_requests</code></a></td><td>Explain recent unmatched requests with ranked diagnostics</td><td>High</td></tr>
+        <tr><td><a href="#stop_server"><code>stop_server</code></a></td><td>Stop the MockServer instance</td><td>High</td></tr>
+        <tr><td><a href="#create_expectation_from_openapi"><code>create_expectation_from_openapi</code></a></td><td>Generate expectations from an OpenAPI spec</td><td>High</td></tr>
+        <tr><td><a href="#create_expectations_from_recorded_traffic"><code>create_expectations_from_recorded_traffic</code></a></td><td>Convert recorded proxy traffic into mock expectations</td><td>High</td></tr>
+        <tr><td><a href="#verify_traffic_against_openapi"><code>verify_traffic_against_openapi</code></a></td><td>Verify recorded traffic conforms to an OpenAPI spec</td><td>High</td></tr>
+        <tr><td><a href="#run_contract_test"><code>run_contract_test</code></a></td><td>Send example requests from an OpenAPI spec and validate responses</td><td>High</td></tr>
+        <tr><td><a href="#run_resiliency_test"><code>run_resiliency_test</code></a></td><td>Send malformed and boundary-case requests to verify error handling</td><td>High</td></tr>
+        <tr><td><a href="#record_llm_fixtures"><code>record_llm_fixtures</code></a></td><td>Snapshot recorded LLM/MCP traffic into a committable fixture file</td><td>High</td></tr>
+        <tr><td><a href="#load_expectations_from_file"><code>load_expectations_from_file</code></a></td><td>Load expectations from a fixture file for replay</td><td>High</td></tr>
+        <tr><td><a href="#mock_llm_completion"><code>mock_llm_completion</code></a></td><td>Create a single-turn LLM completion expectation for any supported provider</td><td>High</td></tr>
+        <tr><td><a href="#create_llm_conversation"><code>create_llm_conversation</code></a></td><td>Create a multi-turn scripted LLM conversation with optional per-session isolation</td><td>High</td></tr>
+        <tr><td><a href="#mock_llm_failover"><code>mock_llm_failover</code></a></td><td>Create an LLM failover/retry scenario &mdash; first N requests fail, then succeed</td><td>High</td></tr>
+        <tr><td><a href="#verify_tool_call"><code>verify_tool_call</code></a></td><td>Assert an agent called a named tool, from recorded LLM requests</td><td>High</td></tr>
+        <tr><td><a href="#explain_agent_run"><code>explain_agent_run</code></a></td><td>Summarise a recorded agent run (turns, tool-call sequence)</td><td>High</td></tr>
+        <tr><td><a href="#verify_structured_output"><code>verify_structured_output</code></a></td><td>Validate recorded LLM responses' JSON output against a JSON Schema</td><td>High</td></tr>
+        <tr><td><a href="#verify_cost_budget"><code>verify_cost_budget</code></a></td><td>Assert the total estimated USD cost of recorded LLM responses is within a budget</td><td>High</td></tr>
+        <tr><td><a href="#detect_llm_drift"><code>detect_llm_drift</code></a></td><td>Replay a cassette against the live provider and report structural drift</td><td>High</td></tr>
+        <tr><td><a href="#export_optimisation_report"><code>export_optimisation_report</code></a></td><td>Turn captured LLM traffic into an optimisation brief covering both spend and agent design (Markdown, JSON, or CSV)</td><td>High</td></tr>
+        <tr><td><a href="#mock_adversarial_llm_response"><code>mock_adversarial_llm_response</code></a></td><td>Mock a hostile/malformed LLM response to test agent resilience</td><td>High</td></tr>
+        <tr><td><a href="#run_mcp_contract_test"><code>run_mcp_contract_test</code></a></td><td>Check a target MCP server conforms to the protocol over Streamable HTTP</td><td>High</td></tr>
+        <tr><td><a href="#list_mock_tools"><code>list_mock_tools</code></a></td><td>Generate MCP tool definitions from the current active mock expectations</td><td>High</td></tr>
+        <tr><td><a href="#raw_expectation"><code>raw_expectation</code></a></td><td>Full expectation JSON passthrough</td><td>Low</td></tr>
+        <tr><td><a href="#raw_retrieve"><code>raw_retrieve</code></a></td><td>Full retrieve with correlation ID filtering</td><td>Low</td></tr>
+        <tr><td><a href="#raw_verify"><code>raw_verify</code></a></td><td>Full verification JSON</td><td>Low</td></tr>
+    </tbody>
+</table>
+
+<a id="high_level_tools" class="anchor" href="#high_level_tools">&nbsp;</a>
+
+<h2>High-Level Tools</h2>
+
+<a id="create_expectation" class="anchor" href="#create_expectation">&nbsp;</a>
+
+<h3>create_expectation</h3>
+
+<p>Create a mock expectation that matches incoming requests and returns a specified response.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>method</code></td><td>string</td><td>Yes</td><td>HTTP method to match (GET, POST, PUT, DELETE, etc.)</td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>Yes</td><td>URL path to match (e.g. <code>/api/users</code>)</td></tr>
+        <tr><td><code>statusCode</code></td><td>integer</td><td>No</td><td>HTTP status code to return. Defaults to 200.</td></tr>
+        <tr><td><code>responseBody</code></td><td>string or object</td><td>No</td><td>Response body to return. Strings are sent as-is; objects are serialised as JSON.</td></tr>
+        <tr><td><code>responseHeaders</code></td><td>object</td><td>No</td><td>Response headers as key-value pairs</td></tr>
+        <tr><td><code>times</code></td><td>integer</td><td>No</td><td>Number of times the expectation should be used. Defaults to unlimited.</td></tr>
+        <tr><td><code>timeToLive</code></td><td>string</td><td>No</td><td>How long the expectation remains active, in format <code>&lt;number&gt; &lt;UNIT&gt;</code> (e.g. <code>"60 SECONDS"</code>). Defaults to unlimited.</td></tr>
+        <tr><td><code>chaos</code></td><td>object</td><td>No</td><td>Declarative HTTP chaos/fault-injection profile for resilience testing &mdash; probabilistic errors, latency, connection drops, body corruption, slow (dribbled) responses, time/count-based outage windows, and a stateful request quota (see the table below).</td></tr>
+    </tbody>
+</table>
+
+<p><strong><code>chaos</code> fields</strong> (all optional):</p>
+
+<table>
+    <thead>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>errorStatus</code></td><td>integer</td><td>HTTP status to inject on error (e.g. <code>500</code>, <code>503</code>, <code>429</code>).</td></tr>
+        <tr><td><code>errorProbability</code></td><td>number</td><td>Probability 0.0&ndash;1.0 of injecting an error. Fractional values are non-deterministic unless <code>seed</code> is set.</td></tr>
+        <tr><td><code>retryAfter</code></td><td>string</td><td>Optional <code>Retry-After</code> header value on an injected error.</td></tr>
+        <tr><td><code>latency</code></td><td>object</td><td>Injected latency delay &mdash; an object with <code>timeUnit</code> (e.g. <code>MILLISECONDS</code>, <code>SECONDS</code>) and <code>value</code> (integer).</td></tr>
+        <tr><td><code>dropConnectionProbability</code></td><td>number</td><td>Probability 0.0&ndash;1.0 of dropping the TCP connection without sending any response.</td></tr>
+        <tr><td><code>seed</code></td><td>integer</td><td>Optional seed for reproducible probabilistic draws.</td></tr>
+        <tr><td><code>succeedFirst</code></td><td>integer</td><td>First N matches are <strong>not</strong> eligible for chaos (&ge; 0).</td></tr>
+        <tr><td><code>failRequestCount</code></td><td>integer</td><td>After <code>succeedFirst</code>, the next M matches <strong>are</strong> eligible for chaos (&ge; 1).</td></tr>
+        <tr><td><code>outageAfterMillis</code></td><td>integer</td><td>Time-based outage window: chaos becomes active this many ms after the first match (&ge; 0).</td></tr>
+        <tr><td><code>outageDurationMillis</code></td><td>integer</td><td>Time-based outage window: chaos stays active for this many ms then self-heals (&ge; 1).</td></tr>
+        <tr><td><code>truncateBodyAtFraction</code></td><td>number</td><td>Corrupt the response body by keeping only this leading fraction (0.0&ndash;1.0) of its bytes.</td></tr>
+        <tr><td><code>malformedBody</code></td><td>boolean</td><td>Corrupt the response body by appending a broken-JSON fragment so it fails to parse.</td></tr>
+        <tr><td><code>slowResponseChunkSize</code></td><td>integer</td><td>Dribble the response body in chunks of this many bytes (&ge; 1); requires <code>slowResponseChunkDelay</code>.</td></tr>
+        <tr><td><code>slowResponseChunkDelay</code></td><td>object</td><td>Delay between dribbled response chunks &mdash; an object with <code>timeUnit</code> and <code>value</code> (integer).</td></tr>
+        <tr><td><code>quotaName</code></td><td>string</td><td>Stateful quota: shared counter key; expectations with the same <code>quotaName</code> share one rate-limit counter.</td></tr>
+        <tr><td><code>quotaLimit</code></td><td>integer</td><td>Stateful quota: max requests allowed per window before requests are rejected (&ge; 1).</td></tr>
+        <tr><td><code>quotaWindowMillis</code></td><td>integer</td><td>Stateful quota: fixed-window length in milliseconds (&ge; 1).</td></tr>
+        <tr><td><code>quotaErrorStatus</code></td><td>integer</td><td>Stateful quota: status returned when the quota is exceeded (default <code>429</code>).</td></tr>
+        <tr><td><code>degradationRampMillis</code></td><td>integer</td><td>Gradual degradation: ramp <code>errorProbability</code> and <code>dropConnectionProbability</code> from 0 to full over this many ms from the first match (&ge; 1).</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "create_expectation",
+    "arguments": {
+      "method": "GET",
+      "path": "/api/users",
+      "statusCode": 200,
+      "responseBody": "{\"users\": [{\"id\": 1, \"name\": \"Alice\"}]}",
+      "responseHeaders": {
+        "content-type": "application/json"
+      }
+    }
+  }
+}</code></pre>
+
+<p><strong>Example response:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"status\":\"created\",\"count\":1}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<a id="verify_request" class="anchor" href="#verify_request">&nbsp;</a>
+
+<h3>verify_request</h3>
+
+<p>Verify that a specific request was received by MockServer a certain number of times.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>method</code></td><td>string</td><td>No</td><td>HTTP method to match</td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>No</td><td>URL path to match</td></tr>
+        <tr><td><code>atLeast</code></td><td>integer</td><td>No</td><td>Minimum number of times the request must have been received</td></tr>
+        <tr><td><code>atMost</code></td><td>integer</td><td>No</td><td>Maximum number of times the request must have been received</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "verify_request",
+    "arguments": {
+      "method": "POST",
+      "path": "/api/orders",
+      "atLeast": 1,
+      "atMost": 3
+    }
+  }
+}</code></pre>
+
+<p><strong>Example response:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Verification passed"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<a id="verify_request_sequence" class="anchor" href="#verify_request_sequence">&nbsp;</a>
+
+<h3>verify_request_sequence</h3>
+
+<p>Verify that a sequence of requests was received in the specified order.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>requests</code></td><td>array</td><td>Yes</td><td>Ordered array of request matchers, each with optional <code>method</code> and <code>path</code> fields</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "verify_request_sequence",
+    "arguments": {
+      "requests": [
+        { "method": "POST", "path": "/api/login" },
+        { "method": "GET", "path": "/api/profile" },
+        { "method": "POST", "path": "/api/logout" }
+      ]
+    }
+  }
+}</code></pre>
+
+<a id="retrieve_recorded_requests" class="anchor" href="#retrieve_recorded_requests">&nbsp;</a>
+
+<h3>retrieve_recorded_requests</h3>
+
+<p>Retrieve requests that have been recorded by MockServer.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>method</code></td><td>string</td><td>No</td><td>Filter by HTTP method</td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>No</td><td>Filter by URL path</td></tr>
+        <tr><td><code>limit</code></td><td>integer</td><td>No</td><td>Maximum number of requests to return</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "tools/call",
+  "params": {
+    "name": "retrieve_recorded_requests",
+    "arguments": {
+      "path": "/api/payments",
+      "limit": 10
+    }
+  }
+}</code></pre>
+
+<p><strong>Example response:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "[{\"method\": \"POST\", \"path\": \"/api/payments\", \"headers\": {\"content-type\": [\"application/json\"]}, \"body\": {\"amount\": 99.99}}]"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<a id="retrieve_request_responses" class="anchor" href="#retrieve_request_responses">&nbsp;</a>
+
+<h3>retrieve_request_responses</h3>
+
+<p>Retrieve request-response pairs recorded by MockServer, useful for understanding the full HTTP conversation.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>method</code></td><td>string</td><td>No</td><td>Filter by HTTP method</td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>No</td><td>Filter by URL path</td></tr>
+        <tr><td><code>limit</code></td><td>integer</td><td>No</td><td>Maximum number of pairs to return</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "tools/call",
+  "params": {
+    "name": "retrieve_request_responses",
+    "arguments": {
+      "path": "/api/users",
+      "limit": 5
+    }
+  }
+}</code></pre>
+
+<a id="list_expectations" class="anchor" href="#list_expectations">&nbsp;</a>
+
+<h3>list_expectations</h3>
+
+<p>List the mock expectations that are currently active, optionally filtered by request method and/or path. Each expectation is returned in the full MockServer JSON format (including its <code>id</code>), so an agent can inspect what is mocked and then modify it (with <code>create_expectation</code> / <code>raw_expectation</code>) or remove it (with <code>clear_expectations</code>).</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>method</code></td><td>string</td><td>No</td><td>Only return expectations whose request matcher targets this HTTP method</td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>No</td><td>Only return expectations whose request matcher targets this path</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "tools/call",
+  "params": {
+    "name": "list_expectations",
+    "arguments": {
+      "path": "/api/users"
+    }
+  }
+}</code></pre>
+
+<a id="retrieve_logs" class="anchor" href="#retrieve_logs">&nbsp;</a>
+
+<h3>retrieve_logs</h3>
+
+<p>Retrieve MockServer's recorded log messages — request matching, mismatches, actions and errors — to debug why a test or request behaved as it did. Returns structured <code>LOG_ENTRIES</code> format. Use the <code>correlationId</code> filter to narrow to a single request's lifecycle.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>correlationId</code></td><td>string</td><td>No</td><td>Filter to a single request's log entries by its correlation ID. Each incoming request is assigned a unique correlation ID that links all log entries for that request's lifecycle.</td></tr>
+        <tr><td><code>limit</code></td><td>integer</td><td>No</td><td>Maximum number of log entries to return (default 100, max 500). Returns the most recent entries when more are available.</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "tools/call",
+  "params": {
+    "name": "retrieve_logs",
+    "arguments": {
+      "correlationId": "abc-123-def",
+      "limit": 20
+    }
+  }
+}</code></pre>
+
+<p><strong>Example response:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"logEntries\":[{\"description\":\"received request\",\"logLevel\":\"INFO\",\"timestamp\":\"...\"}],\"total\":1,\"returned\":1}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<a id="clear_expectations" class="anchor" href="#clear_expectations">&nbsp;</a>
+
+<h3>clear_expectations</h3>
+
+<p>Clear expectations and/or recorded requests and logs that match the specified request matcher.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>method</code></td><td>string</td><td>No</td><td>HTTP method to match</td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>No</td><td>URL path to match</td></tr>
+        <tr><td><code>type</code></td><td>string</td><td>No</td><td>What to clear: <code>ALL</code>, <code>LOG</code>, or <code>EXPECTATIONS</code>. Defaults to <code>ALL</code>.</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "tools/call",
+  "params": {
+    "name": "clear_expectations",
+    "arguments": {
+      "path": "/api/users",
+      "type": "EXPECTATIONS"
+    }
+  }
+}</code></pre>
+
+<a id="set_operating_mode" class="anchor" href="#set_operating_mode">&nbsp;</a>
+
+<h3>set_operating_mode</h3>
+
+<p>Set MockServer's high-level operating mode in a single switch. This lets an agent flip between mocking and recording without reconfiguring the server:</p>
+
+<ul>
+    <li><code>SIMULATE</code> &mdash; match expectations and return mocks; unmatched requests get a <code>404</code> (the default).</li>
+    <li><code>SPY</code> &mdash; match expectations and return mocks, but forward unmatched requests to the real upstream so they are served live and recorded.</li>
+    <li><code>CAPTURE</code> &mdash; forward and record everything (with no expectations defined this captures all traffic).</li>
+</ul>
+
+<p>Use <code>SPY</code> or <code>CAPTURE</code> to record real upstream traffic, then turn it into mocks with <a href="#promote_recordings"><code>promote_recordings</code></a>.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>mode</code></td><td>string</td><td>Yes</td><td>One of <code>SIMULATE</code>, <code>SPY</code>, or <code>CAPTURE</code> (case-insensitive)</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "tools/call",
+  "params": {
+    "name": "set_operating_mode",
+    "arguments": {
+      "mode": "SPY"
+    }
+  }
+}</code></pre>
+
+<a id="promote_recordings" class="anchor" href="#promote_recordings">&nbsp;</a>
+
+<h3>promote_recordings</h3>
+
+<p>Promote traffic already recorded by MockServer's forwarding/proxy mode (for example after <a href="#set_operating_mode"><code>set_operating_mode</code></a> <code>SPY</code>/<code>CAPTURE</code>) into active mock expectations in one step &mdash; the "record then mock" workflow. Secrets are redacted, and by default the recordings are consolidated and parameterized into reusable mocks (unlimited use). This mirrors <code>PUT /mockserver/recordings/promote</code>.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>method</code></td><td>string</td><td>No</td><td>Filter recorded traffic by HTTP method</td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>No</td><td>Filter recorded traffic by request path</td></tr>
+        <tr><td><code>consolidate</code></td><td>boolean</td><td>No</td><td>Collapse duplicate recordings into consolidated reusable mocks. Defaults to <code>true</code>; set <code>false</code> to promote each recording verbatim.</td></tr>
+        <tr><td><code>parameterize</code></td><td>boolean</td><td>No</td><td>When consolidating, generalise volatile path/query/header/body values so a single recorded id does not pin the mock. Defaults to <code>true</code>.</td></tr>
+        <tr><td><code>redactSensitiveData</code></td><td>boolean</td><td>No</td><td>Redact secrets (auth headers, common secret body fields) from promoted mocks. Defaults to <code>true</code>.</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "tools/call",
+  "params": {
+    "name": "promote_recordings",
+    "arguments": {
+      "path": "/api/users"
+    }
+  }
+}</code></pre>
+
+<a id="reset" class="anchor" href="#reset">&nbsp;</a>
+
+<h3>reset</h3>
+
+<p>Reset MockServer by clearing all expectations, recorded requests, and logs. This tool takes no parameters.</p>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "tools/call",
+  "params": {
+    "name": "reset",
+    "arguments": {}
+  }
+}</code></pre>
+
+<a id="get_status" class="anchor" href="#get_status">&nbsp;</a>
+
+<h3>get_status</h3>
+
+<p>Retrieve the status of MockServer, including which ports it is listening on. This tool takes no parameters.</p>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "method": "tools/call",
+  "params": {
+    "name": "get_status",
+    "arguments": {}
+  }
+}</code></pre>
+
+<p><strong>Example response:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"ports\": [1080], \"running\": true}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<a id="manage_service_chaos" class="anchor" href="#manage_service_chaos">&nbsp;</a>
+
+<h3>manage_service_chaos</h3>
+
+<p>Manage service-scoped HTTP chaos. Register one chaos profile per upstream host (applied to all matched forwards to that host that have no chaos of their own), remove a host's profile, or clear all host-keyed profiles. An expectation's own chaos always takes precedence over a host-keyed profile.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>action</code></td><td>string</td><td>Yes</td><td>One of <code>register</code> (set a host's chaos), <code>remove</code> (clear one host), or <code>clear</code> (clear all)</td></tr>
+        <tr><td><code>host</code></td><td>string</td><td>For <code>register</code>/<code>remove</code></td><td>Upstream host to break; matched case-insensitively, ignoring any <code>:port</code></td></tr>
+        <tr><td><code>chaos</code></td><td>object</td><td>For <code>register</code></td><td>The chaos profile to apply &mdash; same fields as the <code>create_expectation</code> <code>chaos</code> block (e.g. <code>errorStatus</code>, <code>errorProbability</code>, <code>dropConnectionProbability</code>, <code>latency</code>, <code>truncateBodyAtFraction</code>, <code>malformedBody</code>)</td></tr>
+        <tr><td><code>ttlMillis</code></td><td>integer</td><td>No</td><td>Optional time-to-live for a <code>register</code>: the chaos auto-reverts after this many milliseconds (a dead-man's switch so chaos self-heals if no clear is sent). Omit for chaos that persists until explicitly cleared.</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "tools/call",
+  "params": {
+    "name": "manage_service_chaos",
+    "arguments": {
+      "action": "register",
+      "host": "payments.example.com",
+      "chaos": {
+        "errorStatus": 503,
+        "errorProbability": 0.5
+      },
+      "ttlMillis": 60000
+    }
+  }
+}</code></pre>
+
+<a id="create_forward_expectation" class="anchor" href="#create_forward_expectation">&nbsp;</a>
+
+<h3>create_forward_expectation</h3>
+
+<p>Create a forwarding proxy expectation that forwards matching requests to a destination host.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>path</code></td><td>string</td><td>Yes</td><td>URL path to match for forwarding</td></tr>
+        <tr><td><code>host</code></td><td>string</td><td>Yes</td><td>Destination host to forward to</td></tr>
+        <tr><td><code>port</code></td><td>integer</td><td>No</td><td>Destination port. Defaults to 443.</td></tr>
+        <tr><td><code>scheme</code></td><td>string</td><td>No</td><td>Protocol scheme: <code>HTTP</code> or <code>HTTPS</code>. Defaults to <code>HTTPS</code>.</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "tools/call",
+  "params": {
+    "name": "create_forward_expectation",
+    "arguments": {
+      "path": "/api/.*",
+      "host": "api.example.com",
+      "port": 443,
+      "scheme": "HTTPS"
+    }
+  }
+}</code></pre>
+
+<a id="debug_request_mismatch" class="anchor" href="#debug_request_mismatch">&nbsp;</a>
+
+<h3>debug_request_mismatch</h3>
+
+<p>Diagnose why a request did not match any expectation. This tool compares the provided request details against active expectations and returns detailed mismatch information. Results are ranked by closeness (fewest differing fields first), and each mismatched field includes an actionable remediation hint.</p>
+
+<p><strong>Note:</strong> This functionality is also available as a REST API endpoint (<code>PUT /mockserver/debugMismatch</code>) and via the Java client (<code>mockServerClient.debugMismatch(request)</code>). See <a href="/mock_server/troubleshooting_matching.html#debug_mismatch_endpoint">Troubleshooting Matching</a> for details.</p>
+
+<p><strong>Tip:</strong> If you want to diagnose mismatches after a test run without reconstructing requests, use <a href="#explain_unmatched_requests"><code>explain_unmatched_requests</code></a> instead, which works from MockServer's traffic log.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>method</code></td><td>string</td><td>No</td><td>HTTP method of the failing request</td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>Yes</td><td>URL path of the failing request</td></tr>
+        <tr><td><code>headers</code></td><td>object</td><td>No</td><td>Headers of the failing request</td></tr>
+        <tr><td><code>body</code></td><td>string</td><td>No</td><td>Body of the failing request</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "method": "tools/call",
+  "params": {
+    "name": "debug_request_mismatch",
+    "arguments": {
+      "method": "POST",
+      "path": "/api/users",
+      "headers": {
+        "content-type": "application/xml"
+      },
+      "body": "&lt;user&gt;&lt;name&gt;Alice&lt;/name&gt;&lt;/user&gt;"
+    }
+  }
+}</code></pre>
+
+<p><strong>Example response:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"totalExpectations\":2,\"results\":[{\"expectationId\":\"abc-123\",\"expectationPath\":\"/api/users\",\"expectationMethod\":\"POST\",\"matches\":false,\"matchedFieldCount\":15,\"totalFieldCount\":16,\"differingFieldCount\":1,\"differences\":{\"body\":[\"expected JSON body but was XML\"]},\"remediation\":{\"body\":\"check the Content-Type header and body format\"}},{\"expectationId\":\"def-456\",\"expectationPath\":\"/api/orders\",\"expectationMethod\":\"GET\",\"matches\":false,\"matchedFieldCount\":12,\"totalFieldCount\":16,\"differingFieldCount\":4,\"differences\":{\"method\":[\"expected GET but was POST\"],\"path\":[\"expected /api/orders but was /api/users\"]},\"remediation\":{\"method\":\"use method GET not POST\",\"path\":\"use path /api/orders not /api/users\"}}],\"closestMatch\":{\"expectationId\":\"abc-123\",\"expectationPath\":\"/api/users\",\"expectationMethod\":\"POST\",\"remediation\":{\"body\":\"check the Content-Type header and body format\"}}}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<p>The <code>results</code> array is sorted by closeness (fewest differing fields first). Each entry includes:</p>
+<ul>
+    <li><code>differences</code> &mdash; per-field mismatch details explaining what did not match</li>
+    <li><code>remediation</code> &mdash; actionable hints for each mismatched field, such as "use method POST not GET" or "check the Content-Type header and body format"</li>
+    <li><code>matchedFieldCount</code> / <code>totalFieldCount</code> &mdash; numeric closeness ranking</li>
+    <li><code>closestMatch</code> &mdash; the top-ranked result (at the root level) with its remediation hints</li>
+</ul>
+
+<a id="explain_unmatched_requests" class="anchor" href="#explain_unmatched_requests">&nbsp;</a>
+
+<h3>explain_unmatched_requests</h3>
+
+<p>Returns recent requests that hit MockServer and matched no expectation, with ranked closest-expectation diagnostics and actionable remediation hints. Use this after a failed test run to understand why requests received 404 responses, without needing to reconstruct each failing request.</p>
+
+<p><strong>Note:</strong> This functionality is also available as a REST API endpoint (<code>PUT /mockserver/explainUnmatched</code>) and as an MCP resource (<code>mockserver://unmatched</code>).</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>limit</code></td><td>integer</td><td>No</td><td>Maximum number of unmatched requests to return. Defaults to 10, maximum 100.</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 20,
+  "method": "tools/call",
+  "params": {
+    "name": "explain_unmatched_requests",
+    "arguments": {
+      "limit": 5
+    }
+  }
+}</code></pre>
+
+<p><strong>Example response:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 20,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"unmatchedRequestCount\":1,\"unmatchedRequests\":[{\"timestamp\":\"2026-05-21 12:00:00.000\",\"method\":\"GET\",\"path\":\"/api/users\",\"closestExpectations\":[{\"expectationId\":\"abc123\",\"expectationPath\":\"/api/users\",\"expectationMethod\":\"POST\",\"matches\":false,\"matchedFieldCount\":15,\"totalFieldCount\":16,\"differingFieldCount\":1,\"differences\":{\"method\":[\"expected POST but was GET\"]},\"remediation\":{\"method\":\"use method POST not GET\"}}]}]}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<p>Each unmatched request includes a <code>closestExpectations</code> array ranked by closeness (fewest differing fields first). Each expectation entry includes:</p>
+<ul>
+    <li><code>differences</code> &mdash; per-field mismatch details</li>
+    <li><code>remediation</code> &mdash; actionable hints such as "use method POST not GET" or "add missing header Authorization"</li>
+    <li><code>differingFieldCount</code> / <code>matchedFieldCount</code> &mdash; numeric closeness ranking</li>
+</ul>
+
+<a id="stop_server" class="anchor" href="#stop_server">&nbsp;</a>
+
+<h3>stop_server</h3>
+
+<p>Stop the MockServer instance. This tool takes no parameters. Use with caution as the server will shut down immediately.</p>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 15,
+  "method": "tools/call",
+  "params": {
+    "name": "stop_server",
+    "arguments": {}
+  }
+}</code></pre>
+
+<a id="create_expectation_from_openapi" class="anchor" href="#create_expectation_from_openapi">&nbsp;</a>
+
+<h3>create_expectation_from_openapi</h3>
+
+<p>Generate mock expectations from an <a target="_blank" href="https://swagger.io/docs/specification/basic-structure/" rel="noopener noreferrer">OpenAPI v3</a> specification. MockServer will create one expectation per operation in the specification, using example responses where available.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>specUrlOrPayload</code></td><td>string</td><td>Yes</td><td>URL, file path, or inline OpenAPI specification (JSON or YAML)</td></tr>
+        <tr><td><code>operationsAndResponses</code></td><td>object</td><td>No</td><td>Map of <code>operationId</code> to control which operations and responses are mocked. Each value is either a status-code string (e.g. <code>"200"</code>) or an object <code>{ "statusCode": "200", "exampleName": "..." }</code> to pick a named example for that operation</td></tr>
+        <tr><td><code>contextPathPrefix</code></td><td>string</td><td>No</td><td>Path prefix prepended to every path in the OpenAPI spec (e.g. <code>/api/v1</code>)</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 11,
+  "method": "tools/call",
+  "params": {
+    "name": "create_expectation_from_openapi",
+    "arguments": {
+      "specUrlOrPayload": "https://petstore3.swagger.io/api/v3/openapi.json",
+      "operationsAndResponses": {
+        "findPetsByStatus": "200",
+        "getPetById": "200"
+      }
+    }
+  }
+}</code></pre>
+
+<a id="create_expectations_from_recorded_traffic" class="anchor" href="#create_expectations_from_recorded_traffic">&nbsp;</a>
+
+<h3>create_expectations_from_recorded_traffic</h3>
+
+<p>Converts traffic already recorded by MockServer's forwarding/proxy mode into active mock expectations in one step. After observing a real API via a forwarding proxy (e.g. using <a href="#create_forward_expectation"><code>create_forward_expectation</code></a>), call this tool to generate expectations that replay the recorded responses. This enables an "observe then mock" workflow: point MockServer at a real API once, record the traffic, then switch to mocked responses.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>method</code></td><td>string</td><td>No</td><td>Filter recorded traffic by HTTP method (e.g. <code>GET</code>, <code>POST</code>)</td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>No</td><td>Filter recorded traffic by request path (e.g. <code>/api/users</code>)</td></tr>
+        <tr><td><code>preview</code></td><td>boolean</td><td>No</td><td>When <code>true</code>, return the generated expectations as JSON without adding them. Defaults to <code>false</code>.</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request (preview):</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 16,
+  "method": "tools/call",
+  "params": {
+    "name": "create_expectations_from_recorded_traffic",
+    "arguments": {
+      "path": "/api/users",
+      "preview": true
+    }
+  }
+}</code></pre>
+
+<p><strong>Example response (preview):</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 16,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"status\":\"preview\",\"count\":1,\"message\":\"Preview of expectations that would be created. Call again with preview=false to activate them.\",\"expectations\":[{\"httpRequest\":{\"method\":\"GET\",\"path\":\"/api/users\"},\"httpResponse\":{\"statusCode\":200,\"body\":\"[{\\\"id\\\":1}]\"}}]}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<p><strong>Example request (create):</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 17,
+  "method": "tools/call",
+  "params": {
+    "name": "create_expectations_from_recorded_traffic",
+    "arguments": {
+      "method": "GET"
+    }
+  }
+}</code></pre>
+
+<p><strong>Example response (create):</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 17,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"status\":\"created\",\"count\":2,\"ids\":[\"abc-123\",\"def-456\"]}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<p>When no recorded traffic is found, the tool returns a helpful message suggesting you set up a forwarding proxy first.</p>
+
+<a id="verify_traffic_against_openapi" class="anchor" href="#verify_traffic_against_openapi">&nbsp;</a>
+
+<h3>verify_traffic_against_openapi</h3>
+
+<p>Verify the API calls already recorded by MockServer conform to an OpenAPI contract. Pulls recorded request-response pairs from the event log, validates each request and response against the spec, and returns a per-pair conformance report. See <a href="/mock_server/ai_verification.html">Contract Verification</a> for workflow details.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>specUrlOrPayload</code></td><td>string</td><td>Yes</td><td>OpenAPI spec as a URL, file path, or inline JSON/YAML payload</td></tr>
+        <tr><td><code>method</code></td><td>string</td><td>No</td><td>Filter recorded traffic by HTTP method (e.g. <code>GET</code>, <code>POST</code>)</td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>No</td><td>Filter recorded traffic by request path (e.g. <code>/api/users</code>)</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 18,
+  "method": "tools/call",
+  "params": {
+    "name": "verify_traffic_against_openapi",
+    "arguments": {
+      "specUrlOrPayload": "/specs/api.yaml",
+      "method": "GET"
+    }
+  }
+}</code></pre>
+
+<p><strong>Example response:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 18,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"status\":\"conformant\",\"totalPairs\":2,\"passed\":2,\"failed\":0,\"results\":[{\"method\":\"GET\",\"path\":\"/api/users\",\"matchedOperation\":\"GET /api/users\",\"passed\":true},{\"method\":\"GET\",\"path\":\"/api/orders\",\"matchedOperation\":\"GET /api/orders\",\"passed\":true}]}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<a id="run_contract_test" class="anchor" href="#run_contract_test">&nbsp;</a>
+
+<h3>run_contract_test</h3>
+
+<p>Send example requests derived from an OpenAPI spec to a running service and check the responses conform. For each operation in the spec, the tool builds a representative request (with path parameters, query parameters, headers, and request body derived from examples and schema defaults), sends it to the specified base URL, and validates the response. See <a href="/mock_server/ai_verification.html">Contract Verification</a> for workflow details.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>specUrlOrPayload</code></td><td>string</td><td>Yes</td><td>OpenAPI spec as a URL, file path, or inline JSON/YAML payload</td></tr>
+        <tr><td><code>baseUrl</code></td><td>string</td><td>Yes</td><td>Base URL of the service under test (e.g. <code>http://localhost:8080</code>)</td></tr>
+        <tr><td><code>operationId</code></td><td>string</td><td>No</td><td>Optional filter to test only a specific operation by operationId</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 19,
+  "method": "tools/call",
+  "params": {
+    "name": "run_contract_test",
+    "arguments": {
+      "specUrlOrPayload": "/specs/api.yaml",
+      "baseUrl": "http://localhost:3000"
+    }
+  }
+}</code></pre>
+
+<p><strong>Example response:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 19,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"status\":\"all_passed\",\"totalOperations\":3,\"passed\":3,\"failed\":0,\"results\":[{\"operationId\":\"listUsers\",\"method\":\"GET\",\"path\":\"/api/users\",\"statusCode\":200,\"passed\":true},{\"operationId\":\"createUser\",\"method\":\"POST\",\"path\":\"/api/users\",\"statusCode\":201,\"passed\":true},{\"operationId\":\"getUser\",\"method\":\"GET\",\"path\":\"/api/users/{userId}\",\"statusCode\":200,\"passed\":true}]}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<a id="run_resiliency_test" class="anchor" href="#run_resiliency_test">&nbsp;</a>
+
+<h3>run_resiliency_test</h3>
+
+<p>Send malformed and boundary-case requests derived from an OpenAPI spec to a running service and report which inputs it failed to handle gracefully. For each operation, the tool generates a bounded mutation catalogue (omitting required fields, type violations, numeric and string boundary violations, oversized strings, and malformed JSON) and classifies each response as HANDLED (4xx) or UNEXPECTED (5xx, 2xx, or connection error). See <a href="/mock_server/ai_verification.html#resiliency">Resiliency Testing</a> for workflow details.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>specUrlOrPayload</code></td><td>string</td><td>Yes</td><td>OpenAPI spec as a URL, file path, or inline JSON/YAML payload</td></tr>
+        <tr><td><code>baseUrl</code></td><td>string</td><td>Yes</td><td>Base URL of the service under test (e.g. <code>http://localhost:8080</code>)</td></tr>
+        <tr><td><code>operationId</code></td><td>string</td><td>No</td><td>Optional filter to test only a specific operation by operationId</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 20,
+  "method": "tools/call",
+  "params": {
+    "name": "run_resiliency_test",
+    "arguments": {
+      "specUrlOrPayload": "/specs/api.yaml",
+      "baseUrl": "http://localhost:3000"
+    }
+  }
+}</code></pre>
+
+<p><strong>Example response:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 20,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"status\":\"failures_detected\",\"totalMutations\":10,\"handled\":7,\"unexpected\":3,\"operationSummaries\":[{\"operationId\":\"createUser\",\"method\":\"POST\",\"path\":\"/api/users\",\"handled\":7,\"unexpected\":3}],\"results\":[{\"operationId\":\"createUser\",\"method\":\"POST\",\"path\":\"/api/users\",\"mutationType\":\"OMIT_REQUIRED_BODY_FIELD\",\"mutationDescription\":\"omit required body field 'name'\",\"statusCode\":400,\"classification\":\"HANDLED\"},{\"operationId\":\"createUser\",\"method\":\"POST\",\"path\":\"/api/users\",\"mutationType\":\"TYPE_VIOLATION\",\"mutationDescription\":\"type violation on field 'age' (expected integer)\",\"statusCode\":500,\"classification\":\"UNEXPECTED\"}]}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<a id="record_llm_fixtures" class="anchor" href="#record_llm_fixtures">&nbsp;</a>
+
+<h3>record_llm_fixtures</h3>
+
+<p>Snapshots LLM/MCP traffic recorded through MockServer's forwarding proxy into a committable, secret-free fixture file for deterministic replay. Converts SSE streaming responses (from APIs like Anthropic Claude, OpenAI, etc.) into MockServer's SSE response format for faithful event-by-event replay. Sensitive headers (Authorization, api-key, Cookie, etc.) are automatically redacted. Note that request and response bodies are <strong>not</strong> redacted &mdash; if your application places credentials in a request or response body, review fixture files before committing them to version control.</p>
+
+<p>The written fixture is <strong>automatically registered as a cassette</strong> (origin <code>recorded</code>), so it appears under <code>GET /mockserver/cassettes</code> and in the dashboard's <a href="/mock_server/mockserver_ui.html#ui_library_section">Cassettes</a> tab without a separate <code>PUT /mockserver/cassettes</code> call. Recording to the same path again updates that entry in place rather than adding a duplicate.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>path</code></td><td>string</td><td>Yes</td><td>File path to write the fixture JSON to. The directory must exist.</td></tr>
+        <tr><td><code>host</code></td><td>string</td><td>No</td><td>Only include recorded traffic whose request host matches this value</td></tr>
+        <tr><td><code>requestPath</code></td><td>string</td><td>No</td><td>Only include recorded traffic whose request path matches this value</td></tr>
+        <tr><td><code>redactBodyFields</code></td><td>array of string</td><td>No</td><td>JSON field names whose values are redacted from recorded request/response bodies (in addition to sensitive headers and the <code>mockserver.fixtureBodyRedactFields</code> config). Non-JSON bodies are left intact.</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 21,
+  "method": "tools/call",
+  "params": {
+    "name": "record_llm_fixtures",
+    "arguments": {
+      "path": "./fixtures/anthropic-chat.json",
+      "requestPath": "/v1/messages"
+    }
+  }
+}</code></pre>
+
+<p><strong>Example response:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 21,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"status\":\"written\",\"count\":3,\"file\":\"/absolute/path/to/fixtures/anthropic-chat.json\",\"message\":\"Wrote 3 expectation(s) to /absolute/path/to/fixtures/anthropic-chat.json. Secrets have been redacted. Load with load_expectations_from_file or initializationJsonPath for replay.\"}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<a id="load_expectations_from_file" class="anchor" href="#load_expectations_from_file">&nbsp;</a>
+
+<h3>load_expectations_from_file</h3>
+
+<p>Loads expectations from a JSON fixture file and adds them as active mock expectations in MockServer. Use this to replay LLM/MCP traffic previously recorded with <code class="code inline">record_llm_fixtures</code>. SSE streaming responses in the fixture are replayed with Server-Sent Events.</p>
+
+<p>The loaded fixture is <strong>automatically registered as a cassette</strong> (origin <code>loaded</code>), so it appears under <code>GET /mockserver/cassettes</code> and in the dashboard's <a href="/mock_server/mockserver_ui.html#ui_library_section">Cassettes</a> tab without a separate <code>PUT /mockserver/cassettes</code> call. Loading the same path again updates that entry in place rather than adding a duplicate.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>path</code></td><td>string</td><td>Yes</td><td>File path to the fixture JSON file to load. Must contain expectations in MockServer's standard JSON format.</td></tr>
+        <tr><td><code>strict</code></td><td>boolean</td><td>No</td><td>Strict VCR mode: register a low-priority catch-all per cassette path so a request matching no recorded fixture returns HTTP <code>599</code> instead of falling through. Defaults to the <code>mockserver.llmVcrStrict</code> config.</td></tr>
+        <tr><td><code>normalizeRequestBodyFields</code></td><td>array of string</td><td>No</td><td>JSON field names to drop from each recorded request body on load; the remaining fields are matched loosely (extra fields in the incoming request are ignored), so volatile per-run values do not block replay.</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 22,
+  "method": "tools/call",
+  "params": {
+    "name": "load_expectations_from_file",
+    "arguments": {
+      "path": "./fixtures/anthropic-chat.json"
+    }
+  }
+}</code></pre>
+
+<p><strong>Example response:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 22,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"status\":\"loaded\",\"count\":3,\"file\":\"/absolute/path/to/fixtures/anthropic-chat.json\",\"ids\":[\"abc-123\",\"def-456\",\"ghi-789\"],\"message\":\"Loaded 3 expectation(s) from /absolute/path/to/fixtures/anthropic-chat.json. They are now active and will match incoming requests.\"}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<a id="mock_llm_completion" class="anchor" href="#mock_llm_completion">&nbsp;</a>
+
+<h3>mock_llm_completion</h3>
+
+<p>Creates a mock LLM completion expectation that returns a provider-correct response from a high-level description of text, tool calls, stop reason, and usage. The response wire format matches the target provider — for example, Anthropic returns the Anthropic Messages API format, OpenAI returns the Chat Completions format. Streaming responses are supported for all providers. See <a href="/mock_server/llm_response_mocking.html">LLM Response Mocking</a> for the full feature guide with raw JSON examples.</p>
+
+<p>Both <code>provider</code> and <code>path</code> are required. All other parameters are optional.</p>
+
+<p>Completions support the seven chat providers below; the rerank-only <code>COHERE</code> and <code>VOYAGE</code> providers cannot produce a completion &mdash; see <a href="/mock_server/llm_response_mocking.html#rerank">Rerank</a> for mocking those endpoints.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>provider</code></td><td>string (enum)</td><td>Yes</td><td>LLM provider: <code>ANTHROPIC</code>, <code>OPENAI</code>, <code>OPENAI_RESPONSES</code>, <code>GEMINI</code>, <code>BEDROCK</code>, <code>AZURE_OPENAI</code>, or <code>OLLAMA</code></td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>Yes</td><td>URL path to match (e.g. <code>/v1/messages</code>)</td></tr>
+        <tr><td><code>model</code></td><td>string</td><td>No</td><td>Model name to include in the response (e.g. <code>claude-sonnet-4-20250514</code>)</td></tr>
+        <tr><td><code>text</code></td><td>string</td><td>No</td><td>Response text content</td></tr>
+        <tr><td><code>toolCalls</code></td><td>array</td><td>No</td><td>Tool/function calls to include. Each entry requires <code>name</code> (string) and accepts optional <code>arguments</code> (string or object).</td></tr>
+        <tr><td><code>stopReason</code></td><td>string</td><td>No</td><td>Stop reason to encode in the provider format (e.g. <code>end_turn</code>, <code>tool_use</code>, <code>stop</code>)</td></tr>
+        <tr><td><code>usage</code></td><td>object</td><td>No</td><td>Token usage. Accepts <code>inputTokens</code> (integer) and <code>outputTokens</code> (integer).</td></tr>
+        <tr><td><code>streaming</code></td><td>boolean</td><td>No</td><td>When <code>true</code>, the response is delivered as a Server-Sent Events stream. Defaults to <code>false</code>.</td></tr>
+        <tr><td><code>outputSchema</code></td><td>string or object</td><td>No</td><td>A JSON Schema the response <code>text</code> is expected to conform to. Validated as the response is encoded (<strong>fail-soft</strong>): on a mismatch the body is returned unchanged but an <code>x-mockserver-structured-output-invalid</code> header is added and a warning logged. A blank or malformed schema, or absent text, is a no-op. Use this to catch malformed structured-output fixtures; use <a href="#verify_structured_output"><code>verify_structured_output</code></a> to assert over recorded traffic.</td></tr>
+        <tr><td><code>enforceOutputSchema</code></td><td>boolean</td><td>No</td><td>Opt-in <strong>strict</strong> structured-output enforcement (default <code>false</code>). When <code>true</code> and an <code>outputSchema</code> is set, a non-conforming configured response <strong>fails loudly</strong> with a provider-correct error (HTTP <code>502</code>) instead of the fail-soft diagnostic header &mdash; modelling a provider's strict <code>response_format: json_schema</code> mode that guarantees schema-valid output. No effect without an <code>outputSchema</code>.</td></tr>
+        <tr><td><code>chaos</code></td><td>object</td><td>No</td><td>Optional fault/chaos profile for resilience testing (see the table below). Also accepted per turn in <a href="#create_llm_conversation"><code>create_llm_conversation</code></a>.</td></tr>
+    </tbody>
+</table>
+
+<p><strong><code>chaos</code> fields</strong> (all optional):</p>
+
+<table>
+    <thead>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>errorStatus</code></td><td>integer</td><td>HTTP error status to return instead of a normal response (e.g. <code>429</code>, <code>529</code>). Fires every time unless <code>errorProbability</code> is set. A provider error is returned as a normal HTTP response even for a streaming completion.</td></tr>
+        <tr><td><code>retryAfter</code></td><td>string</td><td>Value for the <code>Retry-After</code> header on an injected error (e.g. <code>"30"</code>).</td></tr>
+        <tr><td><code>errorProbability</code></td><td>number</td><td>Probability 0.0&ndash;1.0 of injecting the error. <code>1.0</code> (or omitted with <code>errorStatus</code> set) always fires; <code>0.0</code> never does. Fractional values are non-deterministic unless <code>seed</code> is set.</td></tr>
+        <tr><td><code>truncateMode</code></td><td>string</td><td><code>NONE</code> or <code>MID_STREAM</code>. <code>MID_STREAM</code> truncates a streaming response after a leading fraction of events.</td></tr>
+        <tr><td><code>truncateAtFraction</code></td><td>number</td><td>Fraction 0.0&ndash;1.0 of streaming events to keep before truncating (default <code>0.5</code>). Only applies when <code>truncateMode</code> is <code>MID_STREAM</code>.</td></tr>
+        <tr><td><code>malformedSse</code></td><td>boolean</td><td>Append a malformed (broken-JSON) SSE chunk so the client must handle a corrupt event.</td></tr>
+        <tr><td><code>seed</code></td><td>integer</td><td>Makes a fractional <code>errorProbability</code> reproducible.</td></tr>
+        <tr><td><code>quotaName</code></td><td>string</td><td>Enables a <strong>stateful</strong> request quota (a fixed-window rate limit). Expectations sharing a <code>quotaName</code> share one request counter, so you can model an upstream account limit across several mocks.</td></tr>
+        <tr><td><code>quotaLimit</code></td><td>integer</td><td>Maximum requests allowed within the window before further requests are rejected. Requires <code>quotaName</code> and <code>quotaWindowMillis</code>.</td></tr>
+        <tr><td><code>quotaWindowMillis</code></td><td>integer</td><td>Window length in milliseconds. The window starts on the first request and resets once it elapses.</td></tr>
+        <tr><td><code>quotaErrorStatus</code></td><td>integer</td><td>HTTP status returned when the quota is exceeded (default <code>429</code>); the <code>retryAfter</code> value, if set, is sent as the <code>Retry-After</code> header.</td></tr>
+    </tbody>
+</table>
+
+<p>Chaos is deterministic for truncation, malformed SSE, an <code>errorProbability</code> of 0.0 or 1.0, and the stateful quota &mdash; safe for repeatable tests. Use a fractional probability (optionally with a <code>seed</code>) only when you intend flakiness. The quota is the deterministic, stateful counterpart to the probabilistic error: it counts real requests and rejects the ones over <code>quotaLimit</code> per window (the count resets on server reset).</p>
+
+<p><strong>Example request (Anthropic text completion):</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 30,
+  "method": "tools/call",
+  "params": {
+    "name": "mock_llm_completion",
+    "arguments": {
+      "provider": "ANTHROPIC",
+      "path": "/v1/messages",
+      "model": "claude-sonnet-4-20250514",
+      "text": "The capital of France is Paris.",
+      "stopReason": "end_turn",
+      "usage": {
+        "inputTokens": 12,
+        "outputTokens": 9
+      }
+    }
+  }
+}</code></pre>
+
+<p><strong>Example response (success):</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 30,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"status\":\"created\",\"count\":1,\"id\":\"abc-123\",\"provider\":\"ANTHROPIC\"}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<p><strong>Example response (unsupported provider):</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 30,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"error\":true,\"message\":\"unsupported LLM provider: UNKNOWN_AI\",\"supported\":[\"ANTHROPIC\",\"AZURE_OPENAI\",\"BEDROCK\",\"GEMINI\",\"OLLAMA\",\"OPENAI\",\"OPENAI_RESPONSES\"]}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<a id="create_llm_conversation" class="anchor" href="#create_llm_conversation">&nbsp;</a>
+
+<h3>create_llm_conversation</h3>
+
+<p>Creates a multi-turn scripted LLM conversation. Each turn is registered as a separate mock expectation wired into a scenario state chain. As the client sends successive LLM requests, MockServer advances through the scripted turns in order, matching on conversation predicates (turn index, latest message content, role, or tool result presence) and returning the configured completion for that turn.</p>
+
+<p>Per-session isolation is optional. When <code>isolateBy</code> is set, each unique value of the specified header, query parameter, or cookie gets its own independent state chain, so concurrent test sessions do not interfere with each other.</p>
+
+<p><code>provider</code>, <code>path</code>, and <code>turns</code> are required. All other parameters are optional.</p>
+
+<p>Conversations support the seven chat providers; the rerank-only <code>COHERE</code> and <code>VOYAGE</code> providers cannot produce a completion &mdash; see <a href="/mock_server/llm_response_mocking.html#rerank">Rerank</a>.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>provider</code></td><td>string (enum)</td><td>Yes</td><td>LLM provider: <code>ANTHROPIC</code>, <code>OPENAI</code>, <code>OPENAI_RESPONSES</code>, <code>GEMINI</code>, <code>BEDROCK</code>, <code>AZURE_OPENAI</code>, or <code>OLLAMA</code></td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>Yes</td><td>URL path to match (e.g. <code>/v1/messages</code>)</td></tr>
+        <tr><td><code>model</code></td><td>string</td><td>No</td><td>Model name to include in each response</td></tr>
+        <tr><td><code>isolateBy</code></td><td>object</td><td>No</td><td>Per-session isolation configuration. Requires <code>source</code> (<code>header</code>, <code>queryParameter</code>, or <code>cookie</code>) and <code>name</code> (the header/parameter/cookie name to read the session key from).</td></tr>
+        <tr><td><code>turns</code></td><td>array</td><td>Yes</td><td>Ordered list of conversation turns. Each turn is an object with an optional <code>match</code> predicate block and an optional <code>response</code> block (see below).</td></tr>
+        <tr><td><code>ids</code></td><td>array of strings</td><td>No</td><td>Expectation IDs to assign to each generated turn expectation, one ID per turn in order. When supplied, each expectation is registered with the given ID. Because MockServer's <code>PUT /mockserver/expectation</code> performs an upsert when an ID already exists, supplying the same IDs as a previously created conversation replaces that conversation in place. This is how the Composer view's "edit existing" flow updates a conversation without creating duplicates.</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Turn <code>match</code> predicates</strong> (all optional; all present predicates must be satisfied for the turn to match):</p>
+
+<table>
+    <thead>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>turnIndex</code></td><td>integer</td><td>Match when the conversation has this many completed assistant turns (0-based)</td></tr>
+        <tr><td><code>latestMessageContains</code></td><td>string</td><td>Match when the latest message in the conversation contains this substring</td></tr>
+        <tr><td><code>latestMessageMatches</code></td><td>string</td><td>Match when the latest message in the conversation matches this Java regular-expression pattern</td></tr>
+        <tr><td><code>latestMessageRole</code></td><td>string</td><td>Match when the latest message has this role: <code>USER</code>, <code>ASSISTANT</code>, <code>SYSTEM</code>, or <code>TOOL</code></td></tr>
+        <tr><td><code>containsToolResultFor</code></td><td>string</td><td>Match when the conversation contains a tool result for the named tool</td></tr>
+        <tr><td><code>semanticMatchAgainst</code></td><td>string</td><td>Opt-in, exploratory: the intent the latest message should express, judged by a runtime LLM. <strong>Off by default</strong> and ignored unless <code>mockserver.llmSemanticMatchingEnabled</code> is set and a backend resolves. Non-deterministic &mdash; for exploration only, never for CI assertions.</td></tr>
+        <tr><td><code>normalization</code></td><td>object</td><td>Optional. Clean up the prompt text before <code>latestMessageContains</code> / <code>latestMessageMatches</code> are checked, so a match is not blocked by cosmetic differences in dynamically-assembled agent prompts. Deterministic &mdash; the same prompt always normalises the same way, so it never makes a test flaky. See the table below.</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Turn <code>match.normalization</code> fields</strong> (all optional):</p>
+
+<table>
+    <thead>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>collapseWhitespace</code></td><td>boolean</td><td>Collapse runs of spaces, tabs and newlines to a single space and trim. Default <code>true</code>.</td></tr>
+        <tr><td><code>lowercase</code></td><td>boolean</td><td>Lowercase the text so capitalisation differences are ignored. Default <code>false</code>.</td></tr>
+        <tr><td><code>sortJsonKeys</code></td><td>boolean</td><td>When the prompt is JSON, sort object keys so key ordering does not affect matching. Default <code>true</code>.</td></tr>
+        <tr><td><code>dropBuiltInVolatileFields</code></td><td>boolean</td><td>Strip values that change on every run &mdash; timestamps, UUIDs, and ids like <code>req_…</code> / <code>msg_…</code> / <code>call_…</code> &mdash; before matching. Default <code>false</code>.</td></tr>
+        <tr><td><code>dropVolatileFields</code></td><td>array of string</td><td>Names of JSON fields to remove from the prompt before matching (for caller-specific volatile fields).</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Turn <code>response</code> fields</strong> (all optional):</p>
+
+<table>
+    <thead>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>text</code></td><td>string</td><td>Response text content</td></tr>
+        <tr><td><code>toolCalls</code></td><td>array</td><td>Tool/function calls. Each entry requires <code>name</code> and accepts optional <code>arguments</code> (string or object).</td></tr>
+        <tr><td><code>stopReason</code></td><td>string</td><td>Stop reason (e.g. <code>end_turn</code>, <code>tool_use</code>)</td></tr>
+        <tr><td><code>usage</code></td><td>object</td><td>Token usage: <code>inputTokens</code> and <code>outputTokens</code></td></tr>
+        <tr><td><code>streaming</code></td><td>boolean</td><td>Stream this turn's response as SSE. Defaults to <code>false</code>.</td></tr>
+    </tbody>
+</table>
+
+<p>Each turn may also carry an optional <code>chaos</code> object (a sibling of <code>match</code> and <code>response</code>) with the same fields as the <a href="#mock_llm_completion"><code>mock_llm_completion</code></a> <code>chaos</code> profile, to inject faults into that turn's response.</p>
+
+<p><strong>Example request (2-turn conversation isolated by session header):</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 31,
+  "method": "tools/call",
+  "params": {
+    "name": "create_llm_conversation",
+    "arguments": {
+      "provider": "ANTHROPIC",
+      "path": "/v1/messages",
+      "model": "claude-sonnet-4-20250514",
+      "isolateBy": {
+        "source": "header",
+        "name": "x-session-id"
+      },
+      "turns": [
+        {
+          "match": { "turnIndex": 0 },
+          "response": {
+            "text": "I can help with that. What city are you asking about?",
+            "stopReason": "end_turn"
+          }
+        },
+        {
+          "match": {
+            "turnIndex": 1,
+            "latestMessageContains": "paris",
+            "normalization": {
+              "lowercase": true,
+              "dropBuiltInVolatileFields": true
+            }
+          },
+          "response": {
+            "text": "Paris is the capital of France.",
+            "stopReason": "end_turn"
+          }
+        }
+      ]
+    }
+  }
+}</code></pre>
+
+<p>In the second turn above, <code>normalization</code> lets the turn match whether the prompt says <code>Paris</code>, <code>PARIS</code> or <code>paris</code>, and ignores any per-request timestamps or ids the agent framework injects &mdash; so the match stays stable as prompts are reassembled.</p>
+
+<p><strong>Example response:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 31,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"status\":\"created\",\"count\":2,\"scenarioName\":\"__llm_conv_a1b2c3d4__iso=header:x-session-id\",\"states\":[{\"scenarioState\":\"Started\",\"newScenarioState\":\"turn_1\",\"id\":\"exp-001\"},{\"scenarioState\":\"turn_1\",\"newScenarioState\":\"__done\",\"id\":\"exp-002\"}],\"ids\":[\"exp-001\",\"exp-002\"]}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<p>The <code>scenarioName</code> in the response is auto-generated and encodes the isolation key. The <code>states</code> array shows the scenario state progression: <code>Started</code> &rarr; <code>turn_1</code> &rarr; <code>__done</code>. Each concurrent session identified by a distinct <code>x-session-id</code> header value advances through its own copy of this state chain.</p>
+
+<a id="mock_llm_failover" class="anchor" href="#mock_llm_failover">&nbsp;</a>
+
+<h3>mock_llm_failover</h3>
+
+<p>Creates an LLM failover/retry scenario: the first N requests fail with the HTTP statuses you list, then every subsequent request succeeds with a single provider-correct LLM completion. Use it to test that retry/failover logic &mdash; LiteLLM, the Envoy AI Gateway, or an SDK's built-in retries &mdash; recovers correctly once the upstream stops erroring. The failures are scripted in order via a scenario state chain, so the scenario is deterministic and repeatable. See <a href="/mock_server/llm_response_mocking.html">LLM Response Mocking</a> for the response wire formats.</p>
+
+<p><code>provider</code>, <code>path</code>, and <code>failStatuses</code> are required. All other parameters describe the eventual success response and are optional.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>provider</code></td><td>string (enum)</td><td>Yes</td><td>LLM provider for the success response: <code>ANTHROPIC</code>, <code>OPENAI</code>, <code>OPENAI_RESPONSES</code>, <code>GEMINI</code>, <code>BEDROCK</code>, <code>AZURE_OPENAI</code>, or <code>OLLAMA</code> (the seven chat providers; the rerank-only <code>COHERE</code>/<code>VOYAGE</code> providers cannot produce a completion &mdash; see <a href="/mock_server/llm_response_mocking.html#rerank">Rerank</a>)</td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>Yes</td><td>Request path to match (e.g. <code>/v1/chat/completions</code>)</td></tr>
+        <tr><td><code>failStatuses</code></td><td>array of integer</td><td>Yes</td><td>Ordered array of HTTP status codes, one per failure attempt (e.g. <code>[503, 503, 429]</code>). The first request returns the first status, the second the next, and so on; after the list is exhausted every further request succeeds. Each status must be 100&ndash;599.</td></tr>
+        <tr><td><code>model</code></td><td>string</td><td>No</td><td>Model name for the success response (e.g. <code>gpt-4o</code>, <code>claude-sonnet-4</code>)</td></tr>
+        <tr><td><code>text</code></td><td>string</td><td>No</td><td>Success response text content</td></tr>
+        <tr><td><code>toolCalls</code></td><td>array</td><td>No</td><td>Tool/function calls for the success response. Each entry requires <code>name</code> (string) and accepts optional <code>arguments</code> (string or object).</td></tr>
+        <tr><td><code>stopReason</code></td><td>string</td><td>No</td><td>Stop reason for the success response (e.g. <code>end_turn</code>, <code>stop</code>)</td></tr>
+        <tr><td><code>usage</code></td><td>object</td><td>No</td><td>Token usage for the success response. Accepts <code>inputTokens</code> (integer) and <code>outputTokens</code> (integer).</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request (two 503s then succeed):</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 32,
+  "method": "tools/call",
+  "params": {
+    "name": "mock_llm_failover",
+    "arguments": {
+      "provider": "OPENAI",
+      "path": "/v1/chat/completions",
+      "failStatuses": [503, 503],
+      "model": "gpt-4o",
+      "text": "Recovered after retry.",
+      "stopReason": "stop"
+    }
+  }
+}</code></pre>
+
+<p><strong>Example response:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 32,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"status\":\"created\",\"count\":3,\"failureAttempts\":2,\"provider\":\"OPENAI\",\"ids\":[\"exp-001\",\"exp-002\",\"exp-003\"]}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<p>The response reports <code>failureAttempts</code> (how many requests fail before recovery) and the <code>ids</code> of the expectations created for the scripted failure-then-success chain.</p>
+
+<a id="verify_tool_call" class="anchor" href="#verify_tool_call">&nbsp;</a>
+
+<h3>verify_tool_call</h3>
+
+<p>Assert that an agent called a particular tool, by decoding the LLM requests MockServer recorded and inspecting the assistant tool calls in the conversation. Deterministic and read-only &mdash; it does not call any LLM. Useful for testing that your agent decided to use the expected tool (and, optionally, with the expected arguments).</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>provider</code></td><td>string</td><td>Yes</td><td>LLM provider whose recorded requests to inspect (e.g. <code>ANTHROPIC</code>, <code>OPENAI</code>)</td></tr>
+        <tr><td><code>toolName</code></td><td>string</td><td>Yes</td><td>Name of the tool the agent should have called</td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>No</td><td>Restrict to requests on this path (e.g. <code>/v1/messages</code>)</td></tr>
+        <tr><td><code>argumentsRegex</code></td><td>string</td><td>No</td><td>Java regex matched against the tool call's argument JSON</td></tr>
+        <tr><td><code>atLeast</code></td><td>integer</td><td>No</td><td>Minimum matching calls required (default 1)</td></tr>
+        <tr><td><code>atMost</code></td><td>integer</td><td>No</td><td>Maximum matching calls allowed</td></tr>
+    </tbody>
+</table>
+
+<p>The result reports <code>count</code> (matching tool calls found) and <code>satisfied</code> (whether the count met the <code>atLeast</code>/<code>atMost</code> constraints); when not satisfied it includes a human-readable <code>message</code>.</p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 40,
+  "method": "tools/call",
+  "params": {
+    "name": "verify_tool_call",
+    "arguments": {
+      "provider": "ANTHROPIC",
+      "path": "/v1/messages",
+      "toolName": "get_weather",
+      "argumentsRegex": "Paris",
+      "atLeast": 1
+    }
+  }
+}</code></pre>
+
+<a id="verify_structured_output" class="anchor" href="#verify_structured_output">&nbsp;</a>
+
+<h3>verify_structured_output</h3>
+
+<p>Assert that the structured (JSON) output of recorded LLM responses conforms to a JSON Schema. MockServer decodes each recorded response for the given provider, extracts the assistant's output text, and validates it against the schema. Deterministic and read-only &mdash; useful for checking that an agent (or a mocked model) returns schema-valid structured output. Responses that produce no text output are reported separately as <code>skippedNoOutput</code>.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>provider</code></td><td>string</td><td>Yes</td><td>LLM provider whose recorded responses to validate (e.g. <code>ANTHROPIC</code>, <code>OPENAI</code>)</td></tr>
+        <tr><td><code>schema</code></td><td>string</td><td>Yes</td><td>JSON Schema the output text of each recorded response must conform to</td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>No</td><td>Restrict to responses for requests on this path (e.g. <code>/v1/messages</code>)</td></tr>
+    </tbody>
+</table>
+
+<p>The result reports <code>checked</code>, <code>conforming</code>, <code>nonConforming</code>, <code>skippedNoOutput</code>, and <code>allConform</code>, plus a per-response <code>results</code> array (each with <code>conforms</code> and, on failure, the validation <code>error</code>).</p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 45,
+  "method": "tools/call",
+  "params": {
+    "name": "verify_structured_output",
+    "arguments": {
+      "provider": "ANTHROPIC",
+      "path": "/v1/messages",
+      "schema": "{\"type\":\"object\",\"required\":[\"city\",\"temperature\"]}"
+    }
+  }
+}</code></pre>
+
+<a id="explain_agent_run" class="anchor" href="#explain_agent_run">&nbsp;</a>
+
+<h3>explain_agent_run</h3>
+
+<p>Summarise an agent run reconstructed from recorded LLM requests &mdash; a quick way to see what an agent did without reading raw request bodies. Returns the message count, the number of assistant turns, the ordered sequence of tool-call names (<code>toolCallSequence</code>), the tool-use IDs a result was returned for (<code>toolResultsFor</code>, e.g. <code>"toolu_1"</code>), and the role of the latest message. Deterministic and read-only.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>provider</code></td><td>string</td><td>Yes</td><td>LLM provider whose recorded requests to summarise</td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>No</td><td>Restrict to requests on this path</td></tr>
+    </tbody>
+</table>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 41,
+  "method": "tools/call",
+  "params": {
+    "name": "explain_agent_run",
+    "arguments": { "provider": "ANTHROPIC", "path": "/v1/messages" }
+  }
+}</code></pre>
+
+<p>The result also includes a <code>callGraph</code> object: a <code>nodes</code> array (each with <code>id</code>, <code>kind</code> &mdash; a message role or <code>TOOL_CALL</code> &mdash; and <code>label</code>) and an <code>edges</code> array (each with <code>from</code>, <code>to</code>, and <code>kind</code>: <code>NEXT</code> for message sequence, <code>INVOKES</code> for a turn's tool calls, <code>RESULT</code> linking a tool call to its returned result). The dashboard <em>Sessions</em> view renders this graph per session.</p>
+
+<a id="verify_cost_budget" class="anchor" href="#verify_cost_budget">&nbsp;</a>
+
+<h3>verify_cost_budget</h3>
+
+<p>Asserts that the total estimated USD cost of the LLM responses MockServer has recorded is within a budget &mdash; a deterministic, read-only cost gate you can run in CI. It decodes each recorded response for the given provider (via the runtime-LLM client SPI), sums the input/output tokens reported in each response's usage, prices them with MockServer's built-in pricing table, and compares the total against <code>maxCostUsd</code>.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>provider</code></td><td>string (enum)</td><td>Yes</td><td>Provider whose recorded responses to total (<code>ANTHROPIC</code>, <code>OPENAI</code>, &hellip;)</td></tr>
+        <tr><td><code>maxCostUsd</code></td><td>number</td><td>Yes</td><td>Cost budget in USD. The assertion passes (<code>withinBudget: true</code>) when the total estimated cost is at or below this value.</td></tr>
+        <tr><td><code>model</code></td><td>string</td><td>No</td><td>Model id used to price every response (e.g. <code>claude-sonnet-4</code>). If omitted, the model is read from each recorded request body; responses whose model has no known price are reported as <code>unpriceable</code> and excluded from the total.</td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>No</td><td>Only total responses to this request path.</td></tr>
+    </tbody>
+</table>
+
+<p>The result reports <code>checked</code>, <code>skippedNoUsage</code>, <code>unpriceable</code>, <code>totalInputTokens</code>, <code>totalOutputTokens</code>, <code>totalCostUsd</code>, <code>maxCostUsd</code>, <code>withinBudget</code>, <code>budgetCheckAuthoritative</code>, and a per-response <code>results</code> breakdown. The pricing table is public list pricing captured 2025-Q4 and kept in sync with the dashboard &mdash; treat totals as an estimate, not an invoice.</p>
+
+<p><strong>Important:</strong> <code>withinBudget</code> reflects only the responses that could be priced. When <code>unpriceable &gt; 0</code> (a recorded model has no known price) or <code>checked == 0</code> (no responses had usage), the total understates the true cost and a passing <code>withinBudget</code> is not trustworthy. Gate your CI step on <code>budgetCheckAuthoritative</code> (<code>true</code> only when at least one response was checked and every checked response was priced) before trusting <code>withinBudget</code> &mdash; pin the <code>model</code> param to guarantee everything is priceable.</p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 42,
+  "method": "tools/call",
+  "params": {
+    "name": "verify_cost_budget",
+    "arguments": { "provider": "ANTHROPIC", "model": "claude-sonnet-4", "maxCostUsd": 0.50 }
+  }
+}</code></pre>
+
+<a id="detect_llm_drift" class="anchor" href="#detect_llm_drift">&nbsp;</a>
+
+<h3>detect_llm_drift</h3>
+
+<p>Replay a recorded fixture (cassette) against the <strong>live</strong> LLM provider and report <strong>structural</strong> drift in the responses &mdash; new fields, removed fields, and changed field types &mdash; <em>not</em> semantic/wording differences. This catches the most common VCR problem: a provider changes its response shape and your cassettes silently go stale.</p>
+
+<p><strong>Requires a configured runtime LLM backend</strong> (provider environment variables, the <code>mockserver.llmProvider</code>/<code>llmApiKey</code> properties, or a named backend &mdash; see <a href="/mock_server/configuration_properties.html#button_configuration_llm_backend">Runtime LLM Backend</a>). If none is configured the tool returns <code>{"disabled": true}</code> and does nothing. It <strong>fails closed</strong>: a network error or non-2xx live response is reported as could-not-check for that exchange, never as drift. Because it calls a real API (keys, tokens, latency, non-determinism), run it in an opt-in or scheduled CI lane &mdash; never the per-commit build.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>cassettePath</code></td><td>string</td><td>Yes</td><td>Path to the recorded fixture JSON whose exchanges are replayed</td></tr>
+        <tr><td><code>provider</code></td><td>string</td><td>Yes</td><td>LLM provider the cassette was recorded against</td></tr>
+        <tr><td><code>backendName</code></td><td>string</td><td>No</td><td>Named backend from <code>mockserver.llmBackendsConfig</code>; otherwise the default backend is resolved from env/properties</td></tr>
+    </tbody>
+</table>
+
+<p>The result reports rollup counts (<code>exchanges</code>, <code>drifted</code>, <code>checked</code>, <code>couldNotCheck</code>) and a <code>details</code> array with, per exchange, the <code>addedPaths</code> / <code>removedPaths</code> / <code>typeChangedPaths</code> (or a <code>note</code> when it could not be checked).</p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 42,
+  "method": "tools/call",
+  "params": {
+    "name": "detect_llm_drift",
+    "arguments": { "cassettePath": "fixtures/anthropic-chat.json", "provider": "ANTHROPIC" }
+  }
+}</code></pre>
+
+<a id="mock_adversarial_llm_response" class="anchor" href="#mock_adversarial_llm_response">&nbsp;</a>
+
+<h3>mock_adversarial_llm_response</h3>
+
+<p>Mock a curated <strong>adversarial</strong> payload as the LLM response, so you can test that your agent <em>resists</em> hostile or malformed model/tool output. A defensive testing aid &mdash; the payloads are short, benign test fixtures (not working exploits), and the response is deterministic.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>provider</code></td><td>string</td><td>Yes</td><td>LLM provider (the response is rendered in that provider's format)</td></tr>
+        <tr><td><code>path</code></td><td>string</td><td>Yes</td><td>Request path to match (e.g. <code>/v1/messages</code>)</td></tr>
+        <tr><td><code>payload</code></td><td>string</td><td>Yes</td><td>Payload id from the catalog (see below)</td></tr>
+        <tr><td><code>model</code></td><td>string</td><td>No</td><td>Model name to report in the response</td></tr>
+    </tbody>
+</table>
+
+<p>Catalog of payload ids: <code>prompt_injection_ignore_instructions</code>, <code>prompt_injection_tool_redirect</code>, <code>jailbreak_persona</code>, <code>data_exfiltration_request</code>, <code>malformed_json_payload</code>, <code>empty_response</code>, <code>overlong_repetition</code>. An unknown id returns an error listing the available ids.</p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 43,
+  "method": "tools/call",
+  "params": {
+    "name": "mock_adversarial_llm_response",
+    "arguments": { "provider": "ANTHROPIC", "path": "/v1/messages", "payload": "prompt_injection_ignore_instructions" }
+  }
+}</code></pre>
+
+<a id="run_mcp_contract_test" class="anchor" href="#run_mcp_contract_test">&nbsp;</a>
+
+<h3>run_mcp_contract_test</h3>
+
+<p>Check that a target <strong>MCP (Model Context Protocol)</strong> server correctly implements the protocol over Streamable HTTP &mdash; use it to verify an MCP server you built or changed. The tool runs the required JSON-RPC handshake and core methods against the endpoint (<code>initialize</code>, <code>notifications/initialized</code>, <code>ping</code>, <code>tools/list</code>, and unknown-method rejection) and validates the <em>shape</em> of each response (the JSON-RPC 2.0 envelope and required result fields), never the semantics of any tool. It is fully deterministic and involves no LLM. Each request has a 10-second timeout.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>targetUrl</code></td><td>string</td><td>Yes</td><td>Full URL of the target MCP server's Streamable HTTP endpoint (e.g. <code>http://localhost:1080/mockserver/mcp</code>)</td></tr>
+        <tr><td><code>protocolVersion</code></td><td>string</td><td>No</td><td>MCP protocol version to advertise during <code>initialize</code> (default <code>2025-06-18</code>; use e.g. <code>2025-03-26</code> to test an older revision)</td></tr>
+        <tr><td><code>toolName</code></td><td>string</td><td>No</td><td>Optional tool to exercise via a <code>tools/call</code> shape check; omit to skip (a <code>tools/call</code> may have side effects on the target)</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 44,
+  "method": "tools/call",
+  "params": {
+    "name": "run_mcp_contract_test",
+    "arguments": { "targetUrl": "http://localhost:1080/mockserver/mcp" }
+  }
+}</code></pre>
+
+<p><strong>Example response:</strong> the result text is a JSON report with an overall <code>status</code> (<code>all_passed</code> or <code>failures_detected</code>), the negotiated <code>protocolVersion</code> and <code>serverInfo</code>, and a per-check <code>results</code> array (each with <code>check</code>, <code>passed</code>, and any <code>validationErrors</code>):</p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 44,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"status\":\"all_passed\",\"protocolVersion\":\"2025-06-18\",\"serverInfo\":{\"name\":\"MockServer\"},\"totalChecks\":5,\"passed\":5,\"failed\":0,\"results\":[{\"check\":\"initialize\",\"passed\":true,\"statusCode\":200,\"detail\":\"session established\"},{\"check\":\"notifications/initialized\",\"passed\":true,\"statusCode\":202},{\"check\":\"ping\",\"passed\":true,\"statusCode\":200},{\"check\":\"tools/list\",\"passed\":true,\"statusCode\":200,\"detail\":\"36 tools advertised\"},{\"check\":\"rejects unknown method\",\"passed\":true,\"statusCode\":200,\"detail\":\"responded with code -32601\"}]}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<a id="list_mock_tools" class="anchor" href="#list_mock_tools">&nbsp;</a>
+
+<h3>list_mock_tools</h3>
+
+<p>Generates <a target="_blank" href="https://modelcontextprotocol.io/" rel="noopener noreferrer">Model Context Protocol</a> tool definitions from the <strong>current active response expectations</strong>, so an AI agent can discover the mocked endpoints as callable tools without prior knowledge of the API. This tool takes <strong>no parameters</strong>.</p>
+
+<p>Each response expectation with a concrete method and path matcher becomes one tool entry:</p>
+<ul>
+    <li><strong>name</strong> &mdash; derived from the HTTP method and path in lower snake_case (e.g. <span class="inline_code">get_api_users</span>), deduplicated and truncated to 64 characters.</li>
+    <li><strong>description</strong> &mdash; <span class="inline_code">Mock for METHOD path</span>.</li>
+    <li><strong>inputSchema</strong> &mdash; exposes any query parameters declared on the expectation as string properties, plus an optional <span class="inline_code">body</span> property when the expectation matches on a request body.</li>
+    <li><strong>_mockserver</strong> &mdash; annotation object with <span class="inline_code">method</span>, <span class="inline_code">path</span>, and <span class="inline_code">expectationId</span> so a caller can route an invocation back to the mock.</li>
+</ul>
+
+<p>Expectations whose method or path is a notted matcher, or that have no response action, are skipped.</p>
+
+<p><strong>Example request (no arguments required):</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 50,
+  "method": "tools/call",
+  "params": {
+    "name": "list_mock_tools",
+    "arguments": {}
+  }
+}</code></pre>
+
+<p><strong>Example response:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 50,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"tools\":[{\"name\":\"get_api_users\",\"description\":\"Mock for GET /api/users\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}},\"_mockserver\":{\"method\":\"GET\",\"path\":\"/api/users\",\"expectationId\":\"abc-123\"}},{\"name\":\"post_api_orders\",\"description\":\"Mock for POST /api/orders\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"body\":{\"description\":\"request body\",\"anyOf\":[{\"type\":\"string\"},{\"type\":\"object\"}]}}},\"_mockserver\":{\"method\":\"POST\",\"path\":\"/api/orders\",\"expectationId\":\"def-456\"}}],\"count\":2}"
+      }
+    ],
+    "isError": false
+  }
+}</code></pre>
+
+<p>The <span class="inline_code">count</span> field gives the total number of tool definitions generated. Use this tool to let an agent inspect what a MockServer instance is currently set up to mock &mdash; for example, before deciding whether to call <a href="#create_expectation"><code>create_expectation</code></a> or to invoke an already-mocked endpoint.</p>
+
+<a id="export_optimisation_report" class="anchor" href="#export_optimisation_report">&nbsp;</a>
+
+<h3>export_optimisation_report</h3>
+
+<p>Turns the LLM traffic captured through MockServer's forwarding proxy into a structured optimisation export covering both spend and agent design: either a copy-paste Markdown <em>optimisation brief</em> (paste it into any LLM to get concrete advice) or the structured JSON report bundle. It surfaces deterministic optimisation signals &mdash; repeated system prompts, large static context resent every turn, deterministic tool calls that could bypass the model, oversized tool results, output bloat, and duplicate retries &mdash; each with token and cost estimates. Export-only, deterministic, and read-only: MockServer never calls an LLM, and secrets are redacted. This is the same report described in full on the <a href="/mock_server/ai_optimisation.html">AI Agent Optimisation</a> page, which also exposes it as a REST endpoint and a dashboard view.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>format</code></td><td>string (enum)</td><td>No</td><td><code>markdown</code> for the copy-paste optimisation brief (default), <code>json</code> for the structured report bundle, or <code>csv</code> for the per-call + totals spreadsheet export.</td></tr>
+        <tr><td><code>session</code></td><td>string</td><td>No</td><td>Optional session/grouping key filter (e.g. <code>host:api.openai.com</code>); default is all captured LLM traffic.</td></tr>
+        <tr><td><code>host</code></td><td>string</td><td>No</td><td>Optional upstream host filter (e.g. <code>api.openai.com</code>).</td></tr>
+        <tr><td><code>provider</code></td><td>string</td><td>No</td><td>Optional LLM provider filter (e.g. <code>OPENAI</code>, <code>ANTHROPIC</code>).</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 51,
+  "method": "tools/call",
+  "params": {
+    "name": "export_optimisation_report",
+    "arguments": {
+      "format": "markdown",
+      "host": "api.openai.com"
+    }
+  }
+}</code></pre>
+
+<p>With <code>format: "markdown"</code> the result text carries a <code>brief</code> field (the Markdown document); with <code>format: "json"</code> it carries a structured <code>report</code> object; with <code>format: "csv"</code> it carries a <code>csv</code> field (per-call table plus totals/verdict summary). See <a href="/mock_server/ai_optimisation.html">LLM Optimisation</a> for the full signal catalogue and worked examples.</p>
+
+<a id="low_level_tools" class="anchor" href="#low_level_tools">&nbsp;</a>
+
+<h2>Low-Level Tools</h2>
+
+<p>Low-level tools accept the full MockServer JSON format, giving you complete control over all options. Use these when the high-level tools do not expose a parameter you need.</p>
+
+<a id="raw_expectation" class="anchor" href="#raw_expectation">&nbsp;</a>
+
+<h3>raw_expectation</h3>
+
+<p>Create an expectation using the full MockServer expectation JSON format. This is a passthrough to the <code class="code inline">PUT /mockserver/expectation</code> REST API.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>expectation</code></td><td>object</td><td>Yes</td><td>Full expectation JSON as defined in the <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi" rel="noopener noreferrer">REST API specification</a></td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 12,
+  "method": "tools/call",
+  "params": {
+    "name": "raw_expectation",
+    "arguments": {
+      "expectation": {
+        "httpRequest": {
+          "method": "GET",
+          "path": "/api/users",
+          "queryStringParameters": {
+            "page": ["1"],
+            "limit": ["10"]
+          }
+        },
+        "httpResponse": {
+          "statusCode": 200,
+          "headers": {
+            "content-type": ["application/json"]
+          },
+          "body": "{\"users\": [], \"total\": 0}"
+        },
+        "times": {
+          "remainingTimes": 5,
+          "unlimited": false
+        }
+      }
+    }
+  }
+}</code></pre>
+
+<a id="raw_retrieve" class="anchor" href="#raw_retrieve">&nbsp;</a>
+
+<h3>raw_retrieve</h3>
+
+<p>Retrieve recorded data using the full MockServer retrieve JSON format. This is a passthrough to the <code class="code inline">PUT /mockserver/retrieve</code> REST API.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>requestDefinition</code></td><td>object</td><td>No</td><td>Request matcher JSON to filter results</td></tr>
+        <tr><td><code>type</code></td><td>string</td><td>No</td><td>Type of data to retrieve: <code>REQUESTS</code>, <code>REQUEST_RESPONSES</code>, <code>RECORDED_EXPECTATIONS</code>, <code>ACTIVE_EXPECTATIONS</code>, or <code>LOGS</code></td></tr>
+        <tr><td><code>format</code></td><td>string</td><td>No</td><td>Response format: <code>JSON</code>, <code>JAVA</code>, or <code>LOG_ENTRIES</code></td></tr>
+        <tr><td><code>correlationId</code></td><td>string</td><td>No</td><td>Filter log entries by correlation ID (only applies when type is <code>LOGS</code>). Each incoming request is assigned a unique correlation ID that links all log entries for that request's lifecycle.</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 13,
+  "method": "tools/call",
+  "params": {
+    "name": "raw_retrieve",
+    "arguments": {
+      "requestDefinition": {
+        "path": "/api/.*",
+        "method": "POST"
+      },
+      "type": "REQUEST_RESPONSES",
+      "format": "JSON"
+    }
+  }
+}</code></pre>
+
+<a id="raw_verify" class="anchor" href="#raw_verify">&nbsp;</a>
+
+<h3>raw_verify</h3>
+
+<p>Verify requests using the full MockServer verification JSON format. This is a passthrough to the <code class="code inline">PUT /mockserver/verify</code> REST API.</p>
+
+<table>
+    <thead>
+        <tr><th>Parameter</th><th>Type</th><th>Required</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>verification</code></td><td>object</td><td>Yes</td><td>Full verification JSON as defined in the <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi" rel="noopener noreferrer">REST API specification</a></td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 14,
+  "method": "tools/call",
+  "params": {
+    "name": "raw_verify",
+    "arguments": {
+      "verification": {
+        "httpRequest": {
+          "method": "POST",
+          "path": "/api/orders",
+          "body": {
+            "type": "JSON_SCHEMA",
+            "jsonSchema": "{\"type\": \"object\", \"required\": [\"orderId\"]}"
+          }
+        },
+        "times": {
+          "atLeast": 1,
+          "atMost": 5
+        }
+      }
+    }
+  }
+}</code></pre>
+
+<a id="mcp_server_capabilities" class="anchor" href="#mcp_server_capabilities">&nbsp;</a>
+
+<h2>MockServer MCP Server Capabilities</h2>
+
+<p>In addition to the tools above, MockServer's own MCP server (<code>/mockserver/mcp</code>) also implements the <strong>prompts</strong> and <strong>sampling</strong> capabilities from the MCP specification. These are available alongside the tools described in this page.</p>
+
+<a id="mcp_prompts" class="anchor" href="#mcp_prompts">&nbsp;</a>
+
+<h3>Prompts (<code>prompts/list</code> and <code>prompts/get</code>)</h3>
+
+<p>MockServer's MCP server advertises a built-in prompt set. An AI assistant can discover and retrieve these prompts using standard MCP JSON-RPC methods:</p>
+
+<table>
+    <thead>
+        <tr><th>Method</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>prompts/list</code></td><td>Returns the configured prompt set — each prompt's <code>name</code>, <code>description</code>, and <code>arguments</code> list (each argument has a <code>name</code>, optional <code>description</code>, and <code>required</code> flag)</td></tr>
+        <tr><td><code>prompts/get</code></td><td>Returns a prompt's message(s) with <code>{% raw %}{{argument}}{% endraw %}</code> placeholders substituted from the supplied <code>arguments</code> map. An unknown prompt name returns JSON-RPC error code <code>INVALID_PARAMS</code> (<code>-32602</code>).</td></tr>
+    </tbody>
+</table>
+
+<p><strong>Example &mdash; list available prompts:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 100,
+  "method": "prompts/list",
+  "params": {}
+}</code></pre>
+
+<p><strong>Example &mdash; get a prompt with arguments:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 101,
+  "method": "prompts/get",
+  "params": {
+    "name": "create_expectation_prompt",
+    "arguments": {
+      "method": "GET",
+      "path": "/api/users"
+    }
+  }
+}</code></pre>
+
+<a id="mcp_sampling" class="anchor" href="#mcp_sampling">&nbsp;</a>
+
+<h3>Sampling (<code>sampling/createMessage</code>)</h3>
+
+<p>MockServer's MCP server implements <code>sampling/createMessage</code>, which returns a deterministic mocked completion in the MCP sampling result shape. This lets you test MCP clients that use server-side sampling without connecting to a real LLM.</p>
+
+<p>The response includes <code>role</code>, <code>content</code> (a text content part), <code>model</code>, and <code>stopReason</code>. The model is echoed from the request's <code>modelPreferences.hints</code> when supplied; otherwise a default model name is reported. Supply a <code>mockResponse</code> field in the request params to override the default response text.</p>
+
+<p><strong>Example request:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 102,
+  "method": "sampling/createMessage",
+  "params": {
+    "messages": [
+      { "role": "user", "content": { "type": "text", "text": "What is MockServer?" } }
+    ],
+    "modelPreferences": {
+      "hints": [{ "name": "claude-sonnet-4" }]
+    },
+    "mockResponse": "MockServer is an open-source HTTP mock and proxy server."
+  }
+}</code></pre>
+
+<p><strong>Example response:</strong></p>
+
+<pre class="prettyprint code"><code class="code">{
+  "jsonrpc": "2.0",
+  "id": 102,
+  "result": {
+    "role": "assistant",
+    "content": {
+      "type": "text",
+      "text": "MockServer is an open-source HTTP mock and proxy server."
+    },
+    "model": "claude-sonnet-4",
+    "stopReason": "end_turn"
+  }
+}</code></pre>
+
+<p>When <code>mockResponse</code> is omitted, MockServer returns a fixed default completion text. The response is always deterministic and does not call any external LLM.</p>
+
+<a id="resources" class="anchor" href="#resources">&nbsp;</a>
+
+<h2>MCP Resources</h2>
+
+<p>In addition to tools, MockServer's MCP server exposes <strong>resources</strong> that AI assistants can read for context. Resources provide real-time visibility into MockServer's current state.</p>
+
+<table>
+    <thead>
+        <tr><th>Resource URI</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>mockserver://expectations</code></td><td>All currently active expectations configured on the server</td></tr>
+        <tr><td><code>mockserver://requests</code></td><td>All recorded requests received by MockServer</td></tr>
+        <tr><td><code>mockserver://logs</code></td><td>Server logs including request matching, expectation creation, and errors</td></tr>
+        <tr><td><code>mockserver://configuration</code></td><td>Current MockServer configuration properties</td></tr>
+        <tr><td><code>mockserver://unmatched</code></td><td>Recent requests that matched no expectation, with ranked closest-expectation diagnostics and remediation hints</td></tr>
+    </tbody>
+</table>
+
+<p>Resources are read-only and are updated in real time. AI assistants can use these to understand the current state of MockServer before taking actions. For example, an assistant might read <code class="code inline">mockserver://expectations</code> to see what mocks are already configured before creating a new one.</p>
+
+{% include_subpage _includes/ai_see_also.html %}

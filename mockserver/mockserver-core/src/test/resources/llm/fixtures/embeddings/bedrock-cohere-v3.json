@@ -1,0 +1,7 @@
+200
+{
+  "id" : "<id>",
+  "embeddings" : [ "<vector:1024>", "<vector:1024>" ],
+  "response_type" : "embeddings_floats",
+  "texts" : [ "hello world", "this is a test" ]
+}

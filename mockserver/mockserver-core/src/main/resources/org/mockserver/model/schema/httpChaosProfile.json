@@ -1,0 +1,110 @@
+{
+  "title": "declarative HTTP chaos/fault injection profile",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "errorStatus": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 599
+    },
+    "retryAfter": {
+      "type": "string",
+      "maxLength": 100
+    },
+    "errorProbability": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0
+    },
+    "dropConnectionProbability": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Probability (0.0 to 1.0) of dropping the TCP connection without sending any response"
+    },
+    "latency": {
+      "$ref": "#/definitions/delay"
+    },
+    "seed": {
+      "type": "integer"
+    },
+    "succeedFirst": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "failRequestCount": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "outageAfterMillis": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Time-based outage window: chaos becomes active this many milliseconds after the expectation's first match (measured via the controllable clock)"
+    },
+    "outageDurationMillis": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Time-based outage window: chaos stays active for this many milliseconds then self-heals; omit for an unbounded outage"
+    },
+    "truncateBodyAtFraction": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Corrupt the response body by keeping only this leading fraction (0.0 to 1.0) of its bytes"
+    },
+    "malformedBody": {
+      "type": "boolean",
+      "description": "Corrupt the response body by appending a broken-JSON fragment so it fails to parse"
+    },
+    "slowResponseChunkSize": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Dribble the response body in chunks of this many bytes; requires slowResponseChunkDelay to slow the response"
+    },
+    "slowResponseChunkDelay": {
+      "$ref": "#/definitions/delay"
+    },
+    "quotaName": {
+      "type": "string",
+      "description": "Stateful quota: shared counter key; expectations with the same quotaName share one rate-limit counter"
+    },
+    "quotaLimit": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Stateful quota: max requests allowed per window before requests are rejected"
+    },
+    "quotaWindowMillis": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Stateful quota: fixed-window length in milliseconds"
+    },
+    "quotaErrorStatus": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 599,
+      "description": "Stateful quota: status returned when the quota is exceeded (default 429)"
+    },
+    "degradationRampMillis": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Gradual degradation: ramp errorProbability and dropConnectionProbability linearly from 0 to their configured values over this many milliseconds from the first match"
+    },
+    "graphqlErrors": {
+      "type": "boolean",
+      "description": "Rewrite the response body as a GraphQL error envelope (HTTP 200, {\"data\":null,\"errors\":[...]})"
+    },
+    "graphqlErrorMessage": {
+      "type": "string",
+      "description": "The error message in errors[0].message; defaults to 'simulated GraphQL error' when graphqlErrors is true and this is unset"
+    },
+    "graphqlErrorCode": {
+      "type": "string",
+      "description": "Optional value for errors[0].extensions.code (e.g. 'INTERNAL_SERVER_ERROR'); extensions object is omitted when unset"
+    },
+    "graphqlNullifyData": {
+      "type": "boolean",
+      "description": "When true (default), data is null; when false, attempt to preserve the original response body JSON as the data value"
+    }
+  }
+}

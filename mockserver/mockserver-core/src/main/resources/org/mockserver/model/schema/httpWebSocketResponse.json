@@ -1,0 +1,126 @@
+{
+  "title": "WebSocket response to return",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "delay": {
+      "$ref": "#/definitions/delay"
+    },
+    "subprotocol": {
+      "type": "string"
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "binary": {
+            "type": "string",
+            "format": "byte"
+          },
+          "delay": {
+            "$ref": "#/definitions/delay"
+          }
+        }
+      }
+    },
+    "matchers": {
+      "type": "array",
+      "description": "per-incoming-frame response rules; when set, an incoming frame matching a rule triggers that rule's responses",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "frameType": {
+            "enum": [
+              "TEXT",
+              "BINARY",
+              "PING",
+              "PONG",
+              "ANY"
+            ]
+          },
+          "textMatcher": {
+            "$ref": "#/definitions/stringOrJsonSchema"
+          },
+          "responses": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "binary": {
+                  "type": "string",
+                  "format": "byte"
+                },
+                "delay": {
+                  "$ref": "#/definitions/delay"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "templateType": {
+      "enum": [
+        "VELOCITY",
+        "JAVASCRIPT",
+        "MUSTACHE"
+      ]
+    },
+    "closeConnection": {
+      "type": "boolean"
+    },
+    "graphqlSubscriptionFilter": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "GraphQL subscription query filter for graphql-transport-ws protocol. When set, incoming subscribe messages are AST-matched against this filter.",
+      "properties": {
+        "type": {
+          "description": "body-type discriminator emitted by the clients when serialising a GraphQL body; optional, and only GRAPHQL is meaningful here",
+          "enum": [
+            "GRAPHQL"
+          ]
+        },
+        "query": {
+          "type": "string"
+        },
+        "operationName": {
+          "type": "string"
+        },
+        "variablesSchema": {
+          "type": "string"
+        },
+        "selectionSetMatchType": {
+          "enum": [
+            "NORMALISED_STRING",
+            "AST_EXACT",
+            "AST_SUBSET"
+          ]
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "query"
+      ]
+    },
+    "primary": {
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+  }
+}

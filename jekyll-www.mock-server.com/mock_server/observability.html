@@ -1,0 +1,497 @@
+---
+title: Observability
+shortTitle: Observability
+description: Monitor MockServer with Prometheus metrics and OpenTelemetry traces, including request counters, LLM token/cost metrics, JVM health gauges, and W3C trace context propagation.
+layout: page
+pageOrder: 5
+section: 'Operations'
+subsection: true
+sitemap:
+  priority: 0.7
+  changefreq: 'monthly'
+  lastmod: 2026-06-09T00:00:00+00:00
+keywords: prometheus metrics, opentelemetry, otlp, mockserver monitoring, grafana, llm token metrics, llm cost metrics, trace context, w3c traceparent, genai spans, observability
+---
+
+<p>
+    MockServer provides two observability channels: <strong>Prometheus metrics</strong> for counters, gauges, and
+    histograms; and <strong>OpenTelemetry (OTLP)</strong> for trace and metric export. Both are opt-in and
+    have zero overhead when disabled.
+</p>
+
+<ul>
+    <li><a href="#prometheus">Prometheus metrics</a></li>
+    <li><a href="#llm_metrics">LLM token and cost metrics</a></li>
+    <li><a href="#otel">OpenTelemetry (OTLP) export</a></li>
+    <li><a href="#genai_spans">GenAI spans</a></li>
+    <li><a href="#trace_context">W3C trace context propagation</a></li>
+    <li><a href="#config">Configuration reference</a></li>
+</ul>
+
+<a id="prometheus" class="anchor" href="#prometheus">&nbsp;</a>
+<h2>Prometheus Metrics</h2>
+
+<p>
+    Enable Prometheus metrics by setting <span class="inline_code">metricsEnabled</span> to
+    <span class="inline_code">true</span>. MockServer then exposes a scrape endpoint at
+    <span class="inline_code">/mockserver/metrics</span> in Prometheus text exposition format.
+    When metrics are disabled, this endpoint returns <span class="inline_code">404</span>.
+</p>
+
+<pre class="prettyprint lang-bash code"><code class="code"># Start MockServer with metrics enabled
+docker run --rm -p 1080:1080 \
+  -e MOCKSERVER_METRICS_ENABLED=true \
+  mockserver/mockserver:{{ site.mockserver_version }}
+
+# Scrape metrics
+curl http://localhost:1080/mockserver/metrics</code></pre>
+
+<h3>Available metrics</h3>
+
+<p>
+    <strong>Naming convention:</strong> the core request-tracking gauges are exposed with
+    unprefixed names (e.g. <span class="inline_code">requests_received_count</span>,
+    <span class="inline_code">expectations_not_matched_count</span>). Counter and histogram metrics,
+    and the operational gauges (<span class="inline_code">mock_server_active_service_chaos</span>,
+    <span class="inline_code">mock_server_expectations_by_type</span>,
+    <span class="inline_code">mock_server_build_info</span>), all use a
+    <span class="inline_code">mock_server_</span> prefix (e.g.
+    <span class="inline_code">mock_server_request_duration_seconds</span>). Note that the
+    <span class="inline_code">_total</span> suffix is appended to counter names in the
+    exposition output, so <span class="inline_code">mock_server_http_chaos_injected</span> appears
+    as <span class="inline_code">mock_server_http_chaos_injected_total</span> on the
+    <span class="inline_code">/mockserver/metrics</span> endpoint and in PromQL queries and Grafana.
+</p>
+
+<h4>Request and expectation matching</h4>
+
+<table class="table table-bordered table-striped">
+    <thead>
+        <tr><th>Metric</th><th>Type</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><span class="inline_code">requests_received_count</span></td><td>Gauge</td><td>Total requests received</td></tr>
+        <tr><td><span class="inline_code">expectations_not_matched_count</span></td><td>Gauge</td><td>Requests that did not match any expectation</td></tr>
+        <tr><td><span class="inline_code">response_expectations_matched_count</span></td><td>Gauge</td><td>Requests matched to a response expectation</td></tr>
+        <tr><td><span class="inline_code">forward_expectations_matched_count</span></td><td>Gauge</td><td>Requests matched to a forward expectation</td></tr>
+    </tbody>
+</table>
+
+<p>
+    Each of these four gauges (plus <span class="inline_code">llm_chaos_injected_count</span>) is genuinely
+    <strong>monotonic</strong> (only ever increases). Because the four gauge names above are read by the dashboard UI and
+    existing Grafana dashboards, they are kept unchanged; alongside each one MockServer <strong>additionally</strong>
+    publishes a proper Prometheus <span class="inline_code">Counter</span> with a
+    <span class="inline_code">_total</span> suffix. Use the <span class="inline_code">_total</span> counters in PromQL
+    <span class="inline_code">rate()</span>/<span class="inline_code">increase()</span> queries &mdash; they are true
+    monotonic counters, which those functions model correctly:
+</p>
+
+<table class="table table-bordered table-striped">
+    <thead>
+        <tr><th>Legacy gauge (unchanged)</th><th>Counter for <span class="inline_code">rate()</span>/<span class="inline_code">increase()</span></th></tr>
+    </thead>
+    <tbody>
+        <tr><td><span class="inline_code">requests_received_count</span></td><td><span class="inline_code">mock_server_requests_received_total</span></td></tr>
+        <tr><td><span class="inline_code">expectations_not_matched_count</span></td><td><span class="inline_code">mock_server_expectations_not_matched_total</span></td></tr>
+        <tr><td><span class="inline_code">response_expectations_matched_count</span></td><td><span class="inline_code">mock_server_response_expectations_matched_total</span></td></tr>
+        <tr><td><span class="inline_code">forward_expectations_matched_count</span></td><td><span class="inline_code">mock_server_forward_expectations_matched_total</span></td></tr>
+        <tr><td><span class="inline_code">llm_chaos_injected_count</span></td><td><span class="inline_code">mock_server_llm_chaos_injected_total</span></td></tr>
+    </tbody>
+</table>
+
+<pre class="prettyprint lang-bash code"><code class="code"># requests-per-second over the last 5 minutes
+rate(mock_server_requests_received_total[5m])</code></pre>
+
+<h4>Per-expectation match counter (opt-in)</h4>
+
+<p>
+    When <span class="inline_code">perExpectationMetricsEnabled</span> is <span class="inline_code">true</span> (alongside
+    <span class="inline_code">metricsEnabled</span>), MockServer registers an additional counter:
+</p>
+
+<table class="table table-bordered table-striped">
+    <thead>
+        <tr><th>Metric</th><th>Type</th><th>Labels</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><span class="inline_code">mock_server_expectation_matched</span></td>
+            <td>Counter</td>
+            <td><span class="inline_code">expectation_id</span></td>
+            <td>Total matches (and served responses) for each expectation, labelled by the stable expectation id. Appears in scrape output as <span class="inline_code">mock_server_expectation_matched_total{expectation_id="..."}</span>.</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>
+    This counter is <strong>off by default</strong>: each active expectation adds one Prometheus label value,
+    so cardinality grows with the number of registered expectations. Enable it only when you need
+    per-expectation visibility. See <a href="/mock_server/configuration_properties.html#button_configuration_per_expectation_metrics">Per-Expectation Match Counters</a> configuration.
+</p>
+
+<h4>Action execution (one per action type)</h4>
+
+<table class="table table-bordered table-striped">
+    <thead>
+        <tr><th>Metric</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><span class="inline_code">response_actions_count</span></td><td>Response actions executed</td></tr>
+        <tr><td><span class="inline_code">forward_actions_count</span></td><td>Forward actions executed</td></tr>
+        <tr><td><span class="inline_code">sse_response_actions_count</span></td><td>SSE response actions executed</td></tr>
+        <tr><td><span class="inline_code">llm_response_actions_count</span></td><td>LLM response actions executed</td></tr>
+        <tr><td><span class="inline_code">error_actions_count</span></td><td>Error actions executed</td></tr>
+        <tr><td><span class="inline_code">grpc_stream_response_actions_count</span></td><td>gRPC stream response actions executed</td></tr>
+    </tbody>
+</table>
+
+<p>Additional action counters exist for template, callback, and other action types. See the full list by scraping the endpoint.</p>
+
+<h4>Request latency histogram</h4>
+
+<p>
+    <span class="inline_code">mock_server_request_duration_seconds</span> is a Prometheus histogram of
+    request handling duration (receipt to response), with buckets from 0.5 ms to 10 s. Use it
+    to derive latency percentiles:
+</p>
+
+<pre class="prettyprint lang-text code"><code class="code">histogram_quantile(0.95, sum by (le) (rate(mock_server_request_duration_seconds_bucket[1m])))</code></pre>
+
+<p>
+    This histogram times MockServer's request handling only: it stops when the response is handed over to be
+    written. It does not include writing the response to the network, so a slow client, a response sent in
+    delayed chunks (<span class="inline_code">chunkDelay</span>), or time waiting for a busy network thread
+    does not show up in it.
+</p>
+
+<h4>Request latency including the network write</h4>
+
+<p>
+    <span class="inline_code">mock_server_request_transport_duration_seconds</span> is a Prometheus histogram
+    of the time from MockServer reading a request's headers to the last byte of its response being written to
+    the network. It covers HTTP/1.1 and HTTP/2 (each HTTP/2 stream is timed separately; HTTP/3 is not timed).
+    Buckets run from 0.5 ms to 10 s, with fine buckets between 1 ms and 100 ms.
+</p>
+
+<p>
+    Use it to tell whether slow requests seen by a client were slow inside MockServer. If your client sees
+    slow requests but this histogram does not, the time was spent outside MockServer: in the client, the
+    network, or before MockServer read the request. Compare the share of requests over 5 ms, for example:
+</p>
+
+<pre class="prettyprint lang-text code"><code class="code">1 - sum(rate(mock_server_request_transport_duration_seconds_bucket{le="0.005"}[1m]))
+  / sum(rate(mock_server_request_transport_duration_seconds_count[1m]))</code></pre>
+
+<p>
+    It counts every request, including calls to MockServer's own API such as creating expectations and
+    scraping metrics. A streamed response (for example server-sent events) is timed until its last byte, so
+    long-lived streams show up as long requests.
+</p>
+
+<h4>Build info</h4>
+
+<p>
+    <span class="inline_code">mock_server_build_info</span> is a gauge with labels
+    <span class="inline_code">version</span>, <span class="inline_code">major_minor_version</span>,
+    <span class="inline_code">group_id</span>, <span class="inline_code">artifact_id</span>, and
+    <span class="inline_code">git_hash</span>.
+</p>
+
+<h4>JVM runtime</h4>
+
+<p>When metrics are enabled, MockServer also exposes JVM health gauges:</p>
+
+<table class="table table-bordered table-striped">
+    <thead>
+        <tr><th>Metric</th><th>Labels</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><span class="inline_code">jvm_memory_used_bytes</span></td><td><span class="inline_code">area</span> = heap / nonheap</td><td>Memory currently used</td></tr>
+        <tr><td><span class="inline_code">jvm_memory_committed_bytes</span></td><td><span class="inline_code">area</span></td><td>Memory committed by the JVM</td></tr>
+        <tr><td><span class="inline_code">jvm_memory_max_bytes</span></td><td><span class="inline_code">area</span></td><td>Max memory (-1 if undefined)</td></tr>
+        <tr><td><span class="inline_code">jvm_memory_allocated_bytes</span></td><td>&mdash;</td><td>Cumulative bytes allocated across all threads since JVM start (monotonic counter; a difference of two scrapes is the allocation churn in that window). Absent on a JVM without HotSpot allocation accounting.</td></tr>
+        <tr><td><span class="inline_code">jvm_buffer_pool_used_bytes</span></td><td><span class="inline_code">pool</span> = direct / mapped / &hellip;</td><td>Off-heap memory held by each JVM buffer pool &mdash; memory the heap figures do not include</td></tr>
+        <tr><td><span class="inline_code">jvm_buffer_pool_used_buffers</span></td><td><span class="inline_code">pool</span></td><td>Number of buffers in each pool</td></tr>
+        <tr><td><span class="inline_code">netty_direct_memory_used_bytes</span></td><td>&mdash;</td><td>Off-heap memory used by MockServer's network buffers, as tracked by Netty. In the Docker images this is where most network buffer memory appears (rather than the <span class="inline_code">direct</span> pool above), so add the two when judging total off-heap use. Absent when Netty is not tracking it.</td></tr>
+        <tr><td><span class="inline_code">jvm_threads_current</span></td><td>&mdash;</td><td>Live thread count</td></tr>
+        <tr><td><span class="inline_code">jvm_threads_daemon</span></td><td>&mdash;</td><td>Daemon thread count</td></tr>
+        <tr><td><span class="inline_code">jvm_gc_collection_count</span></td><td>&mdash;</td><td>Total GC collections</td></tr>
+        <tr><td><span class="inline_code">jvm_gc_collection_seconds_sum</span></td><td>&mdash;</td><td>Total GC time in seconds</td></tr>
+    </tbody>
+</table>
+
+<h4>Memory and capacity</h4>
+
+<p>
+    When metrics are enabled, MockServer exposes how much room the expectation store and the TCP accept
+    queue have left &mdash; the "is the server running out of room?" signals. All are read live at scrape
+    time, so they add nothing to the request path.
+</p>
+
+<table class="table table-bordered table-striped">
+    <thead>
+        <tr><th>Metric</th><th>Type</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><span class="inline_code">mock_server_expectations_bytes</span></td><td>Gauge</td><td>Estimated memory the stored expectations hold. Reported whether or not a byte budget is set.</td></tr>
+        <tr><td><span class="inline_code">mock_server_max_expectations_bytes</span></td><td>Gauge</td><td>The expectation byte budget in force (<a href="/mock_server/configuration_properties.html">maxExpectationsSizeInBytes</a>); <span class="inline_code">0</span> means the byte bound is off (the default).</td></tr>
+        <tr><td><span class="inline_code">mock_server_expectations_byte_evicted_total</span></td><td>Counter</td><td>Expectations evicted to stay within the byte budget.</td></tr>
+        <tr><td><span class="inline_code">mock_server_accept_queue_backlog_configured</span></td><td>Gauge</td><td>Configured accept-queue depth (<a href="/mock_server/configuration_properties.html">soBacklog</a>).</td></tr>
+        <tr><td><span class="inline_code">mock_server_accept_queue_backlog_effective</span></td><td>Gauge</td><td>The smaller of the configured depth and the kernel ceiling (<span class="inline_code">/proc/sys/net/core/somaxconn</span>), read at startup. Emitted only on Linux, where that ceiling is readable; omitted on macOS and restricted containers rather than reported as the configured value.</td></tr>
+        <tr><td><span class="inline_code">mock_server_inbound_connections_open</span></td><td>Gauge</td><td>Client connections currently open (HTTP/1.1, HTTP/2, TLS, SOCKS and tunnels; HTTP/3 is not counted). Use it to size <a href="/mock_server/configuration_properties.html">maxInboundConnections</a>.</td></tr>
+        <tr><td><span class="inline_code">mock_server_inbound_connections_rejected_total</span></td><td>Counter</td><td>Connections closed on arrival because <a href="/mock_server/configuration_properties.html">maxInboundConnections</a> connections were already open.</td></tr>
+        <tr><td><span class="inline_code">mock_server_inbound_connections_idle_closed_total</span></td><td>Counter</td><td>Connections closed by <a href="/mock_server/configuration_properties.html">inboundConnectionIdleTimeoutMillis</a> after being idle with nothing in progress.</td></tr>
+        <tr><td><span class="inline_code">mock_server_response_write_stalls_total</span></td><td>Counter</td><td>Responses cut off because their client stopped reading them for <a href="/mock_server/configuration_properties.html#button_configuration_response_write_stall_timeout_millis">responseWriteStallTimeoutMillis</a>. The <span class="inline_code">protocol</span> label is <span class="inline_code">http1_1</span>, <span class="inline_code">http2</span>, <span class="inline_code">http3</span>, <span class="inline_code">tunnel</span> (a CONNECT or SOCKS tunnel), <span class="inline_code">websocket</span> or <span class="inline_code">other</span>; the <span class="inline_code">scope</span> label is <span class="inline_code">connection</span> when the whole connection was closed and <span class="inline_code">stream</span> when one HTTP/2 or HTTP/3 stream was reset. A rising count means clients are stopping part-way through responses, or the timeout is too short for your slowest readers.</td></tr>
+        <tr><td><span class="inline_code">mock_server_websocket_read_pauses_total</span></td><td>Counter</td><td>Times a mocked WebSocket connection stopped reading because more than 128 delayed replies were still waiting to be sent on it. MockServer resumes reading once they drain, so the client is slowed down rather than failed; a rising count means clients send faster than their delayed replies are sent.</td></tr>
+    </tbody>
+</table>
+
+<h4>Chaos metrics</h4>
+
+<p>
+    When <a href="/mock_server/chaos_testing.html">chaos testing</a> is active, additional metrics track fault injection:
+</p>
+
+<ul>
+    <li><span class="inline_code">mock_server_http_chaos_injected_total</span> &mdash; counter with a <span class="inline_code">fault_type</span> label (drop, error, latency, truncate, malformed, slow, quota, rateLimit, graphql)</li>
+    <li><span class="inline_code">mock_server_active_service_chaos</span> &mdash; gauge per <span class="inline_code">fault_type</span> of currently active chaos profiles</li>
+    <li><span class="inline_code">mock_server_chaos_auto_halt_total</span> &mdash; counter that increments each time the <a href="/mock_server/chaos_testing.html">chaos auto-halt circuit-breaker</a> triggers</li>
+</ul>
+
+<h4>Cluster metrics</h4>
+
+<p>
+    MockServer also exposes the size of the cluster it belongs to:
+</p>
+
+<ul>
+    <li><span class="inline_code">mock_server_cluster_members</span> &mdash; gauge of the number of members in the
+    MockServer cluster, read live at scrape time. It reads <span class="inline_code">1</span> for a single-node
+    deployment (the default in-memory backend, or Infinispan in LOCAL mode) and the real fleet size when
+    <a href="/mock_server/centralized_deployment.html#option2">clustering</a> is enabled. The same membership detail
+    is available as JSON from the <span class="inline_code">GET /mockserver/cluster</span> control-plane endpoint.</li>
+</ul>
+
+<a id="llm_metrics" class="anchor" href="#llm_metrics">&nbsp;</a>
+<h2>LLM Token and Cost Metrics</h2>
+
+<p>
+    When both <span class="inline_code">metricsEnabled</span> and <span class="inline_code">llmMetricsEnabled</span> are
+    <span class="inline_code">true</span>, three additional Prometheus counters track LLM usage:
+</p>
+
+<table class="table table-bordered table-striped">
+    <thead>
+        <tr><th>Metric</th><th>Labels</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><span class="inline_code">mock_server_llm_input_tokens_total</span></td>
+            <td><span class="inline_code">provider</span>, <span class="inline_code">model</span></td>
+            <td>Cumulative input tokens</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">mock_server_llm_output_tokens_total</span></td>
+            <td><span class="inline_code">provider</span>, <span class="inline_code">model</span></td>
+            <td>Cumulative output tokens</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">mock_server_llm_cost_usd_total</span></td>
+            <td><span class="inline_code">provider</span>, <span class="inline_code">model</span></td>
+            <td>Cumulative estimated cost in USD</td>
+        </tr>
+    </tbody>
+</table>
+
+<p>
+    These counters are incremented on both the mock path (when MockServer serves an
+    <span class="inline_code">httpLlmResponse</span>) and the forward/proxy path (when MockServer forwards
+    requests to a real LLM provider). Cost estimation uses an internal pricing table and is approximate.
+    A forwarded call whose response is streamed is counted when the stream ends, from the usage the provider
+    reports in it; a stream that reports no usage adds nothing to these counters
+    (see <a href="/mock_server/llm_response_mocking.html#cost_budget">Cost Budget</a> for what each provider needs).
+</p>
+
+<p>The cost-budget circuit-breaker (<span class="inline_code">mock_server_llm_cost_budget_tripped_total</span> counter) is documented in <a href="/mock_server/llm_response_mocking.html#cost_budget">LLM Response Mocking &rarr; Cost Budget</a>.</p>
+
+<pre class="prettyprint lang-text code"><code class="code"># Example: total LLM cost rate per hour
+sum(rate(mock_server_llm_cost_usd_total[1h]))</code></pre>
+
+<p>
+    Three further gauges expose the headline verdict of the latest <a href="/mock_server/ai_optimisation.html">LLM optimisation report</a>.
+    They have no labels (single global gauges) and report the figures from the most recently built optimisation
+    report &mdash; <span class="inline_code">0</span> until a report has been built (and again after a server reset),
+    so build the report periodically (via the dashboard, the REST endpoint, or the
+    <span class="inline_code">export_optimisation_report</span> MCP tool) to keep them fresh.
+</p>
+
+<table class="table table-bordered table-striped">
+    <thead>
+        <tr><th>Metric</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><span class="inline_code">mock_server_llm_estimated_waste_usd</span></td>
+            <td>Estimated recoverable LLM spend (USD) from the latest optimisation report</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">mock_server_llm_cache_hit_ratio</span></td>
+            <td>Cache-hit ratio (0&ndash;1) from the latest optimisation report</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">mock_server_llm_one_shot_rate</span></td>
+            <td>One-shot rate (0&ndash;1, fraction of non-retry calls) from the latest optimisation report</td>
+        </tr>
+    </tbody>
+</table>
+
+<a id="otel" class="anchor" href="#otel">&nbsp;</a>
+<h2>OpenTelemetry (OTLP) Export</h2>
+
+<p>
+    MockServer can push metrics and traces to an OpenTelemetry Collector (or any OTLP-compatible backend)
+    via OTLP HTTP/protobuf. Set the collector endpoint and enable the signals you want:
+</p>
+
+<pre class="prettyprint lang-bash code"><code class="code">docker run --rm -p 1080:1080 \
+  -e MOCKSERVER_OTEL_ENDPOINT=http://otel-collector:4318 \
+  -e MOCKSERVER_OTEL_METRICS_ENABLED=true \
+  -e MOCKSERVER_OTEL_TRACES_ENABLED=true \
+  -e MOCKSERVER_METRICS_ENABLED=true \
+  mockserver/mockserver:{{ site.mockserver_version }}</code></pre>
+
+<p>
+    <span class="inline_code">otelEndpoint</span> is the base URL of the OTLP HTTP collector.
+    MockServer appends <span class="inline_code">/v1/metrics</span> and <span class="inline_code">/v1/traces</span>
+    automatically. If <span class="inline_code">MOCKSERVER_OTEL_ENDPOINT</span> is not set, MockServer
+    falls back to the standard OpenTelemetry <span class="inline_code">OTEL_EXPORTER_OTLP_ENDPOINT</span>
+    environment variable, so existing OTel deployments work without extra configuration.
+    See <a href="/mock_server/configuration_properties.html#button_configuration_otel">otelEndpoint</a>
+    in the configuration reference for details.
+</p>
+
+<p>
+    <strong>Metrics export interval:</strong>
+    <span class="inline_code">otelMetricsExportIntervalSeconds</span> controls how often metrics are pushed
+    (default 60 seconds, minimum 1 second).
+</p>
+
+<a id="genai_spans" class="anchor" href="#genai_spans">&nbsp;</a>
+<h2>GenAI Spans</h2>
+
+<p>
+    When <span class="inline_code">otelTracesEnabled</span> is <span class="inline_code">true</span>, MockServer emits
+    OpenTelemetry GenAI semantic-convention spans for LLM completions. Each span includes:
+</p>
+
+<ul>
+    <li><span class="inline_code">gen_ai.system</span> &mdash; the provider (e.g. <span class="inline_code">openai</span>, <span class="inline_code">anthropic</span>)</li>
+    <li><span class="inline_code">gen_ai.request.model</span> &mdash; the model identifier</li>
+    <li>Token usage attributes (input and output tokens)</li>
+    <li>Finish reason</li>
+</ul>
+
+<p>
+    GenAI spans fire on two paths:
+</p>
+
+<ul>
+    <li><strong>Mock path</strong> &mdash; when MockServer serves an <span class="inline_code">httpLlmResponse</span></li>
+    <li><strong>Forward/proxy path</strong> &mdash; when MockServer forwards requests to a real LLM provider. The provider is detected from the target host (e.g. <span class="inline_code">api.openai.com</span> maps to OpenAI, <span class="inline_code">api.anthropic.com</span> maps to Anthropic).</li>
+</ul>
+
+<a id="trace_context" class="anchor" href="#trace_context">&nbsp;</a>
+<h2>W3C Trace Context Propagation</h2>
+
+<p>
+    MockServer can extract and propagate W3C <span class="inline_code">traceparent</span> and
+    <span class="inline_code">tracestate</span> headers across requests and responses.
+    This enables distributed tracing correlation when MockServer sits in a service mesh or
+    test harness.
+</p>
+
+<ul>
+    <li><strong><span class="inline_code">otelPropagateTraceContext</span></strong> (default <span class="inline_code">false</span>) &mdash; when enabled, MockServer copies the incoming trace context headers to the response, so downstream tracing tooling can correlate the mock response with the original request trace.</li>
+    <li><strong><span class="inline_code">otelGenerateTraceId</span></strong> (default <span class="inline_code">false</span>) &mdash; when enabled, MockServer generates a new random W3C trace ID for requests that arrive without a <span class="inline_code">traceparent</span> header.</li>
+</ul>
+
+<a id="config" class="anchor" href="#config">&nbsp;</a>
+<h2>Configuration Reference</h2>
+
+<h3>Prometheus</h3>
+
+<table class="table table-bordered table-striped">
+    <thead>
+        <tr><th>Property</th><th>Env var</th><th>Default</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><span class="inline_code">mockserver.metricsEnabled</span></td>
+            <td><span class="inline_code">MOCKSERVER_METRICS_ENABLED</span></td>
+            <td><span class="inline_code">false</span></td>
+            <td>Enable Prometheus metrics and the <span class="inline_code">/mockserver/metrics</span> endpoint</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">mockserver.llmMetricsEnabled</span></td>
+            <td><span class="inline_code">MOCKSERVER_LLM_METRICS_ENABLED</span></td>
+            <td><span class="inline_code">false</span></td>
+            <td>Enable LLM token/cost counters (requires <span class="inline_code">metricsEnabled</span>)</td>
+        </tr>
+    </tbody>
+</table>
+
+<h3>OpenTelemetry</h3>
+
+<table class="table table-bordered table-striped">
+    <thead>
+        <tr><th>Property</th><th>Env var</th><th>Default</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td><span class="inline_code">mockserver.otelEndpoint</span></td>
+            <td><span class="inline_code">MOCKSERVER_OTEL_ENDPOINT</span></td>
+            <td>(empty)</td>
+            <td>OTLP collector base URL (e.g. <span class="inline_code">http://collector:4318</span>)</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">mockserver.otelMetricsEnabled</span></td>
+            <td><span class="inline_code">MOCKSERVER_OTEL_METRICS_ENABLED</span></td>
+            <td><span class="inline_code">false</span></td>
+            <td>Push metrics to OTLP</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">mockserver.otelTracesEnabled</span></td>
+            <td><span class="inline_code">MOCKSERVER_OTEL_TRACES_ENABLED</span></td>
+            <td><span class="inline_code">false</span></td>
+            <td>Export GenAI spans via OTLP</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">mockserver.otelMetricsExportIntervalSeconds</span></td>
+            <td><span class="inline_code">MOCKSERVER_OTEL_METRICS_EXPORT_INTERVAL_SECONDS</span></td>
+            <td><span class="inline_code">60</span></td>
+            <td>OTLP metrics push interval in seconds (minimum 1)</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">mockserver.otelPropagateTraceContext</span></td>
+            <td><span class="inline_code">MOCKSERVER_OTEL_PROPAGATE_TRACE_CONTEXT</span></td>
+            <td><span class="inline_code">false</span></td>
+            <td>Copy W3C trace context headers to responses</td>
+        </tr>
+        <tr>
+            <td><span class="inline_code">mockserver.otelGenerateTraceId</span></td>
+            <td><span class="inline_code">MOCKSERVER_OTEL_GENERATE_TRACE_ID</span></td>
+            <td><span class="inline_code">false</span></td>
+            <td>Generate trace IDs for requests without <span class="inline_code">traceparent</span></td>
+        </tr>
+    </tbody>
+</table>
+
+<h2>Related Pages</h2>
+
+<ul>
+    <li><a href="/mock_server/configuration_properties.html">Configuration Properties</a> &mdash; full reference for all observability properties</li>
+    <li><a href="/mock_server/llm_response_mocking.html">LLM Response Mocking</a> &mdash; LLM mocking and cost budget</li>
+    <li><a href="/mock_server/chaos_testing.html">Chaos Testing &amp; Fault Injection</a> &mdash; chaos metrics and auto-halt</li>
+    <li><a href="/mock_server/performance.html">Scalability &amp; Latency</a> &mdash; performance benchmarks and tuning</li>
+</ul>

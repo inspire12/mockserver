@@ -1,0 +1,42 @@
+{
+  "httpRequest": {
+    "dnsName": "example.com",
+    "dnsType": "A",
+    "dnsClass": "IN"
+  },
+  "dnsResponse": {
+    "responseCode": "NOERROR",
+    "answerRecords": [
+      {
+        "name": "example.com",
+        "type": "A",
+        "dnsClass": "IN",
+        "ttl": 300,
+        "value": "93.184.216.34"
+      }
+    ],
+    "authorityRecords": [
+      {
+        "name": "example.com",
+        "type": "NS",
+        "dnsClass": "IN",
+        "ttl": 3600,
+        "value": "ns1.example.com"
+      }
+    ],
+    "additionalRecords": [
+      {
+        "name": "ns1.example.com",
+        "type": "A",
+        "dnsClass": "IN",
+        "ttl": 3600,
+        "value": "93.184.216.35"
+      }
+    ],
+    "delay": {
+      "timeUnit": "MILLISECONDS",
+      "value": 10
+    },
+    "primary": true
+  }
+}

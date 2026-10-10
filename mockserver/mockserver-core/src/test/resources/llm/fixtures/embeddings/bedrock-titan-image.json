@@ -1,0 +1,5 @@
+200
+{
+  "embedding" : "<vector:1024>",
+  "inputTextTokenCount" : 3
+}

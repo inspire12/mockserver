@@ -1,0 +1,1268 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <groupId>org.mock-server</groupId>
+        <artifactId>mockserver</artifactId>
+        <version>8.0.1-SNAPSHOT</version>
+    </parent>
+
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>mockserver-core</artifactId>
+
+    <name>MockServer Core</name>
+    <description>Functionality used by all MockServer modules for matching and expectations</description>
+    <url>https://www.mock-server.com</url>
+
+    <properties>
+        <module.name>org.mockserver.core</module.name>
+        <mockserver.failIfNoIntegrationTests>true</mockserver.failIfNoIntegrationTests>
+        <!-- ByteBuf leak detection for this module's test JVMs: paranoid tracking with the
+             parent pom's file-based gate (check-netty-leaks), which fails the build on a leak. -->
+        <mockserver.leakArgLine>${mockserver.nettyLeakDetectorArgLine}</mockserver.leakArgLine>
+    </properties>
+
+    <dependencies>
+        <!-- mockserver -->
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>mockserver-testing</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- disruptor -->
+        <dependency>
+            <groupId>com.lmax</groupId>
+            <artifactId>disruptor</artifactId>
+        </dependency>
+
+        <!-- http -->
+        <dependency>
+            <groupId>jakarta.servlet</groupId>
+            <artifactId>jakarta.servlet-api</artifactId>
+        </dependency>
+
+        <!-- Netty -->
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-buffer</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec-http</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec-http2</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec-socks</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-handler</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-handler-proxy</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-tcnative-boringssl-static</artifactId>
+        </dependency>
+        <!-- Epoll API classes (pure Java, no native classifier) — needed at compile
+             time for NettyTransport to reference EpollEventLoopGroup, EpollSocketChannel,
+             EpollServerSocketChannel, and Epoll.isAvailable(). The native .so is only
+             required at runtime on Linux (bundled in mockserver-netty). -->
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport-classes-epoll</artifactId>
+        </dependency>
+
+        <!-- protobuf (gRPC support) -->
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java-util</artifactId>
+            <exclusions>
+                <!-- protobuf-java-util references an older error_prone_annotations than guava brings;
+                     guava's path supplies the (compile-time-only) annotations at the version the build
+                     resolves to. Prune the older edge for downstream convergence (#1970). -->
+                <exclusion>
+                    <groupId>com.google.errorprone</groupId>
+                    <artifactId>error_prone_annotations</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!-- gzip HTTP deflater & inflater -->
+        <dependency>
+            <groupId>com.jcraft</groupId>
+            <artifactId>jzlib</artifactId>
+        </dependency>
+
+        <!-- non-blocking UUID -->
+        <dependency>
+            <groupId>com.fasterxml.uuid</groupId>
+            <artifactId>java-uuid-generator</artifactId>
+            <exclusions>
+                <!-- prune the stale slf4j-api 1.7.x this drags in; this module declares slf4j-api directly
+                     (the version the build already resolves to) so downstream dependencyConvergence passes -->
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!-- SSL X509 -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk18on</artifactId>
+        </dependency>
+
+        <!-- JWT -->
+        <dependency>
+            <groupId>com.nimbusds</groupId>
+            <artifactId>nimbus-jose-jwt</artifactId>
+        </dependency>
+        <!-- independent OIDC implementation used to verify provider conformance (test scope only) -->
+        <dependency>
+            <groupId>com.nimbusds</groupId>
+            <artifactId>oauth2-oidc-sdk</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- templating -->
+        <dependency>
+            <groupId>org.apache.velocity</groupId>
+            <artifactId>velocity-engine-scripting</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.velocity</groupId>
+            <artifactId>velocity-engine-core</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.commons</groupId>
+                    <artifactId>commons-lang3</artifactId>
+                </exclusion>
+                <!-- velocity-engine-core references slf4j-api 1.7.36; this module declares slf4j-api
+                     directly at ${slf4j.version}. Prune for downstream convergence (#1970). -->
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.velocity.tools</groupId>
+            <artifactId>velocity-tools-generic</artifactId>
+            <version>3.1</version>
+            <exclusions>
+                <!-- velocity-tools-generic 3.1 pulls velocity-engine-core 2.3 transitively, but this module
+                     declares (and is built and tested against) velocity-engine-core ${velocity.version} directly
+                     above. Pruning the stale 2.3 edge keeps the published tree on a single Velocity version so
+                     downstream consumers' dependencyConvergence checks pass. -->
+                <exclusion>
+                    <groupId>org.apache.velocity</groupId>
+                    <artifactId>velocity-engine-core</artifactId>
+                </exclusion>
+                <!-- velocity-tools-generic 3.1 drags commons-beanutils 1.9.4 directly and 1.8.3 via
+                     commons-digester3 — both vulnerable to GHSA-wxr5-93ph-8wr9 (CVE-2025-48734). This
+                     module's dependencyManagement pins 1.11.0 for its own build, but dependencyManagement
+                     is NOT transitive, so downstream consumers resolved the vulnerable versions from the
+                     published POM. Excluding commons-beanutils prunes the whole vulnerable subtree, and the
+                     fixed 1.11.0 is supplied as a direct dependency below so it propagates to consumers. -->
+                <exclusion>
+                    <groupId>commons-beanutils</groupId>
+                    <artifactId>commons-beanutils</artifactId>
+                </exclusion>
+                <!-- velocity-tools-generic (and its commons-digester3 edge) reference stale commons-lang3
+                     3.10, slf4j-api 1.7.30 and commons-logging 1.1.1; all three are supplied at the
+                     resolved versions elsewhere (direct commons-lang3 / slf4j-api, and commons-logging via
+                     the commons-beanutils path). Prune for downstream convergence (#1970). -->
+                <exclusion>
+                    <groupId>org.apache.commons</groupId>
+                    <artifactId>commons-lang3</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>commons-logging</groupId>
+                    <artifactId>commons-logging</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <!-- Fixed commons-beanutils for velocity-tools-generic / commons-digester3 (see exclusion above).
+             Declared directly so the published POM exposes 1.11.0 to downstream consumers. Version managed
+             in the parent pom's dependencyManagement. -->
+        <dependency>
+            <groupId>commons-beanutils</groupId>
+            <artifactId>commons-beanutils</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.samskivert</groupId>
+            <artifactId>jmustache</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>net.datafaker</groupId>
+            <artifactId>datafaker</artifactId>
+        </dependency>
+
+        <!-- WASM (chicory pure-Java interpreter).
+             NOT optional: WASM custom rules are a documented, advertised feature and the interpreter must
+             reach the modules assembled into the standalone jar and Docker image. Declared optional, Maven
+             keeps it on this module's own classpath but does not propagate it to consumers, so every
+             shipped artifact carried the org.mockserver.wasm classes with no interpreter behind them and
+             WASM rules silently never matched. Unlike GraalJS (~262 MB, deliberately optional and
+             documented as an add-on with its own image variant) chicory is ~365 KB of pure Java, and WASM
+             is gated off by default via wasmEnabled=false, so bundling it is inert until opted into.
+             Consumers that do not want it exclude it — see mockserver-client-java. -->
+        <dependency>
+            <groupId>com.dylibso.chicory</groupId>
+            <artifactId>runtime</artifactId>
+        </dependency>
+
+        <!-- HdrHistogram (authoritative per-run load-scenario latency percentiles) -->
+        <dependency>
+            <groupId>org.hdrhistogram</groupId>
+            <artifactId>HdrHistogram</artifactId>
+        </dependency>
+
+        <!-- javascript (GraalVM polyglot) -->
+        <dependency>
+            <groupId>org.graalvm.polyglot</groupId>
+            <artifactId>polyglot</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.graalvm.polyglot</groupId>
+            <artifactId>js</artifactId>
+            <type>pom</type>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- json (object serialisation) -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-annotations</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>com.fasterxml.jackson.core</groupId>
+                    <artifactId>jackson-annotations</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <!-- ObjectMapperFactory registers JavaTimeModule directly, so declare this explicitly rather
+                 than relying on it arriving transitively (it previously came only via swagger-parser, which
+                 the Java client now excludes). -->
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Declared directly because swagger-parser (which previously supplied jackson-dataformat-yaml
+                 for parsing YAML OpenAPI specs) now excludes it to keep downstream convergence clean (#1970).
+                 Version managed in the parent pom's dependencyManagement at ${jackson.version}. -->
+            <groupId>com.fasterxml.jackson.dataformat</groupId>
+            <artifactId>jackson-dataformat-yaml</artifactId>
+            <exclusions>
+                <!-- jackson-dataformat-yaml references snakeyaml 2.5; datafaker supplies the pinned 2.6.
+                     Prune so a single snakeyaml version reaches consumers (#1970). -->
+                <exclusion>
+                    <groupId>org.yaml</groupId>
+                    <artifactId>snakeyaml</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>net.javacrumbs.json-unit</groupId>
+            <artifactId>json-unit-core</artifactId>
+        </dependency>
+        <dependency>
+            <!-- json-unit's Configuration.withMatcher exposes org.hamcrest.Matcher; json-unit
+                 declares only the hamcrest-core stub which has no classes since 3.0, so the
+                 hamcrest classes must be pulled in explicitly for compile-time visibility. -->
+            <groupId>org.hamcrest</groupId>
+            <artifactId>hamcrest</artifactId>
+        </dependency>
+
+        <!-- json validation -->
+        <dependency>
+            <groupId>com.networknt</groupId>
+            <artifactId>json-schema-validator</artifactId>
+            <exclusions>
+                <!-- prune the older slf4j-api and the jackson-annotations 2.21 (pulled via its Jackson 3
+                     transitive); this module declares both directly at the versions the build resolves to -->
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.fasterxml.jackson.core</groupId>
+                    <artifactId>jackson-annotations</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>com.jayway.jsonpath</groupId>
+            <artifactId>json-path</artifactId>
+            <exclusions>
+                <!-- prune the older slf4j-api; declared directly by this module -->
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <!-- RFC 6902 JSON Patch / RFC 7386 JSON Merge Patch applied to forwarded response
+                 bodies; declared directly rather than relying on the json-schema-validator
+                 transitive so the API stays available if that transitive changes. -->
+            <groupId>com.github.java-json-tools</groupId>
+            <artifactId>json-patch</artifactId>
+            <exclusions>
+                <!-- json-patch's msg-simple/btf/jackson-coreutils chain references stale jackson-databind
+                     2.11.0 and jsr305 2.0.1; both are supplied at the pinned versions elsewhere (direct
+                     jackson-databind, protobuf's jsr305 3.0.2). Prune for downstream convergence (#1970). -->
+                <exclusion>
+                    <groupId>com.fasterxml.jackson.core</groupId>
+                    <artifactId>jackson-databind</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.google.code.findbugs</groupId>
+                    <artifactId>jsr305</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!-- open api -->
+        <dependency>
+            <groupId>io.swagger.parser.v3</groupId>
+            <artifactId>swagger-parser</artifactId>
+            <exclusions>
+                <!-- swagger-parser drags a large legacy subtree (swagger-parser-v2-converter ->
+                     swagger-core 1.6.x / swagger-compat-spec-parser -> com.github.java-json-tools:
+                     json-schema-validator 2.2.14) that references many stale versions of libraries
+                     this module already pins. MockServer's own build converges these via the parent
+                     dependencyManagement, but dependencyManagement is NOT transitive, so a downstream
+                     consumer running maven-enforcer's dependencyConvergence saw conflicts for guava,
+                     jsr305, rhino, libphonenumber, snakeyaml, commons-*, slf4j, jackson-* and
+                     jakarta.xml.bind-api (GitHub issue #1970). The pinned/newer versions already win
+                     nearest-wins, so pruning the stale references here leaves the resolved classpath
+                     unchanged while letting consumers' convergence checks pass. Every artifact below
+                     is supplied at a single version by a direct dependency of this module (or by
+                     datafaker/protobuf at the version that already wins). -->
+                <exclusion>
+                    <groupId>com.google.guava</groupId>
+                    <artifactId>guava</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.google.code.findbugs</groupId>
+                    <artifactId>jsr305</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.mozilla</groupId>
+                    <artifactId>rhino</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.googlecode.libphonenumber</groupId>
+                    <artifactId>libphonenumber</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.yaml</groupId>
+                    <artifactId>snakeyaml</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.commons</groupId>
+                    <artifactId>commons-lang3</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>commons-io</groupId>
+                    <artifactId>commons-io</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>commons-codec</groupId>
+                    <artifactId>commons-codec</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>commons-logging</groupId>
+                    <artifactId>commons-logging</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.fasterxml.jackson.core</groupId>
+                    <artifactId>jackson-annotations</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.fasterxml.jackson.core</groupId>
+                    <artifactId>jackson-databind</artifactId>
+                </exclusion>
+                <!-- jackson-dataformat-yaml was supplied ONLY by swagger; declared directly below so
+                     YAML OpenAPI specs still parse after this edge is pruned. -->
+                <exclusion>
+                    <groupId>com.fasterxml.jackson.dataformat</groupId>
+                    <artifactId>jackson-dataformat-yaml</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.fasterxml.jackson.datatype</groupId>
+                    <artifactId>jackson-datatype-jsr310</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>jakarta.xml.bind</groupId>
+                    <artifactId>jakarta.xml.bind-api</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <!-- upgrade swagger-parser dependency fixing
+                 https://security.snyk.io/vuln/SNYK-JAVA-ORGMOZILLA-1314295 -->
+            <groupId>org.mozilla</groupId>
+            <artifactId>rhino</artifactId>
+        </dependency>
+
+        <!-- graphql -->
+        <dependency>
+            <groupId>com.graphql-java</groupId>
+            <artifactId>graphql-java</artifactId>
+        </dependency>
+
+        <!-- xml -->
+        <dependency>
+            <groupId>jakarta.xml.bind</groupId>
+            <artifactId>jakarta.xml.bind-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.sun.xml.bind</groupId>
+            <artifactId>jaxb-impl</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.xmlunit</groupId>
+            <artifactId>xmlunit-core</artifactId>
+            <exclusions>
+                <!-- prune the stale jakarta.xml.bind-api 2.3.3; this module declares 4.0.x directly (above) -->
+                <exclusion>
+                    <groupId>jakarta.xml.bind</groupId>
+                    <artifactId>jakarta.xml.bind-api</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.xmlunit</groupId>
+            <artifactId>xmlunit-placeholders</artifactId>
+        </dependency>
+
+        <!-- commons & guava -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-lang3</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>commons-io</groupId>
+            <artifactId>commons-io</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-text</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.commons</groupId>
+                    <artifactId>commons-lang3</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>commons-codec</groupId>
+            <artifactId>commons-codec</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+        </dependency>
+        <dependency>
+            <!-- javax.annotation.Nullable (JSR-305) is referenced directly in this module's source
+                 (e.g. HttpForwardAction); declare it directly rather than relying on it arriving
+                 transitively via swagger/json-patch/protobuf, whose stale 2.0.1 edges are now pruned
+                 for downstream convergence (#1970). Version managed in the parent pom at 3.0.2. -->
+            <groupId>com.google.code.findbugs</groupId>
+            <artifactId>jsr305</artifactId>
+        </dependency>
+
+        <!-- classpath scanning -->
+        <dependency>
+            <groupId>io.github.classgraph</groupId>
+            <artifactId>classgraph</artifactId>
+        </dependency>
+
+        <!-- logging -->
+        <dependency> <!-- will map to any underlying logging framework -->
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-jdk14</artifactId>
+            <optional>true</optional> <!-- do not impose on project importing mock-server -->
+        </dependency>
+
+        <!-- prometheus -->
+        <dependency>
+            <groupId>io.prometheus</groupId>
+            <artifactId>prometheus-metrics-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.prometheus</groupId>
+            <artifactId>prometheus-metrics-exposition-formats</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.prometheus</groupId>
+            <artifactId>prometheus-metrics-model</artifactId>
+        </dependency>
+        <!-- snappy (raw block format) for the Prometheus Remote-Write v1 push exporter.
+             Compile scope so it is bundled into the shaded netty jar. NOT relocated by the
+             shade plugin — snappy self-extracts its native lib from org/xerial/snappy and a
+             relocation rule would break native loading. -->
+        <dependency>
+            <groupId>org.xerial.snappy</groupId>
+            <artifactId>snappy-java</artifactId>
+        </dependency>
+
+        <!-- opentelemetry (optional metrics export; off by default).
+             OTLP HTTP/protobuf via the JDK HttpClient sender — okhttp sender excluded
+             to avoid pulling okhttp + kotlin-stdlib into the shaded jar. -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk-metrics</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk-trace</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-otlp</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>io.opentelemetry</groupId>
+                    <artifactId>opentelemetry-exporter-sender-okhttp</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-exporter-sender-jdk</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk-testing</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- test -->
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-web</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.skyscreamer</groupId>
+            <artifactId>jsonassert</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+                Capture the abbreviated git commit hash at build time and expose it as the
+                ${git.commit.id.abbrev} Maven property, which the templating-maven-plugin (inherited
+                from the parent pom) substitutes into the generated Version class so it can be surfaced
+                on the /mockserver/status endpoint and the Prometheus build_info metric. Runs in the
+                initialize phase, before generate-sources where the Version class is filtered.
+                failOnNoGitDirectory / failOnUnableToExtractRepoInfo are false so builds without git
+                metadata (e.g. a source tarball) degrade to an empty hash instead of failing.
+            -->
+            <plugin>
+                <groupId>io.github.git-commit-id</groupId>
+                <artifactId>git-commit-id-maven-plugin</artifactId>
+                <version>10.0.1</version>
+                <executions>
+                    <execution>
+                        <id>resolve-git-commit-hash</id>
+                        <goals>
+                            <goal>revision</goal>
+                        </goals>
+                        <phase>initialize</phase>
+                    </execution>
+                </executions>
+                <configuration>
+                    <failOnNoGitDirectory>false</failOnNoGitDirectory>
+                    <failOnUnableToExtractRepoInfo>false</failOnUnableToExtractRepoInfo>
+                    <generateGitPropertiesFile>false</generateGitPropertiesFile>
+                    <abbrevLength>8</abbrevLength>
+                    <includeOnlyProperties>
+                        <includeOnlyProperty>^git\.commit\.id\.abbrev$</includeOnlyProperty>
+                    </includeOnlyProperties>
+                    <!-- linked git worktrees: see the git-worktree-commit-hash profile -->
+                </configuration>
+            </plugin>
+            <!--
+                Two-phase unit-test execution (see docs/operations/performance-tuning.md):
+                  1. default-test     - parallel=classes (threadCount 4) for the bulk of the suite.
+                  2. sequential-tests - parallel=none, ONLY the classes listed below, which mutate
+                     JVM-global state that cannot be thread-isolated and so must not run concurrently:
+                       - ConfigurationProperties system-property config (ConfigurationTest,
+                         ProxyConfigurationTest, ExceptionHandlingTest, CustomJsonUnitMatcherLoaderTest)
+                       - static Prometheus Metrics gauges (MockServerMatcherNotificationAndMetricsTest)
+                       - the javax.net.ssl.trustStore system property, which KeyStoreFactory sets to a
+                         keystore file the test then deletes (KeyStoreFactoryTest)
+                       - globally-fixed time for assertions on timestamps produced on the event-log
+                         disruptor thread (HttpStateTest, MockServerEventLogTest)
+                       - timing-sensitive file-watcher polling tests kept sequential as conservative
+                         defence in depth against shared-scheduler-thread contention (FileWatcherTest,
+                         ExpectationFileWatcherTest). NOTE: these no longer mutate any JVM-global static -
+                         the FileWatcher poll period is now a per-watcher / Configuration value, not a
+                         shared static - so the old restore race is structurally gone; they are retained
+                         here conservatively (this change is correctness-first, not a placement change).
+                The ConfigurationProperties/MockServerLogger <clinit> deadlock that previously made
+                parallel=classes hang is fixed (ClassInitializationDeadlockTest); UUIDService/
+                EpochService/TimeService global booleans are now thread-scoped so their former victims
+                run safely in the parallel phase. ParallelStaticStateGuardTest fails the build if a
+                class is excluded from the parallel phase without being added to the sequential phase.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <parallel>classes</parallel>
+                    <threadCount>4</threadCount>
+                    <excludes>
+                        <exclude>**/*IntegrationTest.java</exclude>
+                        <!-- Mutate the JVM-global LRUCache flags (allCachesEnabled / maxSizeOverride) or
+                             assert cache identity, so they must run single-threaded: otherwise one class
+                             flips the global cache-enabled flag mid-run of a cache-dependent class. -->
+                        <exclude>**/LRUCacheTest.java</exclude>
+                        <exclude>**/KeyStoreFactoryTest.java</exclude>
+                        <exclude>**/JsonSchemaValidatorCacheTest.java</exclude>
+                        <exclude>**/ConfigurationTest.java</exclude>
+                        <exclude>**/PortFactoryTest.java</exclude>
+                        <exclude>**/ProxyConfigurationTest.java</exclude>
+                        <exclude>**/ExceptionHandlingTest.java</exclude>
+                        <exclude>**/CustomJsonUnitMatcherLoaderTest.java</exclude>
+                        <exclude>**/MockServerMatcherNotificationAndMetricsTest.java</exclude>
+                        <exclude>**/MockServerEventLogTest.java</exclude>
+                        <exclude>**/MockServerEventLogEventualVerificationTest.java</exclude>
+                        <exclude>**/MockServerEventLogVerifyByDispositionTest.java</exclude>
+                        <exclude>**/MockServerEventLogEvictionSignalTest.java</exclude>
+                        <exclude>**/HttpStateTest.java</exclude>
+                        <exclude>**/HttpStateAuditTest.java</exclude>
+                        <exclude>**/HttpStateConfigurationUpdateTest.java</exclude>
+                        <exclude>**/HttpStateAuthorizationTest.java</exclude>
+                        <exclude>**/HttpStateAuditEndpointTest.java</exclude>
+                        <!-- Timing-sensitive file-watcher polling tests. They USED to shorten and restore the
+                             STATIC FileWatcher.pollPeriod, and the @AfterClass restore raced across the two
+                             classes in the parallel phase (whichever finished first put the 5-SECOND default
+                             back while the other was still running, so it polled every 5s against a ~4.9s
+                             assertion budget) - the flake that reddened master builds 6914/6918 and PR #2655.
+                             That static is now GONE: the poll period is a per-watcher constructor argument
+                             (FileWatcherTest) / the watchInitializationJsonPollPeriodMillis Configuration
+                             property (ExpectationFileWatcherTest), so neither class mutates any JVM-global
+                             state and the restore race is structurally impossible. They are retained in the
+                             sequential phase conservatively - as defence in depth against contention on the
+                             shared 2-thread FileWatcher scheduler - because this change is correctness-first
+                             and deliberately does not re-tune phase placement. Their retry budgets stay ~15s. -->
+                        <exclude>**/FileWatcherTest.java</exclude>
+                        <exclude>**/ExpectationFileWatcherTest.java</exclude>
+                        <!-- Enables control-plane authentication through the STATIC ConfigurationProperties
+                             store (the system-property route), which leaks across classes if run in parallel. -->
+                        <exclude>**/ControlPlaneAuthenticationRouteDenialTest.java</exclude>
+                        <!-- Reads wasmExecutionTimeoutMillis from the STATIC ConfigurationProperties store and
+                             exercises the shared WasmRuntime.MODULE_CACHE, like its WASM siblings. -->
+                        <exclude>**/WasmRuntimeExecutionBudgetTest.java</exclude>
+                        <exclude>**/WasmRuntimeConfigurationRouteTest.java</exclude>
+                        <!-- Toggles tlsMutualAuthenticationRequired in the STATIC ConfigurationProperties store. -->
+                        <exclude>**/MutualAuthenticationRuntimeReconfigurationTest.java</exclude>
+                        <exclude>**/NettySslContextFactoryGlobalStateTest.java</exclude>
+                        <!-- Pauses the server context build through the static sslServerContextBuilderCustomizer. -->
+                        <exclude>**/ServerSslContextConcurrentUpdateGlobalStateTest.java</exclude>
+                        <exclude>**/OtelMetricsExporterTest.java</exclude>
+                        <exclude>**/TimeServiceTest.java</exclude>
+                        <exclude>**/TimeToLiveTest.java</exclude>
+                        <exclude>**/ExpectationTest.java</exclude>
+                        <exclude>**/HttpActionHandlerChaosTest.java</exclude>
+                        <exclude>**/HttpActionHandlerRateLimitTest.java</exclude>
+                        <exclude>**/RateLimitRegistryTest.java</exclude>
+                        <exclude>**/HttpActionHandlerForwardChaosTest.java</exclude>
+                        <exclude>**/HttpActionHandlerRecoverAfterTest.java</exclude>
+                        <!-- Sets the static contextClassLoaderOverride (via CallbackClassLoaderResolver) that
+                             both class-callback handlers share, so it must never race other classes. -->
+                        <exclude>**/HttpForwardClassCallbackActionHandlerTest.java</exclude>
+                        <exclude>**/RecoveryAttemptRegistryTest.java</exclude>
+                        <exclude>**/ServiceChaosRegistryTest.java</exclude>
+                        <exclude>**/TcpChaosRegistryTest.java</exclude>
+                        <exclude>**/MetricsTest.java</exclude>
+                        <exclude>**/MetricsHandlerTest.java</exclude>
+                        <!-- Asserts the exact scrape of the process-wide Prometheus registry, so no other
+                             class may register or increment metrics while it runs -->
+                        <exclude>**/MetricsScrapeGoldenTest.java</exclude>
+                        <exclude>**/HttpRequestsPropertiesMatcherTest.java</exclude>
+                        <exclude>**/HttpRequestPropertiesMatcherLogTest.java</exclude>
+                        <!-- Run sequentially: these render templates that evaluate several XPath
+                             expressions, each bounded by xpathMatchingTimeoutMillis via the shared
+                             MatchingTimeoutExecutor. Under heavy parallel CPU contention an eval can
+                             miss its wall-clock timeout and fall back to "" (flaky). Running them
+                             single-threaded removes the contention without weakening the prod timeout. -->
+                        <exclude>**/MustacheTemplateEngineTest.java</exclude>
+                        <exclude>**/VelocityTemplateEngineTest.java</exclude>
+                        <!-- first JS render pays the GraalJS/Truffle context cold-start; under parallel CPU
+                             contention it can exceed the 5s javascriptTemplateExecutionTimeout (CI-red since
+                             5b23d6d17, builds 1354+) -->
+                        <exclude>**/StreamTemplateRendererTest.java</exclude>
+                        <!-- mutates JVM-global system properties (templateFakerSeed, forwardProxyClientCertificatesByHost) -->
+                        <exclude>**/CoreMiscConfigurationTest.java</exclude>
+                        <!-- WS2.1 scenario-state template tests mutate the CrossProtocolEventBus singleton (live ScenarioManager) -->
+                        <exclude>**/VelocityScenarioStateTemplateTest.java</exclude>
+                        <exclude>**/JavaScriptScenarioStateTemplateTest.java</exclude>
+                        <exclude>**/MustacheScenarioStateTemplateTest.java</exclude>
+                        <!-- WS2.6 gRPC bidi scenario-state template test mutates the CrossProtocolEventBus singleton (live ScenarioManager) -->
+                        <exclude>**/GrpcStreamMessageScenarioTemplateTest.java</exclude>
+                        <!-- WS2.2 capture-rule test mutates the CrossProtocolEventBus singleton (live ScenarioManager) -->
+                        <exclude>**/CaptureProcessorTest.java</exclude>
+                        <!-- asserts the CrossProtocolEventBus singleton and static Metrics readers let an HttpState abandoned without stop() go -->
+                        <exclude>**/AbandonedHttpStateIsCollectedTest.java</exclude>
+                        <!-- asserts the CrossProtocolEventBus singleton and static Metrics readers let go of an HttpState whose constructor threw -->
+                        <exclude>**/HttpStateFailedConstructionTest.java</exclude>
+                        <!-- asserts the load-scenario and drift-alert singletons let go of a request sender an HttpState replaced -->
+                        <exclude>**/HttpStateRequestSenderTest.java</exclude>
+                        <!-- WS7.1 OIDC authorization-code test mutates the OidcAuthorizationStore singleton -->
+                        <exclude>**/OidcProviderGeneratorTest.java</exclude>
+                        <!-- OidcTokenCallback test registers providers into the OidcAuthorizationStore singleton -->
+                        <exclude>**/OidcTokenCallbackTest.java</exclude>
+                        <!-- introspection/discovery tests register providers into, revoke tokens in, and
+                             reset the OidcAuthorizationStore singleton -->
+                        <exclude>**/OidcIntrospectionCallbackTest.java</exclude>
+                        <exclude>**/OidcDiscoveryCallbackTest.java</exclude>
+                        <exclude>**/OidcUserinfoCallbackTest.java</exclude>
+                        <!-- WS7.7 SAML SSO test mutates the SamlAssertionStore singleton -->
+                        <exclude>**/SamlProviderGeneratorTest.java</exclude>
+                        <!-- Wave4 SCIM tests mutate the ScimResourceStore singleton -->
+                        <exclude>**/ScimProviderGeneratorTest.java</exclude>
+                        <exclude>**/ScimResourceStoreTest.java</exclude>
+                        <exclude>**/ScimConcurrentUpdateTest.java</exclude>
+                        <!-- Mutates global ConfigurationProperties.generateRealisticExampleValues -->
+                        <exclude>**/ExampleBuilderRealisticValuesTest.java</exclude>
+                        <exclude>**/ExampleBuilderConfigurationInstanceTest.java</exclude>
+                        <!-- Mutate shared static PrometheusRegistry / Metrics / ConfigurationProperties -->
+                        <exclude>**/HttpActionHandlerGraphQLChaosTest.java</exclude>
+                        <exclude>**/ChaosAutoHaltMonitorTest.java</exclude>
+                        <!-- Mutates global ConfigurationProperties.preemptionSimulationMaxDrainMillis + PreemptionSimulator singleton -->
+                        <exclude>**/PreemptionSimulatorTest.java</exclude>
+                        <exclude>**/LlmCostBudgetMonitorTest.java</exclude>
+                        <!-- Resets the LlmCostBudgetMonitor and RateLimitRegistry singletons -->
+                        <exclude>**/ConfigurationInstanceEnforcementTest.java</exclude>
+                        <exclude>**/MatchingLimitsInstanceConfigurationTest.java</exclude>
+                        <!-- Asserts against the process-wide MatchingTimeoutExecutor submitted-task counter -->
+                        <exclude>**/MatchingTimeoutInlineSafeTest.java</exclude>
+                        <exclude>**/LlmMetricsTest.java</exclude>
+                        <!-- WS7.6: mutates the mockserver.perExpectationMetrics system property + static Metrics / default PrometheusRegistry -->
+                        <exclude>**/PerExpectationMetricsTest.java</exclude>
+                        <!-- T10: mutates the global mockserver.redactSecretsInLog system property -->
+                        <exclude>**/LogEntryRedactionTest.java</exclude>
+                        <!-- Mutates the global mockserver.redactSecretsInLog / fixtureBodyRedactFields properties -->
+                        <exclude>**/LogEntryRedactionSurfacesTest.java</exclude>
+                        <!-- Mutates the global mockserver.redactSecretsInLog system property to assert the NDJSON archive honours redaction -->
+                        <exclude>**/RecordedRequestsFileSystemPersistenceTest.java</exclude>
+                        <!-- Mutate global ConfigurationProperties.llmProvider/llmApiKey/llmModel/llmBaseUrl/llmBackendsConfig -->
+                        <exclude>**/LlmBackendResolverTest.java</exclude>
+                        <exclude>**/LlmProviderSnifferTest.java</exclude>
+                        <exclude>**/ForwardPathGenAiSpansTest.java</exclude>
+                        <!-- Installs/removes the process-wide tracer in GenAiSpans/RequestSpans + mutates otelTracesEnabled -->
+                        <exclude>**/GenAiSpanExporterTest.java</exclude>
+                        <exclude>**/BreakpointConfigurationTest.java</exclude>
+                        <!-- Mutate shared static singleton registries (StreamFrameBreakpointRegistry, BreakpointMatcherRegistry, BreakpointCallbackDispatcher) -->
+                        <exclude>**/HttpActionHandlerBreakpointTest.java</exclude>
+                        <exclude>**/BreakpointMatcherRegistryTest.java</exclude>
+                        <exclude>**/BreakpointMatcherEndpointTest.java</exclude>
+                        <exclude>**/BreakpointCallbackDispatcherTest.java</exclude>
+                        <exclude>**/StreamFrameCallbackDispatcherTest.java</exclude>
+                        <exclude>**/StreamFrameBreakpointRegistryTest.java</exclude>
+                        <exclude>**/InboundBreakpointTest.java</exclude>
+                        <exclude>**/MockStreamBreakpointTest.java</exclude>
+                        <!-- Mutates ServiceChaosRegistry + ChaosAutoHaltMonitor singletons, Metrics, ConfigurationProperties -->
+                        <exclude>**/ChaosExperimentOrchestratorTest.java</exclude>
+                        <!-- Resets the ChaosExperimentOrchestrator singleton in @After -->
+                        <exclude>**/HttpStateChaosProfileEndpointTest.java</exclude>
+                        <!-- Mutate global sloTrackingEnabled / sloWindow* ConfigurationProperties, the SloSampleStore singleton and the controllable clock -->
+                        <exclude>**/SloSampleStoreTest.java</exclude>
+                        <exclude>**/SloEvaluatorTest.java</exclude>
+                        <exclude>**/HttpStateVerifySloEndpointTest.java</exclude>
+                        <!-- Mutate the LoadScenarioOrchestrator singleton, Metrics, the SloSampleStore singleton and global loadGeneration* ConfigurationProperties -->
+                        <exclude>**/LoadScenarioOrchestratorTest.java</exclude>
+                        <exclude>**/LoadMetricsTest.java</exclude>
+                        <exclude>**/HttpStateLoadScenarioEndpointTest.java</exclude>
+                        <!-- Mutates the DriftAlertNotifier singleton (configure/setSender/reset/setClock) -->
+                        <exclude>**/DriftAlertNotifierTest.java</exclude>
+                        <exclude>**/DriftAlertSeverityThresholdTest.java</exclude>
+                        <!-- Mutates the process-wide PercentileTracker + DriftAlertNotifier singletons -->
+                        <exclude>**/DriftPerformanceThresholdTest.java</exclude>
+                        <!-- Mutates the process-wide DriftStore singleton -->
+                        <exclude>**/HttpActionHandlerDriftDetectionTest.java</exclude>
+                        <!-- Mutates the process-wide DriftStore + PercentileTracker singletons -->
+                        <exclude>**/DriftEndToEndAssemblyTest.java</exclude>
+                        <!-- Mutate global ConfigurationProperties / singleton registries / Metrics (detected by GlobalStateMutationGuardTest) -->
+                        <exclude>**/MaxLlmConversationBodySizeTest.java</exclude>
+                        <exclude>**/WatchInitializationJsonPollPeriodMillisTest.java</exclude>
+                        <exclude>**/InboundConnectionConfigurationTest.java</exclude>
+                        <exclude>**/BodySizeLimitConfigurationTest.java</exclude>
+                        <exclude>**/ResponseWriteStallTimeoutConfigurationTest.java</exclude>
+                        <exclude>**/SslCertificateLeafValidityInDaysTest.java</exclude>
+                        <exclude>**/SlowRequestConfigurationTest.java</exclude>
+                        <exclude>**/HttpActionHandlerLlmCostBudgetTest.java</exclude>
+                        <exclude>**/HttpActionHandlerStreamedLlmUsageTest.java</exclude>
+                        <exclude>**/GrpcChaosRegistryTest.java</exclude>
+                        <exclude>**/ValidationProxyTest.java</exclude>
+                        <exclude>**/HttpLlmResponseActionHandlerTest.java</exclude>
+                        <exclude>**/HttpLlmResponseActionHandlerChaosTest.java</exclude>
+                        <exclude>**/HttpActionHandlerLlmEnforcementTest.java</exclude>
+                        <exclude>**/DnsIntentRegistryTest.java</exclude>
+                        <exclude>**/WasmRuntimeTest.java</exclude>
+                        <exclude>**/WasmRuntimeRealModuleTest.java</exclude>
+                        <!-- Mutates the shared static WasmRuntime.MODULE_CACHE and WasmStore singleton; asserts exact cache sizes -->
+                        <exclude>**/WasmRuntimeModuleCacheTest.java</exclude>
+                        <!-- Response-shaping (ABI v3) tests: populate the shared WasmRuntime.MODULE_CACHE and (for the
+                             action-handler test) mutate ConfigurationProperties.wasmEnabled + WasmStore singleton -->
+                        <exclude>**/WasmRuntimeShapeAbiTest.java</exclude>
+                        <exclude>**/WasmResponseShaperTest.java</exclude>
+                        <exclude>**/HttpResponseActionHandlerWasmShapeTest.java</exclude>
+                        <exclude>**/XPathEvaluatorTest.java</exclude>
+                        <exclude>**/WasmBodyMatcherTest.java</exclude>
+                        <exclude>**/GraphQLMatcherTest.java</exclude>
+                        <exclude>**/JsonRpcMatcherTest.java</exclude>
+                        <exclude>**/LlmConversationMatcherTest.java</exclude>
+                        <exclude>**/JsonStringMatcherTest.java</exclude>
+                        <exclude>**/RegexStringMatcherTest.java</exclude>
+                        <exclude>**/InetAddressValidatorTest.java</exclude>
+                        <exclude>**/JsonSchemaValidatorRemoteRefTest.java</exclude>
+                        <!-- Constructs a real HttpState (mutates ServiceChaosRegistry / Metrics / CrossProtocolEventBus singletons) -->
+                        <exclude>**/HttpStateReadinessTest.java</exclude>
+                        <!-- Constructs a real HttpState via a spy StateBackend registered on the StateBackendFactory
+                             (mutates ServiceChaosRegistry / TcpChaosRegistry / GrpcChaosRegistry / CrossProtocolEventBus
+                             singletons, Metrics, and the StateBackendFactory registry) -->
+                        <exclude>**/HttpStateClusteredListenerWiringTest.java</exclude>
+                        <!-- Sets/clears mockserver.* JVM system properties to exercise the print-config effective-config diagnostic -->
+                        <exclude>**/ConfigurationPropertiesEffectiveConfigGlobalStateTest.java</exclude>
+                        <!-- Mutates mockserver.llmOptimisationMaxCalls / fixtureBodyRedactFields global config -->
+                        <exclude>**/LlmOptimisationReportServiceTest.java</exclude>
+                        <!-- Mutates the JVM-global default Locale (Locale.setDefault(GERMANY)) to prove
+                             locale-insensitive number formatting; must never race other tests in parallel -->
+                        <exclude>**/LocaleInsensitiveNumberFormattingTest.java</exclude>
+                        <!-- Resets the ForwardCircuitBreaker singleton (shared with the upstream_circuit_open gauge) -->
+                        <exclude>**/HttpForwardActionResilienceTest.java</exclude>
+                        <!-- Sets/clears the mockserver.otelEndpoint JVM system property and property cache -->
+                        <exclude>**/OtelEndpointConfigurationTest.java</exclude>
+                        <!-- Mutates mockserver.prometheusRemoteWrite* global ConfigurationProperties -->
+                        <exclude>**/PrometheusRemoteWriteExporterTest.java</exclude>
+                        <!-- Sets/clears the mockserver.prometheusRemoteWriteProtocolVersion JVM system property and property cache -->
+                        <exclude>**/PrometheusRemoteWriteProtocolVersionConfigurationTest.java</exclude>
+                        <exclude>**/BinaryMessageFramingConfigurationTest.java</exclude>
+                        <!-- Mutates mockserver.driftDetectionEnabled/driftSampleRate global ConfigurationProperties -->
+                        <exclude>**/DriftDetectionConfigTest.java</exclude>
+                        <!-- Mutates the JVM-global java.security.Security provider list (removes/re-adds the BC provider)
+                             and the BCKeyAndCertificateFactory static registration guard to test lazy provider registration -->
+                        <exclude>**/BCKeyAndCertificateFactoryLazyProviderTest.java</exclude>
+                        <!-- Resets the OpenAiResponsesState JVM-wide singleton via getInstance().reset() -->
+                        <exclude>**/OpenAiResponsesStateTest.java</exclude>
+                        <!-- Mutates the global mockserver.fixtureBodyRedactFields ConfigurationProperties -->
+                        <exclude>**/LlmDatasetExporterTest.java</exclude>
+                        <!-- Mutates the process-global GrpcHealthRegistry.getInstance() singleton
+                             (setStatus/removeStatus) and resets it in @After -->
+                        <exclude>**/GrpcHealthRegistryTest.java</exclude>
+                        <!-- Drives the process-global BCKeyAndCertificateFactory.renewalClock static and
+                             the KeyAndCertificateFactoryFactory custom-supplier static (certificate hardening) -->
+                        <exclude>**/CertificateHardeningGlobalStateTest.java</exclude>
+                        <!-- Sets the JVM-wide ResourceLeakDetector level so every allocation is a leak-aware wrapper -->
+                        <exclude>**/CoalescingHttpObjectAggregatorLeakAwareBufferTest.java</exclude>
+                        <!-- Registers into and resets the process-wide CassetteRegistry singleton -->
+                        <exclude>**/HttpStateCassetteEndpointTest.java</exclude>
+                        <!-- Force a fresh <clinit> of MockServerLogger / ConfigurationProperties in an
+                             isolated child-first classloader. That <clinit> reaches
+                             MockServerLogger.installDefaultJavaLoggingFormat() ->
+                             LogManager.getLogManager().readConfiguration(...), and java.util.logging's
+                             LogManager is a JVM-global singleton the child-first loader does NOT isolate:
+                             readConfiguration performs a reset() that strips EVERY handler from EVERY
+                             logger process-wide. Run beside any handler-capturing test in the parallel
+                             phase (e.g. ConfigurationValueRedactionTest / ConfigurationDTOCredentialMaskingTest,
+                             which attach a JUL handler and assert an exact capture count) this reset
+                             detaches the victim's handler mid-test, silently dropping a captured record.
+                             So these must never run concurrently with any such test. -->
+                        <exclude>**/ClassInitializationDeadlockTest.java</exclude>
+                        <exclude>**/ConfigurationPropertiesInitializationTest.java</exclude>
+                        <!-- Mutate the JVM-global default Locale (Locale.setDefault) to prove locale-insensitive
+                             number formatting; must never race other tests in the parallel phase -->
+                        <exclude>**/LlmOptimisationCsvRendererTest.java</exclude>
+                        <exclude>**/EmbeddingDeterminismTest.java</exclude>
+                        <!-- Mutates the static GenAiSpans.tracer (setTracer) global test tracer -->
+                        <exclude>**/RequestSpansTest.java</exclude>
+                        <!-- Mutates the static MockServerLogger.globalLogEventListener (setGlobalLogEventListener) -->
+                        <exclude>**/MockServerLoggerTest.java</exclude>
+                        <!-- Mutates the static KeyAndCertificateFactoryFactory.customKeyAndCertificateFactorySupplier -->
+                        <exclude>**/CustomKeyAndCertificateFactorySupplierTest.java</exclude>
+                        <!-- Asserts exact deltas on the process-wide TemplateFileContentCache disk-read counter -->
+                        <exclude>**/TemplateFileContentCacheTest.java</exclude>
+                    </excludes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>sequential-tests</id>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <phase>test</phase>
+                        <configuration>
+                            <parallel>none</parallel>
+                            <forkCount>1</forkCount>
+                            <reuseForks>true</reuseForks>
+                            <excludes combine.self="override">
+                                <exclude>**/*IntegrationTest.java</exclude>
+                            </excludes>
+                            <includes combine.self="override">
+                                <include>**/LRUCacheTest.java</include>
+                                <include>**/KeyStoreFactoryTest.java</include>
+                                <include>**/JsonSchemaValidatorCacheTest.java</include>
+                                <include>**/ConfigurationTest.java</include>
+                                <include>**/PortFactoryTest.java</include>
+                                <include>**/ProxyConfigurationTest.java</include>
+                                <include>**/ExceptionHandlingTest.java</include>
+                                <include>**/CustomJsonUnitMatcherLoaderTest.java</include>
+                                <include>**/MockServerMatcherNotificationAndMetricsTest.java</include>
+                                <include>**/MockServerEventLogTest.java</include>
+                                <include>**/MockServerEventLogEventualVerificationTest.java</include>
+                                <include>**/MockServerEventLogVerifyByDispositionTest.java</include>
+                                <include>**/MockServerEventLogEvictionSignalTest.java</include>
+                                <include>**/HttpStateTest.java</include>
+                                <include>**/HttpStateAuditTest.java</include>
+                                <include>**/HttpStateConfigurationUpdateTest.java</include>
+                                <include>**/HttpStateAuthorizationTest.java</include>
+                                <include>**/HttpStateAuditEndpointTest.java</include>
+                                <include>**/FileWatcherTest.java</include>
+                                <include>**/ExpectationFileWatcherTest.java</include>
+                                <include>**/ControlPlaneAuthenticationRouteDenialTest.java</include>
+                                <include>**/WasmRuntimeExecutionBudgetTest.java</include>
+                                <include>**/WasmRuntimeConfigurationRouteTest.java</include>
+                                <include>**/MutualAuthenticationRuntimeReconfigurationTest.java</include>
+                                <include>**/NettySslContextFactoryGlobalStateTest.java</include>
+                                <include>**/ServerSslContextConcurrentUpdateGlobalStateTest.java</include>
+                                <include>**/OtelMetricsExporterTest.java</include>
+                                <include>**/TimeServiceTest.java</include>
+                                <include>**/TimeToLiveTest.java</include>
+                                <include>**/ExpectationTest.java</include>
+                                <include>**/HttpActionHandlerChaosTest.java</include>
+                                <include>**/HttpActionHandlerRateLimitTest.java</include>
+                                <include>**/RateLimitRegistryTest.java</include>
+                                <include>**/HttpActionHandlerForwardChaosTest.java</include>
+                                <include>**/HttpActionHandlerRecoverAfterTest.java</include>
+                                <include>**/HttpForwardClassCallbackActionHandlerTest.java</include>
+                                <include>**/RecoveryAttemptRegistryTest.java</include>
+                                <include>**/ServiceChaosRegistryTest.java</include>
+                                <include>**/TcpChaosRegistryTest.java</include>
+                                <include>**/MetricsTest.java</include>
+                                <include>**/MetricsHandlerTest.java</include>
+                                <include>**/MetricsScrapeGoldenTest.java</include>
+                                <include>**/HttpRequestsPropertiesMatcherTest.java</include>
+                                <include>**/HttpRequestPropertiesMatcherLogTest.java</include>
+                                <!-- XPath-in-template tests: sequential to avoid flaky timeout under contention -->
+                                <include>**/MustacheTemplateEngineTest.java</include>
+                                <include>**/VelocityTemplateEngineTest.java</include>
+                                <include>**/StreamTemplateRendererTest.java</include>
+                                <include>**/CoreMiscConfigurationTest.java</include>
+                                <include>**/VelocityScenarioStateTemplateTest.java</include>
+                                <include>**/JavaScriptScenarioStateTemplateTest.java</include>
+                                <include>**/MustacheScenarioStateTemplateTest.java</include>
+                                <include>**/GrpcStreamMessageScenarioTemplateTest.java</include>
+                                <include>**/CaptureProcessorTest.java</include>
+                                <include>**/AbandonedHttpStateIsCollectedTest.java</include>
+                                <include>**/HttpStateFailedConstructionTest.java</include>
+                                <include>**/HttpStateRequestSenderTest.java</include>
+                                <include>**/OidcProviderGeneratorTest.java</include>
+                                <include>**/OidcTokenCallbackTest.java</include>
+                                <include>**/OidcIntrospectionCallbackTest.java</include>
+                                <include>**/OidcDiscoveryCallbackTest.java</include>
+                                <include>**/OidcUserinfoCallbackTest.java</include>
+                                <include>**/SamlProviderGeneratorTest.java</include>
+                                <include>**/ScimProviderGeneratorTest.java</include>
+                                <include>**/ScimResourceStoreTest.java</include>
+                                <include>**/ScimConcurrentUpdateTest.java</include>
+                                <include>**/ExampleBuilderRealisticValuesTest.java</include>
+                                <include>**/ExampleBuilderConfigurationInstanceTest.java</include>
+                                <include>**/HttpActionHandlerGraphQLChaosTest.java</include>
+                                <include>**/ChaosAutoHaltMonitorTest.java</include>
+                                <include>**/PreemptionSimulatorTest.java</include>
+                                <include>**/LlmCostBudgetMonitorTest.java</include>
+                                <include>**/ConfigurationInstanceEnforcementTest.java</include>
+                                <include>**/MatchingLimitsInstanceConfigurationTest.java</include>
+                                <include>**/MatchingTimeoutInlineSafeTest.java</include>
+                                <include>**/LlmMetricsTest.java</include>
+                                <include>**/PerExpectationMetricsTest.java</include>
+                                <include>**/LogEntryRedactionTest.java</include>
+                                <include>**/LogEntryRedactionSurfacesTest.java</include>
+                                <include>**/RecordedRequestsFileSystemPersistenceTest.java</include>
+                                <include>**/LlmBackendResolverTest.java</include>
+                                <include>**/LlmProviderSnifferTest.java</include>
+                                <include>**/ForwardPathGenAiSpansTest.java</include>
+                                <include>**/GenAiSpanExporterTest.java</include>
+                                <include>**/BreakpointConfigurationTest.java</include>
+                                <include>**/HttpActionHandlerBreakpointTest.java</include>
+                                <include>**/BreakpointMatcherRegistryTest.java</include>
+                                <include>**/BreakpointMatcherEndpointTest.java</include>
+                                <include>**/BreakpointCallbackDispatcherTest.java</include>
+                                <include>**/StreamFrameCallbackDispatcherTest.java</include>
+                                <include>**/StreamFrameBreakpointRegistryTest.java</include>
+                                <include>**/InboundBreakpointTest.java</include>
+                                <include>**/MockStreamBreakpointTest.java</include>
+                                <include>**/ChaosExperimentOrchestratorTest.java</include>
+                                <include>**/HttpStateChaosProfileEndpointTest.java</include>
+                                <include>**/SloSampleStoreTest.java</include>
+                                <include>**/SloEvaluatorTest.java</include>
+                                <include>**/HttpStateVerifySloEndpointTest.java</include>
+                                <include>**/LoadScenarioOrchestratorTest.java</include>
+                                <include>**/LoadMetricsTest.java</include>
+                                <include>**/HttpStateLoadScenarioEndpointTest.java</include>
+                                <include>**/DriftAlertNotifierTest.java</include>
+                                <include>**/DriftAlertSeverityThresholdTest.java</include>
+                                <include>**/DriftPerformanceThresholdTest.java</include>
+                                <include>**/HttpActionHandlerDriftDetectionTest.java</include>
+                                <include>**/DriftEndToEndAssemblyTest.java</include>
+                                <include>**/MaxLlmConversationBodySizeTest.java</include>
+                                <include>**/WatchInitializationJsonPollPeriodMillisTest.java</include>
+                                <include>**/InboundConnectionConfigurationTest.java</include>
+                                <include>**/BodySizeLimitConfigurationTest.java</include>
+                                <include>**/ResponseWriteStallTimeoutConfigurationTest.java</include>
+                                <include>**/SslCertificateLeafValidityInDaysTest.java</include>
+                                <include>**/SlowRequestConfigurationTest.java</include>
+                                <include>**/HttpActionHandlerLlmCostBudgetTest.java</include>
+                                <include>**/HttpActionHandlerStreamedLlmUsageTest.java</include>
+                                <include>**/GrpcChaosRegistryTest.java</include>
+                                <include>**/ValidationProxyTest.java</include>
+                                <include>**/HttpLlmResponseActionHandlerTest.java</include>
+                                <include>**/HttpLlmResponseActionHandlerChaosTest.java</include>
+                                <include>**/HttpActionHandlerLlmEnforcementTest.java</include>
+                                <include>**/DnsIntentRegistryTest.java</include>
+                                <include>**/WasmRuntimeTest.java</include>
+                                <include>**/WasmRuntimeRealModuleTest.java</include>
+                                <include>**/WasmRuntimeModuleCacheTest.java</include>
+                                <include>**/WasmRuntimeShapeAbiTest.java</include>
+                                <include>**/WasmResponseShaperTest.java</include>
+                                <include>**/HttpResponseActionHandlerWasmShapeTest.java</include>
+                                <include>**/XPathEvaluatorTest.java</include>
+                                <include>**/WasmBodyMatcherTest.java</include>
+                                <include>**/GraphQLMatcherTest.java</include>
+                                <include>**/JsonRpcMatcherTest.java</include>
+                                <include>**/LlmConversationMatcherTest.java</include>
+                                <include>**/JsonStringMatcherTest.java</include>
+                                <include>**/RegexStringMatcherTest.java</include>
+                                <include>**/InetAddressValidatorTest.java</include>
+                                <include>**/JsonSchemaValidatorRemoteRefTest.java</include>
+                                <include>**/HttpStateReadinessTest.java</include>
+                                <include>**/HttpStateClusteredListenerWiringTest.java</include>
+                                <include>**/ConfigurationPropertiesEffectiveConfigGlobalStateTest.java</include>
+                                <include>**/LlmOptimisationReportServiceTest.java</include>
+                                <include>**/LocaleInsensitiveNumberFormattingTest.java</include>
+                                <include>**/HttpForwardActionResilienceTest.java</include>
+                                <include>**/OtelEndpointConfigurationTest.java</include>
+                                <include>**/PrometheusRemoteWriteExporterTest.java</include>
+                                <include>**/PrometheusRemoteWriteProtocolVersionConfigurationTest.java</include>
+                                <include>**/BinaryMessageFramingConfigurationTest.java</include>
+                                <include>**/DriftDetectionConfigTest.java</include>
+                                <include>**/BCKeyAndCertificateFactoryLazyProviderTest.java</include>
+                                <include>**/OpenAiResponsesStateTest.java</include>
+                                <include>**/LlmDatasetExporterTest.java</include>
+                                <include>**/GrpcHealthRegistryTest.java</include>
+                                <include>**/CertificateHardeningGlobalStateTest.java</include>
+                                <include>**/CoalescingHttpObjectAggregatorLeakAwareBufferTest.java</include>
+                                <include>**/HttpStateCassetteEndpointTest.java</include>
+                                <!-- Fresh <clinit> in an isolated classloader performs a JVM-global
+                                     LogManager reset (readConfiguration) that strips handlers from every
+                                     logger, corrupting handler-capturing tests run beside them. -->
+                                <include>**/ClassInitializationDeadlockTest.java</include>
+                                <include>**/ConfigurationPropertiesInitializationTest.java</include>
+                                <!-- Mutate the JVM-global default Locale (Locale.setDefault) to prove locale-insensitive
+                                     number formatting; must never race other tests in the parallel phase -->
+                                <include>**/LlmOptimisationCsvRendererTest.java</include>
+                                <include>**/EmbeddingDeterminismTest.java</include>
+                                <!-- Mutates the static GenAiSpans.tracer (setTracer) global test tracer -->
+                                <include>**/RequestSpansTest.java</include>
+                                <!-- Mutates the static MockServerLogger.globalLogEventListener (setGlobalLogEventListener) -->
+                                <include>**/MockServerLoggerTest.java</include>
+                                <!-- Mutates the static KeyAndCertificateFactoryFactory.customKeyAndCertificateFactorySupplier -->
+                                <include>**/CustomKeyAndCertificateFactorySupplierTest.java</include>
+                                <include>**/TemplateFileContentCacheTest.java</include>
+                            </includes>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- jacoco:check minimum set ~3 points below the measured unit-test floor of 0.6858 (M6 ratchet, 2026-05-28). Tighter threshold catches genuine coverage regressions without flaking on small natural variation.
+                 BRANCH bundle minimum (0.40) ensures branch coverage doesn't regress. -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>check</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <rule>
+                                    <element>BUNDLE</element>
+                                    <limits>
+                                        <limit>
+                                            <counter>LINE</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>0.65</minimum>
+                                        </limit>
+                                        <limit>
+                                            <counter>BRANCH</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>0.40</minimum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                                <!-- NOTE: a per-CLASS LINE floor was tried but is not enforceable on this
+                                     codebase — ~80 existing classes have <30% unit-line coverage (many 0%).
+                                     Enforcing "new/changed code must be covered" needs a diff-coverage gate,
+                                     not a JaCoCo per-class rule; tracked as a follow-up. BUNDLE LINE+BRANCH kept. -->
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- produce a test-jar so sibling modules (e.g. mockserver-blob-s3/gcs/azure)
+                 can reuse the shared BlobStoreContract without duplicating it -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>test-jar</goal>
+                        </goals>
+                        <configuration>
+                            <includes>
+                                <include>**/state/contract/**</include>
+                            </includes>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!--
+            In a linked git worktree .git is a file, and the plugin resolves it to the shared
+            repository, so JGit would report the main checkout's HEAD. Run native git from this
+            module's directory instead, which honours the worktree. Clones (CI, release) keep JGit:
+            native git can fail its ownership check on a checkout bind-mounted into a container.
+        -->
+        <profile>
+            <id>git-worktree-commit-hash</id>
+            <activation>
+                <file>
+                    <missing>${basedir}/../../.git/HEAD</missing>
+                </file>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>io.github.git-commit-id</groupId>
+                        <artifactId>git-commit-id-maven-plugin</artifactId>
+                        <configuration>
+                            <useNativeGit>true</useNativeGit>
+                            <dotGitDirectory>${project.basedir}</dotGitDirectory>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!--
+            No .git at all (e.g. a source tarball) also activates the profile above, and native git
+            then fails the build, so skip the plugin: the hash stays empty as it did with JGit.
+        -->
+        <profile>
+            <id>no-git-commit-hash</id>
+            <activation>
+                <file>
+                    <missing>${basedir}/../../.git</missing>
+                </file>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>io.github.git-commit-id</groupId>
+                        <artifactId>git-commit-id-maven-plugin</artifactId>
+                        <configuration>
+                            <skip>true</skip>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
+</project>

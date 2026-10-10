@@ -1,0 +1,2564 @@
+# MockServer
+
+> MockServer is an open-source HTTP(S) mock server, recording proxy, and **MCP (Model Context Protocol) server for AI coding assistants**. It enables easy mocking of any system you integrate with via HTTP or HTTPS, supports request matching with JSON, XPath, regex, and JSON Schema, acts as a recording proxy for introspection of traffic between services, and exposes a built-in MCP endpoint at `/mockserver/mcp` so AI assistants like Claude Code, Cursor, Windsurf, Cline, and OpenCode can create expectations, verify requests, retrieve recorded traffic, and debug mismatches through natural language. Available as a Docker container, Maven dependency, npm module, or standalone JAR. Clients are available in Java, JavaScript/TypeScript, Python, Ruby, Go, .NET, Rust, and PHP. Licensed under Apache 2.0 — AI training, retrieval, and citation are explicitly welcomed; see https://www.mock-server.com/ai.txt. Website: https://www.mock-server.com | GitHub: https://github.com/mock-server/mockserver-monorepo
+
+## Quick Start
+
+Start MockServer with Docker:
+
+    docker run -d --rm -p 1080:1080 mockserver/mockserver
+
+Create a simple expectation:
+
+    curl -X PUT http://localhost:1080/mockserver/expectation -d '{
+      "httpRequest": {
+        "method": "GET",
+        "path": "/api/users"
+      },
+      "httpResponse": {
+        "statusCode": 200,
+        "headers": {"Content-Type": ["application/json"]},
+        "body": {"type": "JSON", "json": "[{\"id\": 1, \"name\": \"Alice\"}]"}
+      }
+    }'
+
+Test it:
+
+    curl http://localhost:1080/api/users
+
+Verify the request was received:
+
+    curl -X PUT http://localhost:1080/mockserver/verify -d '{
+      "httpRequest": {"method": "GET", "path": "/api/users"},
+      "times": {"atLeast": 1}
+    }'
+
+Reset all state when done:
+
+    curl -X PUT http://localhost:1080/mockserver/reset
+
+## Core Concepts
+
+MockServer works through **expectations**. Each expectation has:
+- **httpRequest** (matcher): defines which incoming requests to match
+- **action** (one of): httpResponse, httpForward, httpError, httpOverrideForwardedRequest, httpResponseTemplate, httpForwardTemplate, httpResponseClassCallback, httpForwardClassCallback, httpResponseObjectCallback, httpForwardObjectCallback
+- **times** (optional): how many times the expectation can be matched (default: unlimited)
+- **timeToLive** (optional): how long the expectation remains active
+- **id** (optional): unique identifier for updates; if an expectation with the same id exists, it is replaced
+- **priority** (optional): integer; higher-priority expectations are matched first
+
+When a request arrives, MockServer evaluates expectations in priority order (highest first), then insertion order. The first matching expectation's action is executed. If no match is found and proxy mode is enabled, the request is forwarded.
+
+## REST API Reference
+
+Most control plane endpoints use the PUT method. Some (e.g. clock status, configuration, OpenAPI spec) also support GET. The base path is `/mockserver`.
+
+### PUT /mockserver/expectation
+
+Create or update expectations. If the body contains an expectation with an `id` that matches an existing expectation, that expectation is replaced (upsert).
+
+Request body: a single Expectation object or an array of Expectation objects.
+
+Response: 201 Created with JSON array of upserted expectations.
+
+Example - simple response:
+
+    PUT /mockserver/expectation
+    Content-Type: application/json
+
+    {
+      "httpRequest": {
+        "method": "POST",
+        "path": "/api/login"
+      },
+      "httpResponse": {
+        "statusCode": 200,
+        "body": "{\"token\": \"abc123\"}"
+      },
+      "times": {"remainingTimes": 1, "unlimited": false}
+    }
+
+Example - with id and priority for upsert:
+
+    {
+      "id": "login-mock",
+      "priority": 10,
+      "httpRequest": {"path": "/api/login"},
+      "httpResponse": {"statusCode": 200, "body": "{\"token\": \"xyz\"}"}
+    }
+
+Example - unlimited times with TTL:
+
+    {
+      "httpRequest": {"path": "/health"},
+      "httpResponse": {"statusCode": 200, "body": "OK"},
+      "times": {"unlimited": true},
+      "timeToLive": {"timeUnit": "HOURS", "timeToLive": 1, "unlimited": false}
+    }
+
+### PUT /mockserver/openapi
+
+Create expectations from an OpenAPI or Swagger specification.
+
+Request body:
+
+    {
+      "specUrlOrPayload": "https://example.com/api/openapi.yaml",
+      "operationsAndResponses": {
+        "listUsers": "200",
+        "getUser": "200",
+        "createUser": "201"
+      }
+    }
+
+The `specUrlOrPayload` field can be a URL string or an inline OpenAPI spec object. The `operationsAndResponses` field is optional; if omitted, expectations are created for all operations with their first defined response.
+
+Response: 201 Created with the generated expectations.
+
+### PUT /mockserver/clear
+
+Clear expectations and/or recorded requests that match a request matcher.
+
+Query parameter `type` (optional, default "all"):
+- `all` - clear both expectations and log (recorded requests)
+- `log` - clear only recorded request log
+- `expectations` - clear only expectations
+
+Request body (optional): a request matcher to select what to clear. If empty, clears everything.
+
+Example - clear all state matching a path:
+
+    PUT /mockserver/clear
+    Content-Type: application/json
+
+    {"path": "/api/users"}
+
+Example - clear only expectations:
+
+    PUT /mockserver/clear?type=expectations
+    Content-Type: application/json
+
+    {"path": "/api/users"}
+
+Example - clear by expectation id:
+
+    PUT /mockserver/clear
+    Content-Type: application/json
+
+    {"id": "login-mock"}
+
+Response: 200 OK.
+
+### PUT /mockserver/reset
+
+Reset all expectations, recorded requests, and logs. No request body required.
+
+Response: 200 OK.
+
+### PUT /mockserver/retrieve
+
+Retrieve recorded requests, active expectations, recorded expectations, request-response pairs, or log messages.
+
+Query parameters:
+- `type` (optional, default "requests"):
+  - `requests` - recorded requests
+  - `request_responses` - recorded request-response pairs (includes timestamp)
+  - `recorded_expectations` - expectations recorded from proxied traffic
+  - `active_expectations` - currently active expectations
+  - `logs` - log messages
+- `format` (optional, default "json"):
+  - `json` - JSON format
+  - `java` - Java code format
+  - `log_entries` - raw log entry format (for logs type)
+
+Request body (optional): a request matcher to filter results. If empty, returns all.
+
+Example - retrieve all recorded requests:
+
+    PUT /mockserver/retrieve?type=requests
+    Content-Type: application/json
+
+    {}
+
+Response (200 OK):
+
+    [
+      {
+        "method": "GET",
+        "path": "/api/users",
+        "headers": {"Host": ["localhost:1080"]},
+        "keepAlive": true,
+        "secure": false
+      }
+    ]
+
+Example - retrieve active expectations:
+
+    PUT /mockserver/retrieve?type=active_expectations
+
+Example - retrieve request-response pairs for a specific path:
+
+    PUT /mockserver/retrieve?type=request_responses
+    Content-Type: application/json
+
+    {"path": "/api/.*"}
+
+Response:
+
+    [
+      {
+        "httpRequest": {"method": "GET", "path": "/api/users"},
+        "httpResponse": {"statusCode": 200, "body": "[...]"},
+        "timestamp": "2024-01-15T10:30:00.000Z"
+      }
+    ]
+
+Example - retrieve logs:
+
+    PUT /mockserver/retrieve?type=logs
+    Content-Type: application/json
+
+    {"path": "/api/users"}
+
+### PUT /mockserver/verify
+
+Verify that a request was received a specific number of times.
+
+Request body:
+
+    {
+      "httpRequest": {
+        "method": "GET",
+        "path": "/api/users"
+      },
+      "times": {
+        "atLeast": 1,
+        "atMost": 3
+      }
+    }
+
+Either `httpRequest` or `expectationId` must be provided. The `times` field can specify `atLeast`, `atMost`, or both. If `times` is omitted, defaults to `atLeast: 1`.
+
+Optional field: `maximumNumberOfRequestToReturnInVerificationFailure` (integer) - limits how many non-matching requests are listed in the failure message.
+
+Response:
+- 202 Accepted: verification passed
+- 406 Not Acceptable: verification failed, body contains failure description in text/plain format
+
+Example - verify exact count:
+
+    {
+      "httpRequest": {"path": "/api/login"},
+      "times": {"atLeast": 2, "atMost": 2}
+    }
+
+Example - verify by expectation id:
+
+    {
+      "expectationId": {"id": "login-mock"},
+      "times": {"atLeast": 1}
+    }
+
+### PUT /mockserver/verifySequence
+
+Verify that requests were received in a specific order.
+
+Request body using httpRequests:
+
+    {
+      "httpRequests": [
+        {"path": "/api/login"},
+        {"path": "/api/users"},
+        {"path": "/api/logout"}
+      ]
+    }
+
+Or using expectation IDs:
+
+    {
+      "expectationIds": [
+        {"id": "login-mock"},
+        {"id": "users-mock"}
+      ]
+    }
+
+Optional: `maximumNumberOfRequestToReturnInVerificationFailure` (integer).
+
+Response:
+- 202 Accepted: sequence was received in specified order
+- 406 Not Acceptable: sequence was not received in order, body contains failure description
+
+### PUT /mockserver/status
+
+Returns the ports MockServer is listening on.
+
+No request body required.
+
+Response (200 OK):
+
+    {"ports": [1080]}
+
+### PUT /mockserver/stop
+
+Stop the running MockServer process (only supported on Netty version).
+
+No request body required.
+
+Response: 200 OK.
+
+### PUT /mockserver/bind
+
+Bind additional listening ports (only supported on Netty version).
+
+Request body:
+
+    {"ports": [1081, 1082]}
+
+Use `0` for dynamically allocated ports.
+
+Response (200 OK): the ports that were actually bound.
+
+### PUT /mockserver/clock
+
+Control the server clock for deterministic time-based testing. Freeze the clock at a specific instant, advance it by a duration, or reset it to real wall-clock time. The controllable clock affects response template date/time helpers (`now_iso_8601`, `now_epoch`, `now_rfc_1123`, `dates.*`) and expectation TimeToLive expiry. Event-log timestamps and JWT issuance are not affected.
+
+Request body:
+
+    {"action": "freeze", "instant": "2025-01-15T09:30:00Z"}
+    {"action": "advance", "durationMillis": 3600000}
+    {"action": "reset"}
+
+- `action` (required): one of `freeze`, `advance`, `reset`
+- `instant` (optional, freeze only): ISO-8601 instant to freeze at; omit to freeze at current time
+- `durationMillis` (required for advance): positive number of milliseconds to advance by
+
+Response (200 OK):
+
+    {"status": "freeze", "currentInstant": "2025-01-15T09:30:00Z", "currentEpochMillis": 1736933400000}
+
+Response (400 Bad Request): if action is missing, instant is malformed, or durationMillis is non-positive.
+
+### GET /mockserver/clock
+
+Returns the current server clock status.
+
+No request body required.
+
+Response (200 OK):
+
+    {"currentInstant": "2025-01-15T09:30:00Z", "currentEpochMillis": 1736933400000, "frozen": true}
+
+### Stateful Scenarios
+
+Stateful scenarios model multi-step flows where the response depends on the current state. Scenarios are created implicitly by registering expectations with `scenarioName` and `scenarioState`, or explicitly via the endpoints below. All scenario state is reset when MockServer is reset.
+
+#### GET /mockserver/scenario
+
+List all known scenarios and their current state.
+
+Response (200 OK):
+
+    {"scenarios": [{"scenarioName": "DeployFlow", "currentState": "Deploying"}]}
+
+#### GET /mockserver/scenario/{name}
+
+Get the current state of one scenario.
+
+Response (200 OK):
+
+    {"scenarioName": "DeployFlow", "currentState": "Deploying"}
+
+#### PUT /mockserver/scenario/{name}
+
+Set a scenario's state immediately. Optionally schedule a timed auto-transition to `nextState` after `transitionAfterMs` milliseconds (the transition only fires if the scenario is still in the set state when the timer expires; scheduling a new transition cancels any pending one).
+
+Request body (set state immediately):
+
+    {"state": "Deploying"}
+
+Request body (with timed auto-transition):
+
+    {"state": "Deploying", "transitionAfterMs": 5000, "nextState": "Deployed"}
+
+Response (200 OK):
+
+    {"scenarioName": "DeployFlow", "currentState": "Deploying", "nextState": "Deployed", "transitionAfterMs": 5000}
+
+#### PUT /mockserver/scenario/{name}/trigger
+
+Externally advance a scenario to a specific state (e.g. from a test harness or CI pipeline).
+
+Request body:
+
+    {"newState": "Failed"}
+
+Response (200 OK):
+
+    {"scenarioName": "DeployFlow", "currentState": "Failed"}
+
+## Request Matching
+
+### Match Fields
+
+All fields are optional. If a field is omitted, it matches any value.
+
+**method** - HTTP method. Can be a plain string or a matcher object:
+
+    "method": "GET"
+    "method": {"value": "P.*", "not": false}
+
+**path** - URL path. Supports exact match, regex, or JSON Schema:
+
+    "path": "/api/users"
+    "path": "/api/users/[0-9]+"
+
+**pathParameters** - path parameters (for parameterized paths):
+
+    "pathParameters": {"userId": ["123"]}
+
+**queryStringParameters** - URL query parameters:
+
+    "queryStringParameters": {"page": ["1"], "limit": ["10"]}
+
+Or using the array format:
+
+    "queryStringParameters": [
+      {"name": "page", "values": ["1"]},
+      {"name": "limit", "values": ["10"]}
+    ]
+
+**headers** - HTTP request headers:
+
+    "headers": {"Authorization": ["Bearer .*"], "Content-Type": ["application/json"]}
+
+**cookies** - HTTP cookies:
+
+    "cookies": {"session": "abc123"}
+
+Or array format:
+
+    "cookies": [{"name": "session", "value": "abc123"}]
+
+**body** - request body matcher (see Body Matchers section)
+
+**secure** - boolean, if true matches only HTTPS requests
+
+**keepAlive** - boolean, matches connection keep-alive setting
+
+**protocol** - matches HTTP protocol version: `HTTP_1_1` or `HTTP_2`
+
+**socketAddress** - matches the remote socket address:
+
+    "socketAddress": {"host": "example.com", "port": 443, "scheme": "HTTPS"}
+
+### Key Match Style
+
+For queryStringParameters and headers, the `keyMatchStyle` controls matching behavior:
+- `SUB_SET` (default): the request must contain at least the specified parameters (may have others)
+- `MATCHING_KEY`: the request must contain exactly the specified parameters and no others
+
+Example:
+
+    "queryStringParameters": {
+      "keyMatchStyle": "MATCHING_KEY",
+      "page": ["1"]
+    }
+
+### String Matchers
+
+String fields (method, path, header values, query parameter values, cookie values) support several matcher types:
+
+Plain string (exact match):
+
+    "path": "/api/users"
+
+Regex (Java regex syntax, automatically detected when string contains regex characters):
+
+    "path": "/api/users/[0-9]+"
+
+Negation (matches when the value does NOT match):
+
+    "path": {"not": true, "value": "/api/admin.*"}
+
+Optional fields (field may or may not be present):
+
+    "headers": {"Authorization": {"optional": true, "value": "Bearer .*"}}
+
+JSON Schema for string values:
+
+    "path": {"schema": {"type": "string", "pattern": "^/api/.*"}}
+
+### Body Matchers
+
+The body field in httpRequest supports multiple matcher types:
+
+**Plain string** (substring match):
+
+    "body": "hello"
+
+**STRING type** (exact or substring match):
+
+    "body": {"type": "STRING", "string": "hello world", "subString": true}
+
+With content type:
+
+    "body": {"type": "STRING", "string": "hello", "contentType": "text/plain; charset=utf-8"}
+
+**REGEX type**:
+
+    "body": {"type": "REGEX", "regex": ".*user.*name.*"}
+
+**JSON type** (partial or strict match):
+
+    "body": {
+      "type": "JSON",
+      "json": "{\"name\": \"Alice\"}",
+      "matchType": "ONLY_MATCHING_FIELDS"
+    }
+
+The `matchType` can be:
+- `ONLY_MATCHING_FIELDS` (default): the request body must contain at least the specified fields
+- `STRICT`: the request body must match exactly (same fields, same order for arrays)
+
+**JSON shorthand** (object body without type field is treated as JSON with ONLY_MATCHING_FIELDS):
+
+    "body": {"name": "Alice", "age": 30}
+
+**JSON_SCHEMA type**:
+
+    "body": {
+      "type": "JSON_SCHEMA",
+      "jsonSchema": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {"type": "string"},
+          "age": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+
+**JSON_PATH type**:
+
+    "body": {"type": "JSON_PATH", "jsonPath": "$.users[?(@.name == 'Alice')]"}
+
+**XML type**:
+
+    "body": {"type": "XML", "xml": "<user><name>Alice</name></user>"}
+
+**XML_SCHEMA type**:
+
+    "body": {
+      "type": "XML_SCHEMA",
+      "xmlSchema": "<?xml version=\"1.0\"?>..."
+    }
+
+**XPATH type**:
+
+    "body": {"type": "XPATH", "xpath": "/user/name[text()='Alice']"}
+
+**BINARY type** (base64 encoded):
+
+    "body": {"type": "BINARY", "base64Bytes": "aGVsbG8="}
+
+**PARAMETERS type** (for form-encoded bodies):
+
+    "body": {
+      "type": "PARAMETERS",
+      "parameters": {"username": ["alice"], "password": ["secret"]}
+    }
+
+**Negation** works with all body types:
+
+    "body": {"not": true, "type": "JSON_PATH", "jsonPath": "$.error"}
+
+### OpenAPI Request Matcher
+
+Instead of specifying individual fields, match against an OpenAPI operation:
+
+    "httpRequest": {
+      "specUrlOrPayload": "https://example.com/openapi.yaml",
+      "operationId": "getUser"
+    }
+
+## Response Actions
+
+### Literal Response (httpResponse)
+
+Return a fixed response:
+
+    {
+      "httpRequest": {"path": "/api/hello"},
+      "httpResponse": {
+        "statusCode": 200,
+        "reasonPhrase": "OK",
+        "headers": {
+          "Content-Type": ["application/json"],
+          "Cache-Control": ["no-cache"]
+        },
+        "cookies": {"session": "abc123"},
+        "body": "{\"message\": \"hello\"}",
+        "delay": {"timeUnit": "MILLISECONDS", "value": 500},
+        "connectionOptions": {
+          "closeSocket": false,
+          "keepAliveOverride": true,
+          "suppressContentLengthHeader": false
+        }
+      }
+    }
+
+Response body types are similar to request body types. Common formats:
+
+Plain string:
+
+    "body": "hello world"
+
+JSON (explicit type):
+
+    "body": {"type": "JSON", "json": "{\"key\": \"value\"}"}
+
+JSON (shorthand - objects without type field are serialized as JSON):
+
+    "body": {"key": "value"}
+
+XML:
+
+    "body": {"type": "XML", "xml": "<response><status>ok</status></response>"}
+
+Binary:
+
+    "body": {"type": "BINARY", "base64Bytes": "aGVsbG8=", "contentType": "application/octet-stream"}
+
+Connection options:
+- `closeSocket` (boolean): close socket after response
+- `closeSocketDelay` (Delay): delay before closing socket
+- `keepAliveOverride` (boolean): override connection keep-alive
+- `suppressContentLengthHeader` (boolean): don't send content-length
+- `contentLengthHeaderOverride` (integer): override content-length value
+- `suppressConnectionHeader` (boolean): don't send connection header
+- `chunkSize` (integer): chunk response body
+
+### Forward (httpForward)
+
+Forward the request to another server:
+
+    {
+      "httpRequest": {"path": "/api/.*"},
+      "httpForward": {
+        "host": "backend.example.com",
+        "port": 8080,
+        "scheme": "HTTP",
+        "delay": {"timeUnit": "MILLISECONDS", "value": 100}
+      }
+    }
+
+### Override Forward (httpOverrideForwardedRequest)
+
+Forward with modifications to the request and/or response:
+
+    {
+      "httpRequest": {"path": "/api/users"},
+      "httpOverrideForwardedRequest": {
+        "requestOverride": {
+          "headers": {"X-Forwarded-For": ["10.0.0.1"]}
+        },
+        "requestModifier": {
+          "path": {"regex": "^/api", "substitution": "/v2/api"},
+          "headers": {
+            "add": {"X-Request-Id": ["abc123"]},
+            "remove": ["Cookie"]
+          },
+          "queryStringParameters": {
+            "add": {"source": ["proxy"]},
+            "replace": {"version": ["2"]},
+            "remove": ["debug"]
+          },
+          "cookies": {
+            "add": {"tracking": "enabled"},
+            "remove": ["session"]
+          }
+        },
+        "responseOverride": {
+          "headers": {"X-Proxy": ["MockServer"]}
+        },
+        "responseModifier": {
+          "headers": {
+            "add": {"X-Served-By": ["mockserver"]},
+            "remove": ["Server"]
+          },
+          "cookies": {
+            "add": {"proxy-session": "xyz"},
+            "remove": ["internal-cookie"]
+          }
+        },
+        "delay": {"timeUnit": "MILLISECONDS", "value": 50}
+      }
+    }
+
+### Response Template (httpResponseTemplate)
+
+Generate dynamic responses using templates. Template types: VELOCITY, JAVASCRIPT, MUSTACHE.
+
+Velocity example:
+
+    {
+      "httpRequest": {"path": "/api/users/{userId}"},
+      "httpResponseTemplate": {
+        "templateType": "VELOCITY",
+        "template": "{\"statusCode\":200,\"body\":\"{\\\"id\\\": \\\"$!request.pathParameters['userId'][0]\\\", \\\"name\\\": \\\"User $!request.pathParameters['userId'][0]\\\"}\"}",
+        "delay": {"timeUnit": "MILLISECONDS", "value": 0}
+      }
+    }
+
+JavaScript example:
+
+    {
+      "httpRequest": {"path": "/api/echo"},
+      "httpResponseTemplate": {
+        "templateType": "JAVASCRIPT",
+        "template": "return { statusCode: 200, body: JSON.stringify(request) };"
+      }
+    }
+
+Mustache example:
+
+    {
+      "httpRequest": {"path": "/api/greeting"},
+      "httpResponseTemplate": {
+        "templateType": "MUSTACHE",
+        "template": "{\"statusCode\": 200, \"body\": \"Hello {{request.queryStringParameters.name.0}}\"}"
+      }
+    }
+
+Available template variables: `request` (the incoming HttpRequest object), with sub-fields: method, path, pathParameters, queryStringParameters, headers, cookies, body, secure, keepAlive.
+
+### Error (httpError)
+
+Return a simulated error (drop connection, send random bytes):
+
+    {
+      "httpRequest": {"path": "/api/error"},
+      "httpError": {
+        "dropConnection": true,
+        "responseBytes": "cmFuZG9tIGJ5dGVz"
+      }
+    }
+
+### Class Callback (httpResponseClassCallback / httpForwardClassCallback)
+
+Invoke a Java class on the server classpath:
+
+    {
+      "httpRequest": {"path": "/api/callback"},
+      "httpResponseClassCallback": {
+        "callbackClass": "com.example.MyCallback"
+      }
+    }
+
+The class must implement `org.mockserver.mock.action.ExpectationResponseCallback` (for response) or `ExpectationForwardCallback` (for forward).
+
+### Object Callback (httpResponseObjectCallback / httpForwardObjectCallback)
+
+Invoke a callback via WebSocket (used by client libraries for closures/lambdas):
+
+    {
+      "httpRequest": {"path": "/api/dynamic"},
+      "httpResponseObjectCallback": {
+        "clientId": "websocket-client-id",
+        "responseCallback": true
+      }
+    }
+
+This is typically not created manually but through client libraries (Java, JavaScript, Python, Ruby, Go, .NET, Rust, PHP) that register callback functions over WebSocket connections.
+
+## Times and TimeToLive
+
+### Times
+
+Controls how many times an expectation can be matched:
+
+    "times": {"remainingTimes": 5, "unlimited": false}
+
+Unlimited (default):
+
+    "times": {"unlimited": true}
+
+Once:
+
+    "times": {"remainingTimes": 1, "unlimited": false}
+
+### TimeToLive
+
+Controls how long an expectation remains active:
+
+    "timeToLive": {
+      "timeUnit": "MINUTES",
+      "timeToLive": 30,
+      "unlimited": false
+    }
+
+Supported timeUnit values: DAYS, HOURS, MINUTES, SECONDS, MILLISECONDS, MICROSECONDS, NANOSECONDS.
+
+Unlimited (default):
+
+    "timeToLive": {"unlimited": true}
+
+## Configuration Properties
+
+Properties can be set via (in order of precedence):
+1. Java code (highest)
+2. System property (-Dmockserver.propertyName=value)
+3. Property file (mockserver.properties)
+4. Environment variable (MOCKSERVER_PROPERTY_NAME) (lowest)
+
+### Memory Configuration
+
+**maxExpectations**
+Maximum expectations held in the in-memory ring buffer. Oldest/lowest-priority expectations are overwritten when limit is reached.
+- Default: min(JVM heap size KB / 10, 15000) — automatically calculated from the JVM heap size (-Xmx), same for every instance in the JVM
+- System property: mockserver.maxExpectations
+- Environment variable: MOCKSERVER_MAX_EXPECTATIONS
+- Each expectation typically uses 4-10 KB of heap
+
+**maxLogEntries**
+Maximum log entries in the in-memory ring buffer. Includes recorded requests, match failures, and other log entries.
+- Default: min(JVM heap size KB / 8, 250000) — automatically calculated from the JVM heap size (-Xmx), same for every instance in the JVM
+- System property: mockserver.maxLogEntries
+- Environment variable: MOCKSERVER_MAX_LOG_ENTRIES
+- Each HTTP request generates 2-3 log entries; each entry uses 4-10 KB
+
+**maxWebSocketExpectations**
+Maximum remote method callbacks (web sockets) registered for expectations.
+- Default: 1500
+- Environment variable: MOCKSERVER_MAX_WEB_SOCKET_EXPECTATIONS
+
+**outputMemoryUsageCsv**
+Output JVM memory usage metrics to CSV file periodically.
+- Default: false
+- Environment variable: MOCKSERVER_OUTPUT_MEMORY_USAGE_CSV
+
+**memoryUsageCsvDirectory**
+Directory to output memory usage CSV files.
+- Default: "."
+- Environment variable: MOCKSERVER_MEMORY_USAGE_CSV_DIRECTORY
+
+### Logging Configuration
+
+**logLevel**
+Minimum log level to record and output. Values: TRACE, DEBUG, INFO, WARN, ERROR, OFF
+- Default: INFO
+- System property: mockserver.logLevel
+- Environment variable: MOCKSERVER_LOG_LEVEL
+- Lower levels capture more entries, particularly TRACE
+
+**disableSystemOut**
+Disable logging to standard output.
+- Default: false
+- Environment variable: MOCKSERVER_DISABLE_SYSTEM_OUT
+
+**disableLogging**
+Disable all logging and processing of log events.
+- Default: false
+- Environment variable: MOCKSERVER_DISABLE_LOGGING
+
+**logLevelOverrides**
+Override the log level for specific categories of log events or individual log message types.
+Keys can be category group names (MATCHING, REQUEST_LIFECYCLE, EXPECTATION_MANAGEMENT, VERIFICATION, SERVER, GENERAL) or individual LogMessageType names (e.g., EXPECTATION_NOT_MATCHED).
+Values are SLF4J log level names (TRACE, DEBUG, INFO, WARN, ERROR).
+Resolution order: individual type override > category group override > global logLevel.
+Only affects stdout/SLF4J output and dashboard UI; event log storage for verification is unaffected.
+Note: overrides can only suppress events already captured at the global logLevel. They cannot increase verbosity beyond what the global logLevel generates. Set the global logLevel low enough first, then use overrides to suppress noisy categories.
+- Default: {} (empty, global logLevel applies to all)
+- System property: mockserver.logLevelOverrides
+- Environment variable: MOCKSERVER_LOG_LEVEL_OVERRIDES
+- Format: JSON map, e.g., {"MATCHING":"WARN","EXPECTATION_MATCHED":"INFO"}
+- Category groups:
+  - MATCHING: EXPECTATION_MATCHED, EXPECTATION_NOT_MATCHED, NO_MATCH_RESPONSE
+  - REQUEST_LIFECYCLE: RECEIVED_REQUEST, FORWARDED_REQUEST, EXPECTATION_RESPONSE, TEMPLATE_GENERATED
+  - EXPECTATION_MANAGEMENT: CREATED_EXPECTATION, UPDATED_EXPECTATION, REMOVED_EXPECTATION, CLEARED
+  - VERIFICATION: VERIFICATION, VERIFICATION_FAILED, VERIFICATION_PASSED, RETRIEVED
+  - SERVER: SERVER_CONFIGURATION, AUTHENTICATION_FAILED, OPENAPI_RESPONSE_VALIDATION_FAILED
+  - GENERAL: TRACE, DEBUG, INFO, WARN, ERROR, EXCEPTION
+
+**detailedMatchFailures**
+Include detailed reasons why each non-matching field did not match in log entries.
+- Default: true
+- Environment variable: MOCKSERVER_DETAILED_MATCH_FAILURES
+
+**metricsEnabled**
+Enable recording of metrics exposed via /mockserver/metrics in Prometheus format.
+- Default: false
+- Environment variable: MOCKSERVER_METRICS_ENABLED
+
+### Scalability Configuration
+
+**nioEventLoopThreadCount**
+Number of threads for the main event loop (reading requests, writing control plane responses, managing expectations).
+- Default: 5
+- Environment variable: MOCKSERVER_NIO_EVENT_LOOP_THREAD_COUNT
+- Read at startup only
+
+**actionHandlerThreadCount**
+Number of threads for the action handler pool (serializing responses, handling delays, executing callbacks).
+- Default: max(5, available processors)
+- Environment variable: MOCKSERVER_ACTION_HANDLER_THREAD_COUNT
+
+**maxPendingDelayedResponses**
+Maximum matched requests waiting for a configured delay (response/action delay, global delay, chaos latency) at once. Further ones are answered immediately with 503 Service Unavailable (the match still counts towards the expectation's times) and counted by the mock_server_overload_rejections metric when metrics are enabled. Delayed side actions (after-actions, secondary actions, step side effects) have their own allowance of the same size and are skipped when it is full; a forwarded response waiting for chaos latency is sent without the latency. Delayed bidirectional WebSocket replies have a third allowance of the same size: a reply set is sent whole or refused whole, closing the WebSocket with 1013 (Try Again Later).
+- Default: max heap / 64 KB, capped at 100000 (0 = unbounded)
+- Environment variable: MOCKSERVER_MAX_PENDING_DELAYED_RESPONSES
+
+**maxQueuedTemplateActions**
+Maximum response/forward template renders queued for a template thread. Further templated requests are answered immediately with 503 Service Unavailable.
+- Default: max heap / 64 KB, capped at 100000 (0 = unbounded)
+- Environment variable: MOCKSERVER_MAX_QUEUED_TEMPLATE_ACTIONS
+
+**clientNioEventLoopThreadCount**
+Number of threads for client event loop when calling downstream.
+- Default: 5
+- Environment variable: MOCKSERVER_CLIENT_NIO_EVENT_LOOP_THREAD_COUNT
+
+**webSocketClientEventLoopThreadCount**
+Number of threads per WebSocket callback client.
+- Default: 5
+- Environment variable: MOCKSERVER_WEB_SOCKET_CLIENT_EVENT_LOOP_THREAD_COUNT
+
+**maxFutureTimeout**
+Maximum wait time (ms) for any future (e.g., WebSocket callback responses).
+- Default: 90000
+- Environment variable: MOCKSERVER_MAX_FUTURE_TIMEOUT
+
+**matchersFailFast**
+If true, request matchers fail on the first non-matching field. If false, all fields are compared.
+- Default: true
+- Environment variable: MOCKSERVER_MATCHERS_FAIL_FAST
+
+### Socket Configuration
+
+**maxSocketTimeout**
+Maximum response time (ms) from a socket.
+- Default: 20000
+- Environment variable: MOCKSERVER_MAX_SOCKET_TIMEOUT
+
+**socketConnectionTimeout**
+Maximum socket connection time (ms). Also bounds each TLS handshake, inbound and outbound, including binary (non-HTTP) forwards and proxied wss WebSockets.
+- Default: 20000
+- Environment variable: MOCKSERVER_SOCKET_CONNECTION_TIMEOUT
+
+**alwaysCloseSocketConnections**
+Always close connections after response (ignore keep-alive).
+- Default: false
+- Environment variable: MOCKSERVER_ALWAYS_CLOSE_SOCKET_CONNECTIONS
+
+**localBoundIP**
+Local IP address MockServer listens on: the HTTP(S) ports, the DNS port and the HTTP/3 port.
+- Default: 0.0.0.0
+- Environment variable: MOCKSERVER_LOCAL_BOUND_IP
+
+### HTTP Request Parsing Configuration
+
+**maxInitialLineLength**
+Maximum size in bytes of the first line of an HTTP/1.1 request; a longer one is answered with 414 and the connection closed.
+- Default: 65536 (64 KB)
+- Environment variable: MOCKSERVER_MAX_INITIAL_LINE_LENGTH
+
+**maxHeaderSize**
+Maximum size in bytes of a request's headers, all counted together, over HTTP/1.1, HTTP/2 and HTTP/3. Larger headers are answered with 431 (and the connection closed over HTTP/1.1, the stream reset over HTTP/2); over HTTP/3 the connection is closed with H3_EXCESSIVE_LOAD. Over HTTP/2 and HTTP/3 the size is each header's name and value plus 32 bytes, including the method, host and URL. The trailers of an HTTP/2 or HTTP/3 request are limited the same way. It is also the most MockServer reads of an upstream's response headers and trailers when it forwards or proxies (HTTP/1.1 and HTTP/2, an upstream proxy's reply to CONNECT, and an upstream's reply to a proxied WebSocket handshake): a response with larger headers is not passed on, and the client is answered 502 with the reason as the body.
+- Default: 262144 (256 KB)
+- Environment variable: MOCKSERVER_MAX_HEADER_SIZE
+
+**maxChunkSize**
+Maximum HTTP chunk size.
+- Default: Integer.MAX_VALUE
+- Environment variable: MOCKSERVER_MAX_CHUNK_SIZE
+
+**useSemicolonAsQueryParameterSeparator**
+Treat semicolons as query parameter separators.
+- Default: true
+- Environment variable: MOCKSERVER_USE_SEMICOLON_AS_QUERY_PARAMETER_SEPARATOR
+
+**assumeAllRequestsAreHttp**
+If false, requests with non-standard methods are assumed binary.
+- Default: false
+- Environment variable: MOCKSERVER_ASSUME_ALL_REQUESTS_ARE_HTTP
+
+### CORS Configuration
+
+**enableCORSForAPI**
+Enable CORS for MockServer REST API (for browser-based JavaScript).
+- Default: false
+- Environment variable: MOCKSERVER_ENABLE_CORS_FOR_API
+
+**enableCORSForAllResponses**
+Enable CORS for all responses (REST API and expectation responses).
+- Default: false
+- Environment variable: MOCKSERVER_ENABLE_CORS_FOR_ALL_RESPONSES
+
+**corsAllowOrigin**
+Value for access-control-allow-origin header.
+- Default: ""
+- Environment variable: MOCKSERVER_CORS_ALLOW_ORIGIN
+
+**corsAllowMethods**
+Value for access-control-allow-methods header.
+- Default: ""
+- Environment variable: MOCKSERVER_CORS_ALLOW_METHODS
+
+**corsAllowHeaders**
+Value for access-control-allow-headers and access-control-expose-headers.
+- Default: ""
+- Environment variable: MOCKSERVER_CORS_ALLOW_HEADERS
+
+**corsAllowCredentials**
+Value for access-control-allow-credentials. When true, access-control-allow-origin uses the request's origin header.
+- Default: false
+- Environment variable: MOCKSERVER_CORS_ALLOW_CREDENTIALS
+
+**corsMaxAgeInSeconds**
+Value for access-control-max-age header.
+- Default: 0
+- Environment variable: MOCKSERVER_CORS_MAX_AGE_IN_SECONDS
+
+### Initialization and Persistence Configuration
+
+**initializationClass**
+Java class used to initialize expectations at startup.
+- Default: null
+- Environment variable: MOCKSERVER_INITIALIZATION_CLASS
+
+**initializationJsonPath**
+Path to JSON file used to initialize expectations at startup. The file should contain a JSON array of Expectation objects.
+- Default: null
+- Environment variable: MOCKSERVER_INITIALIZATION_JSON_PATH
+
+**initializationOpenAPIPath**
+Path to OpenAPI spec file (YAML or JSON) used to initialize expectations at startup. MockServer generates expectations for each operation in the spec with example responses derived from the schema. Supports file glob patterns for watching multiple files.
+- Default: null
+- Environment variable: MOCKSERVER_INITIALIZATION_OPENAPI_PATH
+
+**watchInitializationJson**
+Watch initialization JSON and OpenAPI files for changes. When a change is detected, expectations are created, removed, or updated by matching against their id/key.
+- Default: false
+- Environment variable: MOCKSERVER_WATCH_INITIALIZATION_JSON
+
+**persistExpectations**
+Persist expectations as JSON, updated whenever expectation state changes.
+- Default: false
+- Environment variable: MOCKSERVER_PERSIST_EXPECTATIONS
+
+**persistedExpectationsPath**
+File path for persisted expectations JSON file.
+- Default: persistedExpectations.json
+- Environment variable: MOCKSERVER_PERSISTED_EXPECTATIONS_PATH
+
+### Verification Configuration
+
+**maximumNumberOfRequestToReturnInVerificationFailure**
+Maximum number of requests included in verification failure results.
+- Default: 10
+- Environment variable: MOCKSERVER_MAXIMUM_NUMBER_OF_REQUESTS_TO_RETURN_IN_VERIFICATION_FAILURE
+
+### Proxying Configuration
+
+**attemptToProxyIfNoMatchingExpectation**
+When no matching expectation is found and the host header does not match MockServer, attempt to proxy the request.
+- Default: true
+- Environment variable: MOCKSERVER_ATTEMPT_TO_PROXY_IF_NO_MATCHING_EXPECTATION
+
+**forwardBinaryRequestsUseSingleConnection**
+A proxied binary (non-HTTP) connection is given one upstream connection for its life, and bytes are relayed both ways as they arrive. New default in 9.0.0 (breaking): set to false to forward each message on an upstream connection of its own, as in 8.0.0. A client that turns TLS on part way through (PostgreSQL sslmode=require) has its upstream connection upgraded to TLS on the same connection; SCRAM channel binding then needs channelBinding=disable in the client, or MockServer given the server's own certificate, key and signing CA (privateKeyPath, x509CertificatePath, certificateAuthorityCertificate). A client that starts with TLS gets one upstream connection that starts with TLS too. Every connection is forwarded one message per connection regardless when an upstream proxy is configured.
+- Default: true
+- Environment variable: MOCKSERVER_FORWARD_BINARY_REQUESTS_USE_SINGLE_CONNECTION
+
+**forwardBinaryRequestsMatchExpectations**
+On a binary connection relayed on one upstream connection (forwardBinaryRequestsUseSingleConnection), a message whose bytes equal a binary expectation's is answered by that expectation and is not sent upstream; every other message is forwarded. The binary response's upstream field changes that per expectation: ANSWER_ONLY (default) as described; ANSWER_AND_FORWARD answers and also forwards the message, dropping the upstream's reply; FORWARD_AND_REPLACE forwards the message and writes the binary response in place of the upstream's reply once it has ended. Those two need binaryMessageFraming POSTGRESQL (a reply ends at ReadyForQuery; an extended-query batch up to its Sync has one reply); without it the expectation answers as ANSWER_ONLY. No effect on a connection forwarded one message at a time. MockServer does not know a protocol's message boundaries, so an expectation applies only when the client's message arrives exactly as its bytes.
+- Default: false
+- Environment variable: MOCKSERVER_FORWARD_BINARY_REQUESTS_MATCH_EXPECTATIONS
+
+**forwardBinaryServerFirstWaitMillis**
+How long, in milliseconds, a connection with a fixed upstream (port forwarding, PROXY protocol, transparent proxy) waits for its client's first byte before MockServer takes it as binary and opens its upstream connection, so a protocol in which the server speaks first (MySQL, SMTP, FTP) can be proxied: the server's greeting is relayed to the client. Applies only to a connection relayed on one upstream connection (forwardBinaryRequestsUseSingleConnection). A client that sends HTTP only after this long is relayed as binary, not mocked. 0 never does: a connection waits for its client.
+- Default: 0
+- Environment variable: MOCKSERVER_FORWARD_BINARY_SERVER_FIRST_WAIT_MILLIS
+
+**binaryMessageFraming**
+How a binary (non-HTTP) connection is cut into messages before each is matched against binary expectations, forwarded or logged. RAW takes everything read in one go, up to 256 KiB, as one message, so a message that arrives over time can be split and messages sent together are joined. POSTGRESQL reads the PostgreSQL frontend/backend protocol's own length fields (the startup, SSLRequest, GSSENCRequest and CancelRequest messages without a type byte, then a type byte and a length), so each message the client sends is matched as one message however it arrives, and messages sent together are matched one by one. MYSQL reads each MySQL packet's 3-byte length; a packet is one message, except that a payload of 16 MiB or more, sent as several packets, is one message made of all of them. A MySQL server speaks first (its greeting), so to proxy MySQL also set forwardBinaryServerFirstWaitMillis (for example 250) on a connection with a forward target (port forwarding, transparent proxy or PROXY protocol), with forwardBinaryRequestsUseSingleConnection true (the default): the upstream connection is opened, its greeting relayed, and the client's packets framed. Mocking MySQL with no upstream server is not possible, as MockServer cannot send the greeting. REDIS takes one complete RESP2 or RESP3 value with everything nested in it (nested at most 64 deep), or one inline command line. LENGTH_PREFIX reads a length field described by binaryMessageLengthPrefixBytes, binaryMessageLengthPrefixByteOrder, binaryMessageLengthPrefixOffset and binaryMessageLengthIncludesPrefix. A framed message may be at most maxRequestBodySize bytes; a connection that declares a longer one, or sends bytes the framing does not allow, is closed. In the clear, a TLS handshake part way through is recognised only at a message boundary, and with MYSQL only straight after an SSLRequest packet. Applies to every binary connection, mocked or proxied; read when a connection is found to be binary. An unrecognised value is logged once and read as RAW.
+- Default: RAW
+- Environment variable: MOCKSERVER_BINARY_MESSAGE_FRAMING
+
+**binaryMessageLengthPrefixBytes**
+With binaryMessageFraming LENGTH_PREFIX, how many bytes each message's length field has: 1, 2, 4 or 8, read as an unsigned number. Any other value is logged once and read as 4.
+- Default: 4
+- Environment variable: MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_BYTES
+
+**binaryMessageLengthPrefixByteOrder**
+With binaryMessageFraming LENGTH_PREFIX, the byte order of the length field: BIG_ENDIAN or LITTLE_ENDIAN. Any other value is logged once and read as BIG_ENDIAN.
+- Default: BIG_ENDIAN
+- Environment variable: MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_BYTE_ORDER
+
+**binaryMessageLengthPrefixOffset**
+With binaryMessageFraming LENGTH_PREFIX, how many bytes of each message come before its length field (a type byte or a magic number, say); they are part of the message. A negative or non-numeric value is logged once and read as 0.
+- Default: 0
+- Environment variable: MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_OFFSET
+
+**binaryMessageLengthIncludesPrefix**
+With binaryMessageFraming LENGTH_PREFIX, whether the length counts the whole message, the bytes before the length field and the field itself included (true), or only the bytes after the field (false). A whole-message length shorter than the bytes before the body closes the connection.
+- Default: false
+- Environment variable: MOCKSERVER_BINARY_MESSAGE_LENGTH_INCLUDES_PREFIX
+
+**forwardBinaryRequestsWithoutWaitingForResponse**
+Deprecated, and applies only when forwardBinaryRequestsUseSingleConnection is false (or to a connection that setting forwards one message at a time, as every connection when an upstream proxy is configured). Then, if true, each binary message is forwarded without waiting for the upstream's response. Has no effect on a connection with a single upstream connection. To be removed in the next major release.
+- Default: false
+- Environment variable: MOCKSERVER_FORWARD_BINARY_REQUESTS_WITHOUT_WAITING_FOR_RESPONSE
+
+**forwardHttpProxy**
+Use HTTP proxy for all outbound/forwarded requests.
+- Default: null
+- Environment variable: MOCKSERVER_FORWARD_HTTP_PROXY
+- Example: "127.0.0.1:1090"
+
+**forwardHttpsProxy**
+Use HTTPS proxy (HTTP CONNECT) for all outbound/forwarded requests.
+- Default: null
+- Environment variable: MOCKSERVER_FORWARD_HTTPS_PROXY
+
+**forwardSocksProxy**
+Use SOCKS proxy for all outbound/forwarded requests.
+- Default: null
+- Environment variable: MOCKSERVER_FORWARD_SOCKS_PROXY
+
+**forwardProxyAuthenticationUsername** / **forwardProxyAuthenticationPassword**
+Credentials for proxy authentication when using HTTPS proxy.
+- Default: null
+- Environment variables: MOCKSERVER_FORWARD_PROXY_AUTHENTICATION_USERNAME, MOCKSERVER_FORWARD_PROXY_AUTHENTICATION_PASSWORD
+
+**proxyAuthenticationRealm**
+Authentication realm for proxy authentication to MockServer.
+- Default: "MockServer HTTP Proxy"
+- Environment variable: MOCKSERVER_PROXY_SERVER_REALM
+
+**proxyAuthenticationUsername** / **proxyAuthenticationPassword**
+Required credentials for proxy authentication to MockServer.
+- Default: "" (no authentication required)
+- Environment variables: MOCKSERVER_PROXY_AUTHENTICATION_USERNAME, MOCKSERVER_PROXY_AUTHENTICATION_PASSWORD
+
+### Liveness Configuration
+
+**livenessHttpGetPath**
+Path for HTTP GET liveness/healthcheck probes. When set, GET requests to this path return 200 OK with MockServer version and ports.
+- Default: null (disabled; use PUT /mockserver/status instead)
+- Environment variable: MOCKSERVER_LIVENESS_HTTP_GET_PATH
+- Example: "/liveness/probe"
+
+### TLS Configuration
+
+**dynamicallyCreateCertificateAuthorityCertificate**
+Enable dynamic creation of Certificate Authority X.509 Certificate and Private Key for increased security.
+- Default: false
+- Environment variable: MOCKSERVER_DYNAMICALLY_CREATE_CERTIFICATE_AUTHORITY_CERTIFICATE
+
+**directoryToSaveDynamicSSLCertificate**
+Directory for saving dynamically generated CA key pair.
+- Default: null
+- Environment variable: MOCKSERVER_CERTIFICATE_DIRECTORY_TO_SAVE_DYNAMIC_SSL_CERTIFICATE
+
+**proactivelyInitialiseTLS**
+Initialize TLS during startup (instead of on first TLS connection).
+- Default: false
+- Environment variable: MOCKSERVER_PROACTIVELY_INITIALISE_TLS
+
+**preventCertificateDynamicUpdate**
+Disable automatic SAN updates from request Host headers.
+- Default: false
+- Environment variable: MOCKSERVER_PREVENT_CERTIFICATE_DYNAMIC_UPDATE
+
+**sslCertificateDomainName**
+Domain name for auto-generated TLS certificates.
+- Default: localhost
+- Environment variable: MOCKSERVER_SSL_CERTIFICATE_DOMAIN_NAME
+
+**sslSubjectAlternativeNameDomains**
+SAN domain names for auto-generated TLS certificates (comma-separated).
+- Default: localhost
+- Environment variable: MOCKSERVER_SSL_SUBJECT_ALTERNATIVE_NAME_DOMAINS
+
+**sslSubjectAlternativeNameIps**
+SAN IP addresses for auto-generated TLS certificates (comma-separated).
+- Default: 127.0.0.1,0.0.0.0
+- Environment variable: MOCKSERVER_SSL_SUBJECT_ALTERNATIVE_NAME_IPS
+
+**certificateAuthorityPrivateKey**
+Location of custom CA private key PEM file (PKCS#8 or PKCS#1).
+- Default: null (uses built-in CA)
+- Environment variable: MOCKSERVER_CERTIFICATE_AUTHORITY_PRIVATE_KEY
+
+**certificateAuthorityCertificate**
+Location of custom CA X.509 certificate PEM file.
+- Default: null (uses built-in CA)
+- Environment variable: MOCKSERVER_CERTIFICATE_AUTHORITY_X509_CERTIFICATE
+
+### Template Restriction Configuration
+
+**javascriptDisallowedClasses**
+Comma-separated list of Java classes not allowed in JavaScript templates.
+- Default: ""
+- Environment variable: MOCKSERVER_JAVASCRIPT_DISALLOWED_CLASSES
+
+**javascriptDisallowedText**
+Comma-separated list of text strings not allowed in JavaScript templates.
+- Default: ""
+- Environment variable: MOCKSERVER_JAVASCRIPT_DISALLOWED_TEXT
+
+**velocityDisallowClassLoading**
+Prevent class loading in Velocity templates.
+- Default: false
+- Environment variable: MOCKSERVER_VELOCITY_DISALLOW_CLASS_LOADING
+
+**velocityDisallowedText**
+Comma-separated list of text not allowed in Velocity templates.
+- Default: ""
+- Environment variable: MOCKSERVER_VELOCITY_DISALLOWED_TEXT
+
+**mustacheDisallowedText**
+Comma-separated list of text not allowed in Mustache templates.
+- Default: ""
+- Environment variable: MOCKSERVER_MUSTACHE_DISALLOWED_TEXT
+
+## Client Libraries
+
+### Java Client
+
+Maven dependency:
+
+    <dependency>
+      <groupId>org.mock-server</groupId>
+      <artifactId>mockserver-client-java</artifactId>
+      <version>8.0.0</version>
+    </dependency>
+
+Basic usage:
+
+    import org.mockserver.client.MockServerClient;
+    import org.mockserver.model.HttpRequest;
+    import org.mockserver.model.HttpResponse;
+    import static org.mockserver.model.HttpRequest.request;
+    import static org.mockserver.model.HttpResponse.response;
+
+    MockServerClient client = new MockServerClient("localhost", 1080);
+
+    // Create expectation
+    client.when(
+        request().withMethod("GET").withPath("/api/users")
+    ).respond(
+        response()
+            .withStatusCode(200)
+            .withHeader("Content-Type", "application/json")
+            .withBody("[{\"id\": 1, \"name\": \"Alice\"}]")
+    );
+
+    // Verify request was received
+    client.verify(
+        request().withPath("/api/users"),
+        org.mockserver.verify.VerificationTimes.atLeast(1)
+    );
+
+    // Verify request sequence
+    client.verify(
+        request().withPath("/api/login"),
+        request().withPath("/api/users")
+    );
+
+    // Retrieve recorded requests
+    HttpRequest[] requests = client.retrieveRecordedRequests(
+        request().withPath("/api/.*")
+    );
+
+    // Clear specific expectations
+    client.clear(request().withPath("/api/users"));
+
+    // Reset all
+    client.reset();
+
+Using ClientAndServer (starts embedded MockServer):
+
+    import org.mockserver.integration.ClientAndServer;
+
+    ClientAndServer mockServer = ClientAndServer.startClientAndServer(1080);
+    // ... set up expectations, run tests ...
+    mockServer.stop();
+
+JUnit 5 extension:
+
+    import org.mockserver.junit.jupiter.MockServerExtension;
+    import org.mockserver.junit.jupiter.MockServerSettings;
+
+    @ExtendWith(MockServerExtension.class)
+    @MockServerSettings(ports = {1080})
+    class MyTest {
+        @Test
+        void testSomething(MockServerClient client) {
+            client.when(request().withPath("/test"))
+                  .respond(response().withBody("ok"));
+            // ... test code ...
+        }
+    }
+
+### JavaScript/TypeScript Client
+
+Install:
+
+    npm install mockserver-client
+
+Usage:
+
+    var mockServerClient = require('mockserver-client').mockServerClient;
+
+    // Create expectation
+    mockServerClient("localhost", 1080)
+      .mockAnyResponse({
+        httpRequest: {
+          method: "GET",
+          path: "/api/users"
+        },
+        httpResponse: {
+          statusCode: 200,
+          body: JSON.stringify([{id: 1, name: "Alice"}])
+        }
+      })
+      .then(function () {
+        console.log("expectation created");
+      });
+
+    // Verify request
+    mockServerClient("localhost", 1080)
+      .verify({
+        path: "/api/users"
+      }, 1)  // at least 1 time
+      .then(function () {
+        console.log("request verified");
+      });
+
+    // Clear expectations
+    mockServerClient("localhost", 1080)
+      .clear({path: "/api/users"})
+      .then(function () {
+        console.log("cleared");
+      });
+
+    // Reset all
+    mockServerClient("localhost", 1080)
+      .reset()
+      .then(function () {
+        console.log("reset");
+      });
+
+    // Callback-based response
+    mockServerClient("localhost", 1080)
+      .mockWithCallback({
+        path: "/api/dynamic"
+      }, function (request) {
+        return {
+          statusCode: 200,
+          body: JSON.stringify({echo: request.body})
+        };
+      });
+
+TypeScript types are included: `import { mockServerClient } from 'mockserver-client';`
+
+### Python Client
+
+Install:
+
+    pip install mockserver-client
+
+Usage:
+
+    from mockserver import (
+        MockServerClient, HttpRequest, HttpResponse,
+        Expectation, Times, TimeToLive, VerificationTimes
+    )
+
+    client = MockServerClient("localhost", 1080)
+
+    # Create expectation using fluent API
+    client.when(
+        HttpRequest(method="GET", path="/api/users")
+    ).respond(
+        HttpResponse(
+            status_code=200,
+            headers={"Content-Type": ["application/json"]},
+            body='[{"id": 1, "name": "Alice"}]'
+        )
+    )
+
+    # Create expectation using upsert
+    client.upsert(Expectation(
+        http_request=HttpRequest(method="POST", path="/api/login"),
+        http_response=HttpResponse(
+            status_code=200,
+            body='{"token": "abc123"}'
+        ),
+        times=Times(remaining_times=1, unlimited=False)
+    ))
+
+    # Verify request was received
+    client.verify(
+        HttpRequest(path="/api/users"),
+        times=VerificationTimes(at_least=1)
+    )
+
+    # Verify request sequence
+    client.verify_sequence(
+        HttpRequest(path="/api/login"),
+        HttpRequest(path="/api/users")
+    )
+
+    # Retrieve recorded requests
+    requests = client.retrieve_recorded_requests(
+        HttpRequest(path="/api/.*")
+    )
+
+    # Clear and reset
+    client.clear(HttpRequest(path="/api/users"))
+    client.reset()
+
+    # Context manager support
+    with MockServerClient("localhost", 1080) as client:
+        client.when(
+            HttpRequest(path="/test")
+        ).respond(
+            HttpResponse(body="hello")
+        )
+
+    # Async client
+    from mockserver import AsyncMockServerClient
+
+    async def setup():
+        client = AsyncMockServerClient("localhost", 1080)
+        await client.when(
+            HttpRequest(path="/async")
+        ).respond(
+            HttpResponse(body="async response")
+        )
+        await client.close()
+
+### Ruby Client
+
+Install:
+
+    gem install mockserver-client
+
+Usage:
+
+    require 'mockserver-client'
+    include MockServer
+
+    client = Client.new('localhost', 1080)
+
+    # Create expectation using fluent API
+    client.when(
+      HttpRequest.request(method: 'GET', path: '/api/users')
+    ).respond(
+      HttpResponse.response(
+        status_code: 200,
+        headers: { 'Content-Type' => ['application/json'] },
+        body: '[{"id": 1, "name": "Alice"}]'
+      )
+    )
+
+    # Create expectation using upsert
+    client.upsert(Expectation.new(
+      http_request: HttpRequest.new(path: '/api/login'),
+      http_response: HttpResponse.new(
+        status_code: 200,
+        body: '{"token": "abc123"}'
+      )
+    ))
+
+    # Verify request
+    client.verify(
+      HttpRequest.new(path: '/api/users'),
+      times: VerificationTimes.new(at_least: 1)
+    )
+
+    # Verify sequence
+    client.verify_sequence(
+      HttpRequest.new(path: '/api/login'),
+      HttpRequest.new(path: '/api/users')
+    )
+
+    # Retrieve recorded requests
+    requests = client.retrieve_recorded_requests(request: HttpRequest.new(path: '/api/.*'))
+
+    # Clear and reset
+    client.clear(HttpRequest.new(path: '/api/users'))
+    client.reset
+
+    # Block form (auto-close)
+    Client.new('localhost', 1080) do |c|
+      c.when(HttpRequest.request(path: '/hello'))
+       .respond(HttpResponse.response(body: 'world'))
+    end
+
+    client.close
+
+### Go Client
+
+Install:
+
+    go get github.com/mock-server/mockserver-client-go
+
+Usage:
+
+    import "github.com/mock-server/mockserver-client-go/mockserver"
+
+    client := mockserver.NewClient("localhost", 1080)
+
+    // Create expectation
+    client.When(
+        mockserver.Request().WithMethod("GET").WithPath("/api/users"),
+    ).Respond(
+        mockserver.Response().
+            WithStatusCode(200).
+            WithBody(`[{"id": 1, "name": "Alice"}]`),
+    )
+
+    // Verify request was received
+    client.Verify(
+        mockserver.Request().WithPath("/api/users"),
+        mockserver.AtLeast(1),
+    )
+
+    // Retrieve recorded requests, clear and reset
+    client.RetrieveRecordedRequests(mockserver.Request().WithPath("/api/.*"))
+    client.Clear(mockserver.Request().WithPath("/api/users"))
+    client.Reset()
+
+### .NET Client
+
+Install:
+
+    dotnet add package MockServerClient
+
+Usage:
+
+    using MockServer.Client;
+
+    var client = new MockServerClient("localhost", 1080);
+
+    // Create expectation
+    client.When(
+        Request.Create().WithMethod("GET").WithPath("/api/users")
+    ).Respond(
+        Response.Create()
+            .WithStatusCode(200)
+            .WithBody("[{\"id\": 1, \"name\": \"Alice\"}]")
+    );
+
+    // Verify request was received
+    client.Verify(
+        Request.Create().WithPath("/api/users"),
+        VerificationTimes.AtLeast(1)
+    );
+
+    // Clear and reset
+    client.Clear(Request.Create().WithPath("/api/users"));
+    client.Reset();
+
+### Rust Client
+
+Install (Cargo.toml):
+
+    [dependencies]
+    mockserver-client = "8.0.0"
+
+Usage:
+
+    use mockserver_client::{MockServerClient, Request, Response, VerificationTimes};
+
+    let client = MockServerClient::new("localhost", 1080);
+
+    // Create expectation
+    client.when(
+        Request::new().with_method("GET").with_path("/api/users")
+    ).respond(
+        Response::new()
+            .with_status_code(200)
+            .with_body(r#"[{"id": 1, "name": "Alice"}]"#)
+    ).await?;
+
+    // Verify request was received
+    client.verify(
+        Request::new().with_path("/api/users"),
+        VerificationTimes::at_least(1)
+    ).await?;
+
+    // Clear and reset
+    client.clear(Request::new().with_path("/api/users")).await?;
+    client.reset().await?;
+
+### PHP Client
+
+Install:
+
+    composer require mock-server/mockserver-client
+
+Usage:
+
+    use MockServer\MockServerClient;
+    use MockServer\Model\HttpRequest;
+    use MockServer\Model\HttpResponse;
+
+    $client = new MockServerClient("localhost", 1080);
+
+    // Create expectation
+    $client->when(
+        (new HttpRequest())->withMethod("GET")->withPath("/api/users")
+    )->respond(
+        (new HttpResponse())
+            ->withStatusCode(200)
+            ->withBody('[{"id": 1, "name": "Alice"}]')
+    );
+
+    // Verify request was received
+    $client->verify(
+        (new HttpRequest())->withPath("/api/users"),
+        VerificationTimes::atLeast(1)
+    );
+
+    // Clear and reset
+    $client->clear((new HttpRequest())->withPath("/api/users"));
+    $client->reset();
+
+## Docker Deployment
+
+### Basic Docker Run
+
+    docker run -d --rm -p 1080:1080 mockserver/mockserver
+
+### With Custom Port
+
+    docker run -d --rm -p 8080:1090 \
+      --env MOCKSERVER_SERVER_PORT=1090 \
+      mockserver/mockserver
+
+### With Logging
+
+    docker run -d --rm -p 1080:1080 \
+      --env MOCKSERVER_LOG_LEVEL=DEBUG \
+      mockserver/mockserver
+
+### With Configuration File
+
+Mount a directory containing mockserver.properties and/or initialization files:
+
+    docker run -d --rm -p 1080:1080 \
+      -v $(pwd)/config:/config \
+      --env MOCKSERVER_PROPERTY_FILE=/config/mockserver.properties \
+      mockserver/mockserver
+
+Note: The container runs as `nonroot` user. Ensure mounted files are readable:
+
+    chmod o+r config/mockserver.properties
+
+### With Initialization JSON
+
+Pre-load expectations from a JSON file at startup:
+
+    docker run -d --rm -p 1080:1080 \
+      -v $(pwd):/config \
+      --env MOCKSERVER_INITIALIZATION_JSON_PATH=/config/expectations.json \
+      mockserver/mockserver
+
+### With OpenAPI Initialization
+
+Pre-load expectations from an OpenAPI spec file at startup:
+
+    docker run -d --rm -p 1080:1080 \
+      -v $(pwd):/config \
+      --env MOCKSERVER_INITIALIZATION_OPENAPI_PATH=/config/petstore.yaml \
+      mockserver/mockserver
+
+### With Persistence
+
+Enable persistence so expectations survive container restarts:
+
+    docker run -d -p 1080:1080 \
+      -v $(pwd)/data:/config \
+      --env MOCKSERVER_PERSIST_EXPECTATIONS=true \
+      --env MOCKSERVER_PERSISTED_EXPECTATIONS_PATH=/config/expectations.json \
+      --env MOCKSERVER_INITIALIZATION_JSON_PATH=/config/expectations.json \
+      mockserver/mockserver
+
+### With Custom TLS Certificates
+
+    docker run -d --rm -p 1080:1080 \
+      -v $(pwd)/certs:/config \
+      --env MOCKSERVER_CERTIFICATE_AUTHORITY_PRIVATE_KEY=/config/ca-key.pem \
+      --env MOCKSERVER_CERTIFICATE_AUTHORITY_X509_CERTIFICATE=/config/ca-cert.pem \
+      mockserver/mockserver
+
+### With Class Callbacks
+
+Add custom JARs to the classpath by mounting them to /libs:
+
+    docker run -d --rm -p 1080:1080 \
+      -v $(pwd)/libs:/libs \
+      mockserver/mockserver
+
+### Using Command Line Arguments
+
+    docker run -d --rm -p 1080:1090 \
+      mockserver/mockserver \
+      -logLevel INFO -serverPort 1090
+
+### With Liveness Probe
+
+    docker run -d --rm -p 1080:1080 \
+      --env MOCKSERVER_LIVENESS_HTTP_GET_PATH=/liveness/probe \
+      mockserver/mockserver
+
+Test: `curl http://localhost:1080/liveness/probe`
+
+### Docker Compose
+
+Basic:
+
+    services:
+      mockserver:
+        image: mockserver/mockserver:8.0.0
+        ports:
+          - "1080:1080"
+        environment:
+          MOCKSERVER_LOG_LEVEL: INFO
+
+With configuration and initialization:
+
+    services:
+      mockserver:
+        image: mockserver/mockserver:8.0.0
+        ports:
+          - "1080:1080"
+        environment:
+          MOCKSERVER_PROPERTY_FILE: /config/mockserver.properties
+          MOCKSERVER_INITIALIZATION_JSON_PATH: /config/initializerJson.json
+        volumes:
+          - type: bind
+            source: .
+            target: /config
+
+With OpenAPI initialization and file watching:
+
+    services:
+      mockserver:
+        image: mockserver/mockserver:8.0.0
+        ports:
+          - "1080:1080"
+        environment:
+          MOCKSERVER_INITIALIZATION_OPENAPI_PATH: /config/petstore.yaml
+          MOCKSERVER_WATCH_INITIALIZATION_JSON: "true"
+        volumes:
+          - type: bind
+            source: .
+            target: /config
+
+Using command line arguments:
+
+    services:
+      mockserver:
+        image: mockserver/mockserver:8.0.0
+        command: -logLevel DEBUG -serverPort 1090
+        ports:
+          - "1080:1090"
+
+### Performance-Optimized Docker
+
+    docker run -d --rm -p 1080:1080 \
+      --env MOCKSERVER_LOG_LEVEL=WARN \
+      --env MOCKSERVER_DISABLE_SYSTEM_OUT=true \
+      --env MOCKSERVER_NIO_EVENT_LOOP_THREAD_COUNT=10 \
+      --env MOCKSERVER_ACTION_HANDLER_THREAD_COUNT=10 \
+      --env MOCKSERVER_MATCHERS_FAIL_FAST=true \
+      mockserver/mockserver
+
+### Docker Image Notes
+
+- Based on `gcr.io/distroless/java-base-debian12:nonroot` — no shell, no system utilities
+- Exports port 1080 by default
+- Health checks must be performed externally (no curl/wget inside container)
+- Configuration files are loaded from /config if present
+- Additional JARs for classpath are loaded from /libs
+
+## Common Patterns
+
+### Match Any Request
+
+    {
+      "httpRequest": {},
+      "httpResponse": {"statusCode": 200, "body": "catch all"}
+    }
+
+### Match by JSON Body (Partial Match)
+
+Match requests that contain at least the specified JSON fields:
+
+    {
+      "httpRequest": {
+        "method": "POST",
+        "path": "/api/users",
+        "body": {
+          "type": "JSON",
+          "json": "{\"role\": \"admin\"}",
+          "matchType": "ONLY_MATCHING_FIELDS"
+        }
+      },
+      "httpResponse": {"statusCode": 201}
+    }
+
+### Match by JSON Body (Shorthand)
+
+JSON objects as body are automatically treated as ONLY_MATCHING_FIELDS:
+
+    {
+      "httpRequest": {
+        "method": "POST",
+        "path": "/api/users",
+        "body": {"role": "admin"}
+      },
+      "httpResponse": {"statusCode": 201}
+    }
+
+### Match by JSON Schema
+
+    {
+      "httpRequest": {
+        "path": "/api/users",
+        "body": {
+          "type": "JSON_SCHEMA",
+          "jsonSchema": {
+            "type": "object",
+            "required": ["email"],
+            "properties": {
+              "email": {"type": "string", "format": "email"},
+              "name": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      },
+      "httpResponse": {"statusCode": 201}
+    }
+
+### Match by JSON Path
+
+    {
+      "httpRequest": {
+        "path": "/api/orders",
+        "body": {"type": "JSON_PATH", "jsonPath": "$.items[?(@.price > 100)]"}
+      },
+      "httpResponse": {"statusCode": 200, "body": "expensive items found"}
+    }
+
+### Match by XPath
+
+    {
+      "httpRequest": {
+        "path": "/api/xml",
+        "body": {"type": "XPATH", "xpath": "/order/item[price>100]"}
+      },
+      "httpResponse": {"statusCode": 200}
+    }
+
+### Match with Regex Path
+
+    {
+      "httpRequest": {
+        "path": "/api/users/[0-9]+/orders"
+      },
+      "httpResponse": {"statusCode": 200, "body": "[]"}
+    }
+
+### Match with Negation
+
+Match requests that do NOT have a specific header:
+
+    {
+      "httpRequest": {
+        "path": "/api/protected",
+        "headers": {
+          "Authorization": {"not": true, "value": ".*"}
+        }
+      },
+      "httpResponse": {"statusCode": 401, "body": "Unauthorized"}
+    }
+
+### Simulate Delays
+
+    {
+      "httpRequest": {"path": "/api/slow"},
+      "httpResponse": {
+        "statusCode": 200,
+        "body": "finally!",
+        "delay": {"timeUnit": "SECONDS", "value": 5}
+      }
+    }
+
+### Forward to Real Service (Proxy)
+
+    {
+      "httpRequest": {"path": "/api/.*"},
+      "httpForward": {
+        "host": "real-api.example.com",
+        "port": 443,
+        "scheme": "HTTPS"
+      }
+    }
+
+### Forward with Request Modification
+
+    {
+      "httpRequest": {"path": "/api/.*"},
+      "httpOverrideForwardedRequest": {
+        "requestModifier": {
+          "headers": {
+            "add": {"X-Api-Key": ["my-secret-key"]},
+            "remove": ["Cookie"]
+          },
+          "path": {
+            "regex": "^/api",
+            "substitution": "/v2/api"
+          }
+        }
+      }
+    }
+
+### One-Time Response
+
+Return a response only once, then the expectation is removed:
+
+    {
+      "httpRequest": {"path": "/api/token"},
+      "httpResponse": {"statusCode": 200, "body": "{\"token\": \"one-time\"}"},
+      "times": {"remainingTimes": 1, "unlimited": false}
+    }
+
+### Expiring Expectation
+
+    {
+      "httpRequest": {"path": "/api/temp"},
+      "httpResponse": {"statusCode": 200, "body": "temporary"},
+      "timeToLive": {"timeUnit": "MINUTES", "timeToLive": 5, "unlimited": false}
+    }
+
+### Priority-Based Response (Multiple Expectations for Same Path)
+
+Higher priority expectations are matched first:
+
+    // Default response (low priority)
+    {
+      "priority": 0,
+      "httpRequest": {"path": "/api/users"},
+      "httpResponse": {"statusCode": 200, "body": "[]"}
+    }
+
+    // Specific response (high priority, one-time)
+    {
+      "priority": 10,
+      "httpRequest": {"path": "/api/users"},
+      "httpResponse": {"statusCode": 500, "body": "error"},
+      "times": {"remainingTimes": 1, "unlimited": false}
+    }
+
+First request to /api/users returns 500, subsequent requests return 200.
+
+### Record and Replay
+
+Step 1: Use MockServer as a proxy to record traffic:
+
+    docker run -d --rm -p 1080:1080 \
+      --env MOCKSERVER_PERSIST_EXPECTATIONS=true \
+      --env MOCKSERVER_PERSISTED_EXPECTATIONS_PATH=/config/recorded.json \
+      mockserver/mockserver
+
+Configure your application to use localhost:1080 as a proxy.
+
+Step 2: Retrieve recorded expectations:
+
+    curl -X PUT http://localhost:1080/mockserver/retrieve?type=recorded_expectations
+
+Step 3: Replay by loading the recorded expectations:
+
+    docker run -d --rm -p 1080:1080 \
+      -v $(pwd):/config \
+      --env MOCKSERVER_INITIALIZATION_JSON_PATH=/config/recorded.json \
+      mockserver/mockserver
+
+### Parallel Tests with Unique Expectations
+
+Use expectation IDs for isolation between parallel tests:
+
+    // Test A
+    curl -X PUT http://localhost:1080/mockserver/expectation -d '{
+      "id": "test-a-users",
+      "httpRequest": {"path": "/test-a/users"},
+      "httpResponse": {"statusCode": 200, "body": "test-a-data"}
+    }'
+
+    // Test B
+    curl -X PUT http://localhost:1080/mockserver/expectation -d '{
+      "id": "test-b-users",
+      "httpRequest": {"path": "/test-b/users"},
+      "httpResponse": {"statusCode": 200, "body": "test-b-data"}
+    }'
+
+    // Clean up Test A only
+    curl -X PUT http://localhost:1080/mockserver/clear -d '{"id": "test-a-users"}'
+
+### Simulating Errors
+
+Drop connection:
+
+    {
+      "httpRequest": {"path": "/api/fail"},
+      "httpError": {"dropConnection": true}
+    }
+
+Random bytes response:
+
+    {
+      "httpRequest": {"path": "/api/corrupt"},
+      "httpError": {
+        "responseBytes": "cmFuZG9tZ2FyYmFnZQ=="
+      }
+    }
+
+### Matching Form Data (URL Encoded Body)
+
+    {
+      "httpRequest": {
+        "method": "POST",
+        "path": "/login",
+        "body": {
+          "type": "PARAMETERS",
+          "parameters": {
+            "username": ["admin"],
+            "password": ["secret"]
+          }
+        }
+      },
+      "httpResponse": {"statusCode": 302, "headers": {"Location": ["/dashboard"]}}
+    }
+
+### Retrieve and Inspect Traffic
+
+Get all recorded requests:
+
+    curl -X PUT http://localhost:1080/mockserver/retrieve?type=requests
+
+Get request-response pairs:
+
+    curl -X PUT http://localhost:1080/mockserver/retrieve?type=request_responses
+
+Get active expectations:
+
+    curl -X PUT http://localhost:1080/mockserver/retrieve?type=active_expectations
+
+Get logs (for debugging):
+
+    curl -X PUT http://localhost:1080/mockserver/retrieve?type=logs
+
+Filter by request matcher:
+
+    curl -X PUT http://localhost:1080/mockserver/retrieve?type=requests -d '{"path": "/api/.*"}'
+
+### Dynamic Response with Velocity Template
+
+    {
+      "httpRequest": {
+        "method": "GET",
+        "path": "/api/users/{userId}"
+      },
+      "httpResponseTemplate": {
+        "templateType": "VELOCITY",
+        "template": "{\"statusCode\": 200, \"headers\": {\"Content-Type\": [\"application/json\"]}, \"body\": \"{\\\"id\\\": $!request.pathParameters['userId'][0], \\\"name\\\": \\\"User $!request.pathParameters['userId'][0]\\\"}\"}"
+      }
+    }
+
+### Dynamic Response with JavaScript Template
+
+    {
+      "httpRequest": {"path": "/api/echo"},
+      "httpResponseTemplate": {
+        "templateType": "JAVASCRIPT",
+        "template": "return { statusCode: 200, headers: {'Content-Type': ['application/json']}, body: JSON.stringify({method: request.method, path: request.path, body: request.body}) };"
+      }
+    }
+
+### OpenAPI-Based Expectations
+
+Create expectations from an OpenAPI specification with specific operation-response mappings:
+
+    curl -X PUT http://localhost:1080/mockserver/openapi -d '{
+      "specUrlOrPayload": "https://petstore.swagger.io/v2/swagger.json",
+      "operationsAndResponses": {
+        "findPetsByStatus": "200",
+        "getPetById": "200",
+        "addPet": "200"
+      }
+    }'
+
+## MCP Integration (Model Context Protocol)
+
+MockServer exposes an MCP endpoint for AI coding assistants to interact with the server programmatically.
+
+### MCP Endpoint
+
+    POST http://localhost:1080/mockserver/mcp
+
+The MCP endpoint follows the Model Context Protocol specification and provides tools and resources for AI assistants.
+
+### Available MCP Tools
+
+**create_expectation** - Create an expectation with request matcher and response action.
+
+**verify_request** - Verify that a request was received a specific number of times.
+
+**verify_request_sequence** - Verify that requests were received in a specific order.
+
+**retrieve_recorded_requests** - Retrieve requests recorded by MockServer.
+
+**retrieve_request_responses** - Retrieve request-response pairs recorded by MockServer.
+
+**retrieve_logs** - Retrieve MockServer's recorded log messages (request matching, mismatches, actions, errors) to debug why a test or request behaved as it did. Supports correlationId filtering and a limit parameter.
+
+**clear_expectations** - Clear expectations and/or logs matching a request.
+
+**reset** - Reset all state (expectations, logs, recorded requests).
+
+**get_status** - Get MockServer status (running ports).
+
+**create_forward_expectation** - Create an expectation that forwards requests to another host.
+
+**debug_request_mismatch** - Diagnose why a request didn't match any expectation by retrieving detailed match failure logs.
+
+**stop_server** - Stop the MockServer instance.
+
+**create_expectation_from_openapi** - Create expectations from an OpenAPI specification.
+
+**raw_expectation** - Send a raw expectation JSON body directly to PUT /mockserver/expectation.
+
+**raw_retrieve** - Send a raw retrieve request with custom type and format parameters.
+
+**raw_verify** - Send a raw verification JSON body directly to PUT /mockserver/verify.
+
+### Available MCP Resources
+
+**mockserver://expectations** - List all active expectations.
+
+**mockserver://requests** - List all recorded requests.
+
+**mockserver://logs** - Retrieve recent log messages.
+
+**mockserver://configuration** - Show current MockServer configuration.
+
+### MCP Client Configuration
+
+For Cursor (.cursor/mcp.json):
+
+    {
+      "mcpServers": {
+        "mockserver": {
+          "url": "http://localhost:1080/mockserver/mcp"
+        }
+      }
+    }
+
+For Claude Code (.claude/mcp.json):
+
+    {
+      "mcpServers": {
+        "mockserver": {
+          "type": "url",
+          "url": "http://localhost:1080/mockserver/mcp"
+        }
+      }
+    }
+
+For OpenCode (.opencode/config.json):
+
+    {
+      "mcpServers": {
+        "mockserver": {
+          "type": "remote",
+          "url": "http://localhost:1080/mockserver/mcp"
+        }
+      }
+    }
+
+For Windsurf, Cline, and other MCP-compatible tools, configure the MCP server URL as: http://localhost:1080/mockserver/mcp
+
+### MCP Usage Examples
+
+Example tool invocation (create_expectation):
+
+    Tool: create_expectation
+    Arguments: {
+      "method": "GET",
+      "path": "/api/users",
+      "statusCode": 200,
+      "responseBody": "[{\"id\": 1, \"name\": \"Alice\"}]"
+    }
+
+Example tool invocation (verify_request):
+
+    Tool: verify_request
+    Arguments: {
+      "method": "GET",
+      "path": "/api/users",
+      "atLeast": 1
+    }
+
+Example tool invocation (debug_request_mismatch):
+
+    Tool: debug_request_mismatch
+    Arguments: {
+      "method": "POST",
+      "path": "/api/login"
+    }
+
+This retrieves detailed logs showing why the request didn't match any active expectation, including field-by-field comparison results.
+
+## Protocols
+
+MockServer matches and mocks across multiple protocols beyond plain HTTP/1.1, all routed through the same expectation matching pipeline.
+
+### GraphQL
+
+Mock GraphQL queries, mutations, and subscriptions. Import a GraphQL schema or introspection document to auto-generate schema-valid responses, or write explicit expectations with AST-level field matching. See https://www.mock-server.com/mock_server/graphql_mocking.html
+
+### gRPC
+
+Mock gRPC services, including unary and server-streaming methods, with protobuf request/response payloads matched and returned through standard expectations. See https://www.mock-server.com/mock_server/grpc_mocking.html
+
+### HTTP/2 and HTTP/3 (QUIC)
+
+HTTP/2 is supported on the standard ports; experimental HTTP/3 over QUIC is enabled via the `http3Port` property and routed through the full expectation matching pipeline. See https://www.mock-server.com/mock_server/http3.html
+
+### AsyncAPI (Kafka / MQTT)
+
+Mock Kafka and MQTT brokers using AsyncAPI 2.x/3.x specs — publish examples, subscribe to record messages, and validate against JSON Schema, all via REST or the Java API. See https://www.mock-server.com/mock_server/asyncapi_messaging.html
+
+## Running MockServer
+
+### Docker
+
+    docker run -d --rm -p 1080:1080 mockserver/mockserver
+
+### Maven Plugin
+
+    <plugin>
+      <groupId>org.mock-server</groupId>
+      <artifactId>mockserver-maven-plugin</artifactId>
+      <version>8.0.0</version>
+      <configuration>
+        <serverPort>1080</serverPort>
+        <logLevel>WARN</logLevel>
+      </configuration>
+      <executions>
+        <execution>
+          <id>process-test-classes</id>
+          <phase>process-test-classes</phase>
+          <goals><goal>start</goal></goals>
+        </execution>
+        <execution>
+          <id>verify</id>
+          <phase>verify</phase>
+          <goals><goal>stop</goal></goals>
+        </execution>
+      </executions>
+    </plugin>
+
+### Standalone JAR
+
+    java -jar mockserver-netty-no-dependencies-8.0.0.jar -serverPort 1080 -logLevel INFO
+
+### npm Module
+
+    npm install -g mockserver-node
+    mockserver-node --serverPort 1080 --verbose true
+
+### Programmatic (Java)
+
+    import org.mockserver.integration.ClientAndServer;
+
+    ClientAndServer mockServer = ClientAndServer.startClientAndServer(1080);
+    // ... use mockServer ...
+    mockServer.stop();
+
+## Chaos Testing & Fault Injection
+
+MockServer supports declarative HTTP chaos/fault injection via a `chaos` profile on any expectation. Attach an `HttpChaosProfile` to inject probabilistic error statuses (e.g. 500, 503, 429 with optional `Retry-After`) and/or artificial latency into responses. Works on both mocked responses and forwarded/proxied upstream responses, making MockServer usable as a chaos proxy for resilience testing.
+
+### Chaos Profile Fields
+
+- `errorStatus` (integer, 100-599): HTTP status to inject
+- `errorProbability` (number, 0.0-1.0): probability of error injection (0.0=never, 1.0=always)
+- `retryAfter` (string): Retry-After header value on injected errors
+- `latency` (Delay object): artificial delay added to every response
+- `seed` (integer): fixed seed for reproducible probabilistic decisions
+
+### Example: Inject 503 errors 30% of the time
+
+    curl -v -X PUT "http://localhost:1080/mockserver/expectation" -d '{
+        "httpRequest": { "path": "/api/service" },
+        "httpResponse": { "statusCode": 200, "body": "{\"status\":\"ok\"}" },
+        "chaos": { "errorStatus": 503, "errorProbability": 0.3, "retryAfter": "30" }
+    }'
+
+### Example: Inject faults into proxied upstream
+
+    curl -v -X PUT "http://localhost:1080/mockserver/expectation" -d '{
+        "httpRequest": { "path": "/api/upstream" },
+        "httpForward": { "host": "upstream.example.com", "port": 443, "scheme": "HTTPS" },
+        "chaos": { "errorStatus": 503, "errorProbability": 0.5, "latency": { "timeUnit": "MILLISECONDS", "value": 1000 } }
+    }'
+
+See: https://www.mock-server.com/mock_server/chaos_testing.html
+
+## Proxying
+
+MockServer can act as an HTTP/HTTPS/SOCKS proxy:
+
+### Port Forwarding Proxy
+
+    docker run -d --rm -p 1080:1080 \
+      mockserver/mockserver \
+      -serverPort 1080 \
+      -proxyRemotePort 443 \
+      -proxyRemoteHost api.example.com
+
+All requests to localhost:1080 are forwarded to api.example.com:443.
+
+### HTTP Proxy
+
+Configure your application to use MockServer as its HTTP proxy (localhost:1080). All traffic flows through MockServer and can be:
+- Recorded for later verification
+- Matched against expectations for mocking
+- Forwarded to the real server (default behavior)
+
+### HTTPS Tunneling Proxy
+
+MockServer supports CONNECT tunneling. Configure your HTTPS proxy to localhost:1080. MockServer dynamically generates TLS certificates to intercept and inspect HTTPS traffic.
+
+## Troubleshooting
+
+### Why didn't my request match?
+
+1. Retrieve logs to see match failure details:
+
+       curl -X PUT http://localhost:1080/mockserver/retrieve?type=logs
+
+2. Check active expectations:
+
+       curl -X PUT http://localhost:1080/mockserver/retrieve?type=active_expectations
+
+3. Retrieve recorded requests to see what was actually received:
+
+       curl -X PUT http://localhost:1080/mockserver/retrieve?type=requests
+
+4. Enable detailed match failures and set log level to DEBUG:
+
+       docker run -d --rm -p 1080:1080 \
+         --env MOCKSERVER_LOG_LEVEL=DEBUG \
+         --env MOCKSERVER_DETAILED_MATCH_FAILURES=true \
+         mockserver/mockserver
+
+### Common Issues
+
+- **Request body mismatch**: JSON body matchers default to `ONLY_MATCHING_FIELDS`. Ensure the specified fields exist in the request. For exact matching, use `"matchType": "STRICT"`.
+- **Header case sensitivity**: Header names are case-insensitive in HTTP. MockServer matches headers case-insensitively.
+- **Regex path matching**: Regex is automatically applied to path strings containing regex metacharacters. For exact matching of paths with special characters, use `{"not": false, "value": "/exact/path"}`.
+- **Expectation ordering**: When multiple expectations match, the highest-priority one wins. If priorities are equal, the most recently added expectation is checked first.
+- **Memory limits**: If expectations or logs are disappearing, check `maxExpectations` and `maxLogEntries`. Both use circular buffers that overwrite oldest entries when full.
+
+## Full JSON Schema Reference
+
+### Expectation Object
+
+    {
+      "id": "string (optional, unique identifier for upsert)",
+      "priority": "integer (optional, higher = matched first)",
+      "httpRequest": { /* RequestDefinition */ },
+      "httpResponse": { /* HttpResponse (action - pick one) */ },
+      "httpResponseTemplate": { /* HttpTemplate */ },
+      "httpResponseClassCallback": { /* HttpClassCallback */ },
+      "httpResponseObjectCallback": { /* HttpObjectCallback */ },
+      "httpForward": { /* HttpForward (action - pick one) */ },
+      "httpForwardTemplate": { /* HttpTemplate */ },
+      "httpForwardClassCallback": { /* HttpClassCallback */ },
+      "httpForwardObjectCallback": { /* HttpObjectCallback */ },
+      "httpOverrideForwardedRequest": { /* HttpOverrideForwardedRequest */ },
+      "httpError": { /* HttpError (action - pick one) */ },
+      "times": {
+        "remainingTimes": "integer",
+        "unlimited": "boolean (default true)"
+      },
+      "timeToLive": {
+        "timeUnit": "DAYS|HOURS|MINUTES|SECONDS|MILLISECONDS|MICROSECONDS|NANOSECONDS",
+        "timeToLive": "integer",
+        "unlimited": "boolean (default true)"
+      }
+    }
+
+### HttpRequest Object (Request Matcher)
+
+    {
+      "method": "string or matcher object",
+      "path": "string or matcher object",
+      "pathParameters": { /* KeyToMultiValue */ },
+      "queryStringParameters": { /* KeyToMultiValue */ },
+      "headers": { /* KeyToMultiValue */ },
+      "cookies": { /* KeyToValue */ },
+      "body": { /* Body matcher */ },
+      "secure": "boolean",
+      "keepAlive": "boolean",
+      "socketAddress": {
+        "host": "string",
+        "port": "integer",
+        "scheme": "HTTP|HTTPS"
+      },
+      "protocol": "HTTP_1_1|HTTP_2"
+    }
+
+### HttpResponse Object
+
+    {
+      "statusCode": "integer (default 200)",
+      "reasonPhrase": "string",
+      "headers": { /* KeyToMultiValue */ },
+      "cookies": { /* KeyToValue */ },
+      "body": "string or body object",
+      "delay": {
+        "timeUnit": "string (e.g. SECONDS, MILLISECONDS)",
+        "value": "integer"
+      },
+      "connectionOptions": {
+        "closeSocket": "boolean",
+        "closeSocketDelay": { /* Delay */ },
+        "keepAliveOverride": "boolean",
+        "suppressContentLengthHeader": "boolean",
+        "contentLengthHeaderOverride": "integer",
+        "suppressConnectionHeader": "boolean",
+        "chunkSize": "integer"
+      }
+    }
+
+### KeyToMultiValue Formats
+
+Object format (shorthand):
+
+    {"headerName": ["value1", "value2"], "keyMatchStyle": "SUB_SET"}
+
+Array format:
+
+    [{"name": "headerName", "values": ["value1", "value2"]}]
+
+### KeyToValue Formats
+
+Object format:
+
+    {"cookieName": "cookieValue"}
+
+Array format:
+
+    [{"name": "cookieName", "value": "cookieValue"}]
+
+### Verification Object
+
+    {
+      "httpRequest": { /* RequestDefinition */ },
+      "times": {
+        "atLeast": "integer",
+        "atMost": "integer"
+      },
+      "maximumNumberOfRequestToReturnInVerificationFailure": "integer"
+    }
+
+Or by expectation ID:
+
+    {
+      "expectationId": {"id": "string"},
+      "times": {"atLeast": 1}
+    }
+
+### VerificationSequence Object
+
+    {
+      "httpRequests": [
+        { /* RequestDefinition */ },
+        { /* RequestDefinition */ }
+      ],
+      "maximumNumberOfRequestToReturnInVerificationFailure": "integer"
+    }
+
+Or by expectation IDs:
+
+    {
+      "expectationIds": [
+        {"id": "string"},
+        {"id": "string"}
+      ]
+    }
+
+## Environment Variable Quick Reference
+
+| Environment Variable | System Property | Default |
+|---|---|---|
+| MOCKSERVER_SERVER_PORT | mockserver.serverPort | 1080 |
+| MOCKSERVER_LOG_LEVEL | mockserver.logLevel | INFO |
+| MOCKSERVER_DISABLE_SYSTEM_OUT | mockserver.disableSystemOut | false |
+| MOCKSERVER_DISABLE_LOGGING | mockserver.disableLogging | false |
+| MOCKSERVER_LOG_LEVEL_OVERRIDES | mockserver.logLevelOverrides | {} |
+| MOCKSERVER_MAX_EXPECTATIONS | mockserver.maxExpectations | auto |
+| MOCKSERVER_MAX_LOG_ENTRIES | mockserver.maxLogEntries | auto |
+| MOCKSERVER_MAX_WEB_SOCKET_EXPECTATIONS | mockserver.maxWebSocketExpectations | 1500 |
+| MOCKSERVER_NIO_EVENT_LOOP_THREAD_COUNT | mockserver.nioEventLoopThreadCount | 5 |
+| MOCKSERVER_ACTION_HANDLER_THREAD_COUNT | mockserver.actionHandlerThreadCount | max(5, cpus) |
+| MOCKSERVER_MAX_PENDING_DELAYED_RESPONSES | mockserver.maxPendingDelayedResponses | auto |
+| MOCKSERVER_MAX_QUEUED_TEMPLATE_ACTIONS | mockserver.maxQueuedTemplateActions | auto |
+| MOCKSERVER_MAX_SOCKET_TIMEOUT | mockserver.maxSocketTimeout | 20000 |
+| MOCKSERVER_SOCKET_CONNECTION_TIMEOUT | mockserver.socketConnectionTimeout | 20000 |
+| MOCKSERVER_MAX_FUTURE_TIMEOUT | mockserver.maxFutureTimeout | 90000 |
+| MOCKSERVER_DETAILED_MATCH_FAILURES | mockserver.detailedMatchFailures | true |
+| MOCKSERVER_MATCHERS_FAIL_FAST | mockserver.matchersFailFast | true |
+| MOCKSERVER_ENABLE_CORS_FOR_API | mockserver.enableCORSForAPI | false |
+| MOCKSERVER_ENABLE_CORS_FOR_ALL_RESPONSES | mockserver.enableCORSForAllResponses | false |
+| MOCKSERVER_INITIALIZATION_JSON_PATH | mockserver.initializationJsonPath | null |
+| MOCKSERVER_INITIALIZATION_OPENAPI_PATH | mockserver.initializationOpenAPIPath | null |
+| MOCKSERVER_WATCH_INITIALIZATION_JSON | mockserver.watchInitializationJson | false |
+| MOCKSERVER_PERSIST_EXPECTATIONS | mockserver.persistExpectations | false |
+| MOCKSERVER_PERSISTED_EXPECTATIONS_PATH | mockserver.persistedExpectationsPath | persistedExpectations.json |
+| MOCKSERVER_ATTEMPT_TO_PROXY_IF_NO_MATCHING_EXPECTATION | mockserver.attemptToProxyIfNoMatchingExpectation | true |
+| MOCKSERVER_FORWARD_BINARY_REQUESTS_USE_SINGLE_CONNECTION | mockserver.forwardBinaryRequestsUseSingleConnection | true |
+| MOCKSERVER_FORWARD_BINARY_REQUESTS_MATCH_EXPECTATIONS | mockserver.forwardBinaryRequestsMatchExpectations | false |
+| MOCKSERVER_FORWARD_BINARY_SERVER_FIRST_WAIT_MILLIS | mockserver.forwardBinaryServerFirstWaitMillis | 0 |
+| MOCKSERVER_BINARY_MESSAGE_FRAMING | mockserver.binaryMessageFraming | RAW |
+| MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_BYTES | mockserver.binaryMessageLengthPrefixBytes | 4 |
+| MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_BYTE_ORDER | mockserver.binaryMessageLengthPrefixByteOrder | BIG_ENDIAN |
+| MOCKSERVER_BINARY_MESSAGE_LENGTH_PREFIX_OFFSET | mockserver.binaryMessageLengthPrefixOffset | 0 |
+| MOCKSERVER_BINARY_MESSAGE_LENGTH_INCLUDES_PREFIX | mockserver.binaryMessageLengthIncludesPrefix | false |
+| MOCKSERVER_FORWARD_BINARY_REQUESTS_WITHOUT_WAITING_FOR_RESPONSE (deprecated; only when forwardBinaryRequestsUseSingleConnection is false) | mockserver.forwardBinaryRequestsWithoutWaitingForResponse | false |
+| MOCKSERVER_FORWARD_HTTP_PROXY | mockserver.forwardHttpProxy | null |
+| MOCKSERVER_FORWARD_HTTPS_PROXY | mockserver.forwardHttpsProxy | null |
+| MOCKSERVER_FORWARD_SOCKS_PROXY | mockserver.forwardSocksProxy | null |
+| MOCKSERVER_LIVENESS_HTTP_GET_PATH | mockserver.livenessHttpGetPath | null |
+| MOCKSERVER_DYNAMICALLY_CREATE_CERTIFICATE_AUTHORITY_CERTIFICATE | mockserver.dynamicallyCreateCertificateAuthorityCertificate | false |
+| MOCKSERVER_SSL_CERTIFICATE_DOMAIN_NAME | mockserver.sslCertificateDomainName | localhost |
+| MOCKSERVER_SSL_SUBJECT_ALTERNATIVE_NAME_DOMAINS | mockserver.sslSubjectAlternativeNameDomains | localhost |
+| MOCKSERVER_SSL_SUBJECT_ALTERNATIVE_NAME_IPS | mockserver.sslSubjectAlternativeNameIps | 127.0.0.1,0.0.0.0 |
+| MOCKSERVER_PROPERTY_FILE | mockserver.propertyFile | mockserver.properties |
+| MOCKSERVER_METRICS_ENABLED | mockserver.metricsEnabled | false |
+| MOCKSERVER_ALWAYS_CLOSE_SOCKET_CONNECTIONS | mockserver.alwaysCloseSocketConnections | false |
+| MOCKSERVER_LOCAL_BOUND_IP | mockserver.localBoundIP | 0.0.0.0 |
+| MOCKSERVER_ASSUME_ALL_REQUESTS_ARE_HTTP | mockserver.assumeAllRequestsAreHttp | false |
+| MOCKSERVER_USE_SEMICOLON_AS_QUERY_PARAMETER_SEPARATOR | mockserver.useSemicolonAsQueryParameterSeparator | true |
+| MOCKSERVER_JAVASCRIPT_DISALLOWED_CLASSES | mockserver.javascriptDisallowedClasses | "" |
+| MOCKSERVER_VELOCITY_DISALLOW_CLASS_LOADING | mockserver.velocityDisallowClassLoading | false |

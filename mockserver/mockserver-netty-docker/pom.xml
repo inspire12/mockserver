@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <groupId>org.mock-server</groupId>
+        <artifactId>mockserver</artifactId>
+        <version>8.0.1-SNAPSHOT</version>
+    </parent>
+
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Build-internal, never published: the server jar the published Docker images are built from.
+         It is the mockserver-netty-no-dependencies jar with ONE change, JNA moved back from
+         shaded_package.com.sun.jna to com.sun.jna, because libjnidispatch binds its JNI entry points
+         to the unrelocated class names and so cannot load under the relocated ones. The library jar
+         keeps JNA relocated: users embed it next to their own JNA (Testcontainers, docker-java).
+         Deriving from the library jar (rather than re-shading mockserver-netty) keeps every other
+         entry identical by construction; the release derives it from the RELEASED library jar with
+         -Dmockserver.docker.baseVersion=<release>. See docs/infrastructure/docker.md. -->
+    <artifactId>mockserver-netty-docker</artifactId>
+
+    <name>MockServer &amp; Proxy Netty (Docker image jar)</name>
+    <description>The shaded MockServer server jar with JNA unrelocated, for the MockServer Docker images (not published)</description>
+    <url>https://www.mock-server.com</url>
+
+    <properties>
+        <mockserver.docker.baseVersion>${project.version}</mockserver.docker.baseVersion>
+        <maven.deploy.skip>true</maven.deploy.skip>
+        <maven.javadoc.skip>true</maven.javadoc.skip>
+        <maven.source.skip>true</maven.source.skip>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>mockserver-netty-no-dependencies</artifactId>
+            <version>${mockserver.docker.baseVersion}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <!-- Named for the library jar it derives from, so a release build of this (SNAPSHOT) module
+             from the released library produces mockserver-netty-docker-<release>.jar. -->
+        <finalName>${project.artifactId}-${mockserver.docker.baseVersion}</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>shade-no-dependencies</id>
+                        <!-- Replaces the shared no-dependencies configuration: the input is already
+                             shaded, so the only relocation is JNA's, reversed. This module's own
+                             (empty) jar contributes nothing, so the manifest is the library's. -->
+                        <configuration combine.self="override">
+                            <createSourcesJar>false</createSourcesJar>
+                            <shadedArtifactAttached>false</shadedArtifactAttached>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <minimizeJar>false</minimizeJar>
+                            <artifactSet>
+                                <includes>
+                                    <include>${project.groupId}:mockserver-netty-no-dependencies</include>
+                                </includes>
+                            </artifactSet>
+                            <filters>
+                                <filter>
+                                    <artifact>${project.groupId}:${project.artifactId}</artifact>
+                                    <excludes>
+                                        <exclude>**</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                            <relocations>
+                                <relocation>
+                                    <pattern>shaded_package.com.sun.jna</pattern>
+                                    <shadedPattern>com.sun.jna</shadedPattern>
+                                </relocation>
+                            </relocations>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.6.4</version>
+                <executions>
+                    <!-- Fail the build unless this jar carries JNA unrelocated (with both linux
+                         jnidispatch natives) while the library jar it derives from still relocates
+                         it, and unless nothing else differs between the two. Never skipped, so the
+                         -DskipTests image builds are guarded too. -->
+                    <execution>
+                        <id>assert-docker-jar-jna</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <executable>${project.basedir}/../mockserver-netty-no-dependencies/src/packaging/assert-jna-relocation.sh</executable>
+                            <arguments>
+                                <argument>${org.mock-server:mockserver-netty-no-dependencies:jar}</argument>
+                                <argument>${project.build.directory}/${project.build.finalName}.jar</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- Expose the RESOLVED path of the library jar (used by the assertion above). -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.11.0</version>
+                <executions>
+                    <execution>
+                        <id>expose-dependency-paths</id>
+                        <phase>initialize</phase>
+                        <goals>
+                            <goal>properties</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- Never published to Maven Central (see mockserver-integration-testing-no-dependencies). -->
+        <profile>
+            <id>release</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <configuration>
+                            <skipPublishing>true</skipPublishing>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
+</project>

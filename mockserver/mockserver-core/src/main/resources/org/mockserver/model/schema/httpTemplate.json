@@ -1,0 +1,169 @@
+{
+  "title": "template to generate response / request",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "delay": {
+      "$ref": "#/definitions/delay"
+    },
+    "templateType": {
+      "enum": [
+        "VELOCITY",
+        "JAVASCRIPT",
+        "MUSTACHE"
+      ]
+    },
+    "template": {
+      "type": "string"
+    },
+    "templateFile": {
+      "type": "string"
+    },
+    "primary": {
+      "type": "boolean"
+    },
+    "responseOverride": {
+      "$ref": "#/definitions/httpResponse"
+    },
+    "responseModifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "headers": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "add": {
+              "$ref": "#/definitions/keyToMultiValue"
+            },
+            "replace": {
+              "$ref": "#/definitions/keyToMultiValue"
+            },
+            "remove": {
+              "type": "array",
+              "additionalProperties": false,
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "cookies": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "add": {
+              "$ref": "#/definitions/keyToValue"
+            },
+            "replace": {
+              "$ref": "#/definitions/keyToValue"
+            },
+            "remove": {
+              "type": "array",
+              "additionalProperties": false,
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "condition": {
+          "$ref": "#/definitions/responseModifierCondition"
+        },
+        "modifiers": {
+          "type": "array",
+          "additionalProperties": false,
+          "items": {
+            "$ref": "#/definitions/responseModifier"
+          }
+        },
+        "jsonPatch": {
+          "type": "array"
+        },
+        "jsonMergePatch": {
+          "type": "object"
+        }
+      }
+    }
+  },
+  "definitions": {
+    "responseModifierCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "statusCode": {
+          "type": "integer"
+        },
+        "statusCodeRange": {
+          "type": "string"
+        },
+        "responseHasHeader": {
+          "type": "string"
+        },
+        "requestHasHeader": {
+          "type": "string"
+        }
+      }
+    },
+    "responseModifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "headers": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "add": {
+              "$ref": "#/definitions/keyToMultiValue"
+            },
+            "replace": {
+              "$ref": "#/definitions/keyToMultiValue"
+            },
+            "remove": {
+              "type": "array",
+              "additionalProperties": false,
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "cookies": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "add": {
+              "$ref": "#/definitions/keyToValue"
+            },
+            "replace": {
+              "$ref": "#/definitions/keyToValue"
+            },
+            "remove": {
+              "type": "array",
+              "additionalProperties": false,
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "condition": {
+          "$ref": "#/definitions/responseModifierCondition"
+        },
+        "modifiers": {
+          "type": "array",
+          "additionalProperties": false,
+          "items": {
+            "$ref": "#/definitions/responseModifier"
+          }
+        },
+        "jsonPatch": {
+          "type": "array"
+        },
+        "jsonMergePatch": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

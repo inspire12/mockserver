@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "MockServer Helm chart values",
+  "description": "Schema for the MockServer Helm chart values. Intentionally permissive: it documents the known keys and catches obvious type mistakes, but does not forbid additional properties and marks nothing required, so any valid configuration still installs.",
+  "type": "object",
+  "properties": {
+    "replicaCount": { "type": "integer", "minimum": 0 },
+    "releasenameOverride": { "type": "string" },
+    "podSecurityContext": { "type": "object" },
+    "podAnnotations": { "type": "object" },
+    "podLabels": { "type": "object" },
+    "resources": { "type": "object" },
+    "nodeSelector": { "type": "object" },
+    "tolerations": { "type": "array" },
+    "affinity": { "type": "object" },
+    "imagePullSecrets": { "type": "array" },
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string" },
+        "snapshot": { "type": "boolean" },
+        "pullPolicy": { "type": "string" },
+        "variant": { "type": "string", "enum": ["", "http3", "graaljs"] }
+      }
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string" },
+        "port": { "type": ["integer", "string"] },
+        "nodePort": { "type": ["integer", "string"] },
+        "annotations": { "type": "object" },
+        "clusterIP": { "type": "string" },
+        "externalIPs": { "type": "array" },
+        "loadBalancerIP": { "type": "string" },
+        "loadBalancerSourceRanges": { "type": "array" }
+      }
+    },
+    "serviceMonitor": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "namespace": { "type": "string" },
+        "labels": { "type": "object" },
+        "interval": { "type": "string" },
+        "scrapeTimeout": { "type": "string" },
+        "path": { "type": "string" },
+        "scheme": { "type": "string" },
+        "honorLabels": { "type": "boolean" },
+        "namespaceSelector": { "type": "object" },
+        "relabelings": { "type": "array" },
+        "metricRelabelings": { "type": "array" }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "annotations": { "type": "object" },
+        "hosts": { "type": "array" },
+        "tls": { "type": "array" }
+      }
+    },
+    "sidecar": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "transparentProxy": { "type": "boolean" },
+        "netAdmin": { "type": "boolean" },
+        "iptables": { "type": "object" }
+      }
+    },
+    "webhook": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "type": "object" },
+        "replicaCount": { "type": "integer", "minimum": 0 },
+        "failurePolicy": { "type": "string" },
+        "timeoutSeconds": { "type": "integer" },
+        "scope": { "type": "string" },
+        "namespaceSelector": { "type": "object" },
+        "objectSelector": { "type": "object" },
+        "sidecar": { "type": "object" },
+        "certManager": { "type": "object" },
+        "tls": { "type": "object" },
+        "caBundle": { "type": "string" },
+        "resources": { "type": "object" },
+        "podAnnotations": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" }
+      }
+    },
+    "clustering": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "clusterName": { "type": "string" },
+        "transportConfig": { "type": "string" },
+        "jgroupsPort": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "app": {
+      "type": "object",
+      "properties": {
+        "logLevel": { "type": "string" },
+        "serverPort": { "type": ["string", "integer"] },
+        "mountedConfigMapName": { "type": "string" },
+        "mountedLibsConfigMapName": { "type": "string" },
+        "propertiesFileName": { "type": "string" },
+        "readOnlyRootFilesystem": { "type": "boolean" },
+        "serviceAccountName": { "type": "string" },
+        "runAsUser": { "type": ["integer", "string"] },
+        "proxyRemoteHost": { "type": "string" },
+        "proxyRemotePort": { "type": ["integer", "string"] },
+        "jvmOptions": { "type": "string" },
+        "mountConfigMap": { "type": "boolean" },
+        "extraEnv": { "type": "array" },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "create": { "type": "boolean" },
+            "existingSecretName": { "type": "string" },
+            "mountPath": { "type": "string" },
+            "certificateAuthorityCertificate": { "type": "string" },
+            "certificateAuthorityPrivateKey": { "type": "string" },
+            "certificate": { "type": "string" },
+            "privateKey": { "type": "string" }
+          }
+        },
+        "dynamicCertificateDir": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "path": { "type": "string" }
+          }
+        },
+        "config": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "properties": { "type": "string" },
+            "initializerJson": { "type": "string" },
+            "extraFiles": { "type": "object" }
+          }
+        },
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "existingClaimName": { "type": "string" },
+            "storageClass": { "type": "string" },
+            "accessModes": { "type": "array" },
+            "size": { "type": ["string", "integer"] },
+            "mountPath": { "type": "string" },
+            "annotations": { "type": "object" }
+          }
+        }
+      }
+    }
+  }
+}

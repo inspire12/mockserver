@@ -2,10 +2,36 @@
 
 <h2>Logging & Metrics Configuration:</h2>
 
+<h3>Quick Reference</h3>
+<table class="table" style="width: 100%; margin-bottom: 20px;">
+    <thead>
+        <tr>
+            <th>Property</th>
+            <th>Purpose</th>
+            <th>Default</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr><td><a href="#button_configuration_log_level"><code>logLevel</code></a></td><td>Global minimum log level</td><td><code>INFO</code></td></tr>
+        <tr><td><a href="#button_configuration_disable_system_out"><code>disableSystemOut</code></a></td><td>Suppress stdout output</td><td><code>false</code></td></tr>
+        <tr><td><a href="#button_configuration_disable_logging"><code>disableLogging</code></a></td><td>Disable all logging and event processing</td><td><code>false</code></td></tr>
+        <tr><td><a href="#button_configuration_compact_log_format"><code>compactLogFormat</code></a></td><td>One-line summaries instead of full JSON in stdout</td><td><code>false</code></td></tr>
+        <tr><td><a href="#button_configuration_log_level_overrides"><code>logLevelOverrides</code></a></td><td>Per-type/category log level overrides</td><td><code>{}</code></td></tr>
+        <tr><td><a href="#button_configuration_detailed_match_failures"><code>detailedMatchFailures</code></a></td><td>Include per-field match failure reasons</td><td><code>true</code></td></tr>
+        <tr><td><a href="#button_configuration_detailed_verification_failures"><code>detailedVerificationFailures</code></a></td><td>Include per-field diff in verification failures</td><td><code>true</code></td></tr>
+        <tr><td><a href="#button_configuration_fail_verification_on_evicted_log"><code>failVerificationOnEvictedLog</code></a></td><td>Fail <code>never()</code> / <code>atMost</code> verifications when the event log has discarded entries</td><td><code>true</code></td></tr>
+        <tr><td><a href="#button_configuration_launch_ui__debug"><code>launchUIForLogLevelDebug</code></a></td><td>Auto-open UI when log level is DEBUG</td><td><code>false</code></td></tr>
+        <tr><td><a href="#button_configuration_enabled_metrics"><code>metricsEnabled</code></a></td><td>Prometheus metrics endpoint</td><td><code>false</code></td></tr>
+        <tr><td><a href="#button_configuration_slow_request_threshold_millis"><code>slowRequestThresholdMillis</code></a></td><td>Flag forwarded requests slower than this threshold</td><td><code>0</code> (disabled)</td></tr>
+        <tr><td><a href="#button_configuration_metrics_request_duration_route_labels"><code>metricsRequestDurationRouteLabels</code></a></td><td>Add per-HTTP-method labels to the request duration histogram</td><td><code>false</code></td></tr>
+    </tbody>
+</table>
+
 <button id="button_configuration_log_level" class="accordion title"><strong>Log Level</strong></button>
 <div class="panel title">
     <p>The the minimum level of logs to record in the event log and to output to system out (if <a href="#button_configuration_disable_system_out">system out log output</a> is not disabled).  The lower the log level the more log entries will be captured, particularly at TRACE level logging.</p>
     <p>Type: <span class="keyword">string</span> Default: <span class="this_value">INFO</span></p>
+    <p>Allowed values: <span class="inline_code">TRACE</span>, <span class="inline_code">DEBUG</span>, <span class="inline_code">INFO</span>, <span class="inline_code">WARN</span>, <span class="inline_code">ERROR</span>, <span class="inline_code">OFF</span> (also accepts java.util.logging equivalents: FINEST, FINE, WARNING, SEVERE)</p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.logLevel(String level)</code></pre>
     <p>System Property:</p>
@@ -13,8 +39,7 @@
     <p>Environment Variable:</p>
     <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_LOG_LEVEL=...</code></pre>
     <p>Property File:</p>
-    <pre class="code" style="padding: 2px;"><code class="code">mockserver.logLevel</code></pre>
-    <p>The log level, which can be TRACE, DEBUG, INFO, WARN, ERROR, OFF, FINEST, FINE, INFO, WARNING, SEVERE</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.logLevel=...</code></pre>
     <p>Example:</p>
     <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.logLevel="DEBUG"</code></pre>
 </div>
@@ -51,10 +76,83 @@
     <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.disableLogging="true"</code></pre>
 </div>
 
+<button id="button_configuration_compact_log_format" class="accordion title"><strong>Compact Log Format</strong></button>
+<div class="panel title">
+    <p>When enabled, log messages written to stdout/SLF4J use a compact single-line format showing summary information (method, path, status code, expectation ID) instead of full JSON-serialized request and response details. This significantly reduces log noise, especially in CI/CD environments or when running many tests.</p>
+    <p>The dashboard UI, verification, and log retrieval APIs are not affected &mdash; they continue to show full details.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.compactLogFormat(boolean enable)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.compactLogFormat=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_COMPACT_LOG_FORMAT=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.compactLogFormat=...</code></pre>
+    <p>Example output comparison:</p>
+    <p><strong>Verbose (default):</strong></p>
+    <pre class="code" style="padding: 2px;"><code class="code">INFO - 50850 returning response:
+
+  {
+    "statusCode" : 200,
+    "body" : "{\"accessToken\":{...}}"
+  }
+
+ for request:
+
+  {
+    "method" : "POST",
+    "path" : "/oauth2/token",
+    "headers" : { ... }
+  }
+
+ from expectation:
+
+  a735b798-8aec-4c15-b264-c6d3c93fda1d</code></pre>
+    <p><strong>Compact:</strong></p>
+    <pre class="code" style="padding: 2px;"><code class="code">INFO - 50850 returning response: 200 for request: POST /oauth2/token from expectation: a735b798-8aec-4c15-b264-c6d3c93fda1d</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.compactLogFormat="true"</code></pre>
+    <p>Tip: combine with <a href="#button_configuration_log_level_overrides">logLevelOverrides</a> for maximum control. For example, enable compact format and suppress startup/shutdown noise:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.compactLogFormat="true" -Dmockserver.logLevelOverrides='{"SERVER":"WARN"}'</code></pre>
+</div>
+
+<button id="button_configuration_log_level_overrides" class="accordion title"><strong>Log Level Overrides (Per-Category)</strong></button>
+<div class="panel title">
+    <p>Override the log level for specific categories of log events or individual log message types. This allows fine-grained control over log verbosity without changing the global log level.</p>
+    <p>Keys can be <strong>category group names</strong> or <strong>individual log message type names</strong>. When both are specified, the individual type override takes precedence over the category group override, which takes precedence over the global <code>logLevel</code>.</p>
+    <p>This setting affects stdout/SLF4J output and the dashboard UI. The internal event log (used for verification) is not affected.</p>
+    <p><strong>Note:</strong> Overrides can only suppress log events that are already captured at the global <code>logLevel</code>. For example, with <code>logLevel=WARN</code>, setting <code>{"EXPECTATION_MATCHED":"INFO"}</code> will <em>not</em> cause INFO-level match events to appear, because they are not generated when the global level is WARN. To see more verbose events for a specific category, first set the global <code>logLevel</code> low enough (e.g., INFO or DEBUG), then use overrides to suppress the noisy categories.</p>
+    <p>Type: <span class="keyword">map (JSON object)</span> Default: <span class="this_value">{}</span> (empty, global logLevel applies to all categories)</p>
+    <p><strong>Category Groups:</strong></p>
+    <table class="table" style="width: auto;">
+        <tr><td><code>MATCHING</code></td><td>EXPECTATION_MATCHED, EXPECTATION_NOT_MATCHED, NO_MATCH_RESPONSE</td></tr>
+        <tr><td><code>REQUEST_LIFECYCLE</code></td><td>RECEIVED_REQUEST, FORWARDED_REQUEST, EXPECTATION_RESPONSE, TEMPLATE_GENERATED</td></tr>
+        <tr><td><code>EXPECTATION_MANAGEMENT</code></td><td>CREATED_EXPECTATION, UPDATED_EXPECTATION, REMOVED_EXPECTATION, CLEARED</td></tr>
+        <tr><td><code>VERIFICATION</code></td><td>VERIFICATION, VERIFICATION_FAILED, VERIFICATION_PASSED, RETRIEVED</td></tr>
+        <tr><td><code>SERVER</code></td><td>SERVER_CONFIGURATION, AUTHENTICATION_FAILED, OPENAPI_RESPONSE_VALIDATION_FAILED</td></tr>
+        <tr><td><code>GENERAL</code></td><td>TRACE, DEBUG, INFO, WARN, ERROR, EXCEPTION</td></tr>
+    </table>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.logLevelOverrides(Map&lt;String, String&gt; overrides)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.logLevelOverrides=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_LOG_LEVEL_OVERRIDES=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.logLevelOverrides=...</code></pre>
+    <p>REST API:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">PUT /mockserver/configuration {"logLevelOverrides": {"MATCHING": "WARN", "EXPECTATION_MATCHED": "INFO"}}</code></pre>
+    <p>Example - suppress per-expectation match failure noise while keeping match successes:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.logLevelOverrides='{"MATCHING":"WARN","EXPECTATION_MATCHED":"INFO"}'</code></pre>
+    <p>Example - suppress all matching and expectation management logs:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_LOG_LEVEL_OVERRIDES='{"MATCHING":"WARN","EXPECTATION_MANAGEMENT":"WARN"}'</code></pre>
+</div>
+
 <button id="button_configuration_detailed_match_failures" class="accordion title"><strong>Detailed Match Failures</strong></button>
 <div class="panel title">
-    <p>If true (the default) the log event recording that a request matcher did not match will include a detailed reason why each non matching field did not match.</p>
-    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">true</span></p>
+    <p>If true (the default) the log event recording that a request matcher did not match will include a detailed reason why each non matching field did not match. See <a href="/mock_server/troubleshooting_matching.html">Troubleshooting Matching</a> for how to use this when debugging.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">true</span></p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.detailedMatchFailures(boolean enable)</code></pre>
     <p>System Property:</p>
@@ -67,10 +165,70 @@
     <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.detailedMatchFailures="false"</code></pre>
 </div>
 
+<button id="button_configuration_detailed_verification_failures" class="accordion title"><strong>Detailed Verification Failures</strong></button>
+<div class="panel title">
+    <p>If true (the default) verification failure messages will include a detailed diff showing how each recorded request differed from the expected request. This makes it easier to identify why a verification failed by highlighting per-field mismatches between the expected and actual requests.</p>
+    <p>Disable this if verification failure messages are too verbose or if you prefer concise failure output.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">true</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.detailedVerificationFailures(boolean enable)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.detailedVerificationFailures=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_DETAILED_VERIFICATION_FAILURES=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.detailedVerificationFailures=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.detailedVerificationFailures="false"</code></pre>
+</div>
+
+<button id="button_configuration_fail_verification_on_evicted_log" class="accordion title"><strong>Fail Verification When Event Log Has Evicted Entries</strong></button>
+<div class="panel title">
+    <p>The event log holds at most <a href="#button_configuration_max_log_entries"><code>maxLogEntries</code></a> entries (and at most <code>maxEventLogSizeInBytes</code> of bodies). Once it is full, the oldest entries are discarded to make room for new ones. On a very busy server, log events can also be dropped before they are recorded at all. Either way those entries are gone — they can no longer be retrieved or verified.</p>
+    <p>This matters for verifications that assert something did <strong>not</strong> happen. If you call <span class="inline_code">verify(request, never())</span> and the matching entries have been discarded, MockServer cannot tell the difference between "this request was never made" and "this request was made, but the record of it was thrown away". Previously it reported success, so a test asserting an endpoint was never called could quietly turn green simply because the log had filled up.</p>
+    <p>If true (the default) a verification that asserts an <strong>upper</strong> bound will fail, rather than pass, when the event log has discarded entries. The failure message lists what was lost since the event log was last reset, how many entries, and the fix for each cause. The dashboard shows the same on the verification's <code>VERIFICATION_FAILED</code> log entry.</p>
+    <table>
+        <thead><tr><th>Verification</th><th>Affected?</th><th>Why</th></tr></thead>
+        <tbody>
+            <tr><td><span class="inline_code">never()</span></td><td>Yes</td><td>Asserts at most 0 calls</td></tr>
+            <tr><td><span class="inline_code">atMost(n)</span></td><td>Yes</td><td>Asserts at most n calls</td></tr>
+            <tr><td><span class="inline_code">exactly(n)</span></td><td>Yes</td><td>Asserts at most n calls</td></tr>
+            <tr><td><span class="inline_code">once()</span></td><td><strong>Yes</strong></td><td>Asserts <em>exactly</em> one call, so a discarded second call would go unnoticed</td></tr>
+            <tr><td><span class="inline_code">between(a, b)</span></td><td>Yes</td><td>Asserts at most b calls</td></tr>
+            <tr><td><span class="inline_code">atLeast(n)</span></td><td>No</td><td>No upper bound to violate</td></tr>
+            <tr><td><span class="inline_code">verify(request)</span> (no times)</td><td>No</td><td>Defaults to <span class="inline_code">atLeast(1)</span></td></tr>
+        </tbody>
+    </table>
+    <p><span class="inline_code">once()</span> is worth calling out: it is a very common way to verify a request, and although it reads like "this happened", it actually asserts "this happened <em>exactly once</em>" — an upper bound. Discarding entries can only ever make the observed count too low, never too high, which is why lower-bound verifications are safe and upper-bound ones are not.</p>
+    <p>If a verification starts failing for this reason, the message names one or more of these causes. Only the causes that happened since the last reset are listed:</p>
+    <table>
+        <thead><tr><th>The message says</th><th>What happened</th><th>Fix</th></tr></thead>
+        <tbody>
+            <tr><td>log events were <strong>DROPPED</strong> &hellip; because the ring buffer was full</td><td>Log events arrived faster than the single logging thread could record them</td><td>Set the log level to <code>WARN</code> or <code>ERROR</code>, which stops non-matching expectations logging at all. A larger <code>ringBufferSize</code> only absorbs short bursts.</td></tr>
+            <tr><td>log events were <strong>DROPPED</strong> &hellip; exceeded the in-flight byte budget</td><td>The request and response bodies waiting to be logged went over their memory limit</td><td>Set the log level to <code>WARN</code> or <code>ERROR</code>, or, if you have heap to spare, raise <code>maxEventLogSizeInBytes</code> above the budget quoted in the message. <code>maxLoggedBodyBytes</code> does not help here.</td></tr>
+            <tr><td>recorded entries were <strong>EVICTED</strong> &hellip; maximum number of entries</td><td>The log reached <code>maxLogEntries</code> and discarded its oldest entries</td><td>Increase <a href="#button_configuration_max_log_entries"><code>maxLogEntries</code></a>, or set the log level to <code>WARN</code> or <code>ERROR</code> &mdash; each request can log up to one entry per expectation, plus two, because every expectation that does not match logs an entry at <code>INFO</code>.</td></tr>
+            <tr><td>recorded entries were <strong>EVICTED</strong> &hellip; maximum size in bytes</td><td>The log reached <code>maxEventLogSizeInBytes</code> and discarded its oldest entries</td><td>Increase <code>maxEventLogSizeInBytes</code>, or set <code>maxLoggedBodyBytes</code> so each recorded entry is smaller.</td></tr>
+        </tbody>
+    </table>
+    <p>Whatever the cause, clearing everything or resetting the event log between tests also clears this state, so each test starts with a complete log. Clearing only the entries that match a request does not.</p>
+    <p>Set to false to restore the previous behaviour, where these verifications could pass against an incomplete log.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">true</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.failVerificationOnEvictedLog(boolean enable)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.failVerificationOnEvictedLog=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_FAIL_VERIFICATION_ON_EVICTED_LOG=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.failVerificationOnEvictedLog=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.failVerificationOnEvictedLog="false"</code></pre>
+</div>
+
 <button id="button_configuration_launch_ui__debug" class="accordion title"><strong>ClientAndServer launches UI when log level DEBUG</strong></button>
 <div class="panel title">
-    <p>If true (the default) the ClientAndServer constructor or static factor methods will open the UI in the default browser when the log level is set to DEBUG.</p>
-    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">false</span></p>
+    <p>If true (default <span class="this_value">false</span>) the ClientAndServer constructor or static factory methods will open the UI in the default browser when the log level is set to DEBUG.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.launchUIForLogLevelDebug(boolean enable)</code></pre>
     <p>System Property:</p>
@@ -97,4 +255,52 @@
     <pre class="code" style="padding: 2px;"><code class="code">mockserver.metricsEnabled=...</code></pre>
     <p>Example:</p>
     <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.metricsEnabled="true"</code></pre>
+</div>
+
+<button id="button_configuration_slow_request_threshold_millis" class="accordion title"><strong>Slow Request Threshold</strong></button>
+<div class="panel title">
+    <p>Threshold in milliseconds for flagging slow forwarded requests. When a forwarded request's total round-trip time exceeds this value, MockServer emits a WARN-level log entry and increments the <code class="inline code">mock_server_slow_requests_total</code> Prometheus counter (when <a href="#button_configuration_enabled_metrics">metrics are enabled</a>). This is useful for detecting intermittently slow upstream services without scanning every recorded request manually.</p>
+    <p>Set to <code class="inline code">0</code> to disable slow-request detection. See <a href="/proxy/network_latency_debugging.html#slow_request_flagging">Network Latency Debugging</a> for usage examples.</p>
+    <p>Type: <span class="keyword">long</span> Default: <span class="this_value">0</span> (disabled)</p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.slowRequestThresholdMillis(long milliseconds)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.slowRequestThresholdMillis=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_SLOW_REQUEST_THRESHOLD_MILLIS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.slowRequestThresholdMillis=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.slowRequestThresholdMillis="500"</code></pre>
+</div>
+
+<button id="button_configuration_metrics_request_duration_route_labels" class="accordion title"><strong>Per-Method Request Duration Histogram Labels</strong></button>
+<div class="panel title">
+    <p>When enabled, MockServer registers an additional Prometheus histogram <code class="inline code">mock_server_request_duration_by_method_seconds</code> with a <code class="inline code">method</code> label for the HTTP method (GET, POST, PUT, etc.). This lets you compute per-method latency percentiles in your monitoring system. Cardinality is bounded to the set of standard HTTP methods.</p>
+    <p>Requires <a href="#button_configuration_enabled_metrics">metricsEnabled</a> to be <code class="inline code">true</code>. See <a href="/proxy/network_latency_debugging.html#latency_percentiles">Network Latency Debugging</a> for Prometheus query examples.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.metricsRequestDurationRouteLabels(boolean enable)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.metricsRequestDurationRouteLabels=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_METRICS_REQUEST_DURATION_ROUTE_LABELS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.metricsRequestDurationRouteLabels=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.metricsRequestDurationRouteLabels="true"</code></pre>
+</div>
+
+<button id="button_configuration_log_event_listener" class="accordion title"><strong>Custom Log Event Listener</strong></button>
+<div class="panel title">
+    <p>Register a custom callback that receives every log event generated by MockServer. This is useful for integrating MockServer logging with external systems (e.g. forwarding events to a monitoring tool, custom test reporting, or capturing specific events programmatically during tests).</p>
+    <p>This feature is <strong>programmatic only</strong> &mdash; there is no system property or environment variable equivalent because the listener is a Java callback.</p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">Configuration.logEventListener(Consumer&lt;LogEntry&gt; listener)</code></pre>
+    <pre class="prettyprint lang-java code"><code class="code">ClientAndServer.setLogEventListener(Consumer&lt;LogEntry&gt; listener)</code></pre>
+    <p>Example:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ClientAndServer mockServer = ClientAndServer.startClientAndServer(1080);
+mockServer.setLogEventListener(logEntry -> {
+    System.out.println("Event: " + logEntry.getType() + " - " + logEntry.getTimestamp());
+});</code></pre>
 </div>

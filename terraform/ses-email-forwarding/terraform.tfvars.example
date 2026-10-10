@@ -1,0 +1,41 @@
+# Copy this to terraform.tfvars and adjust values as needed.
+# NEVER commit terraform.tfvars -- it is gitignored.
+
+# region = "us-east-1"
+# domain = "mock-server.com"
+
+# Further domains to receive catch-all mail for. Each gets its own SES identity,
+# DKIM CNAMEs, MX and DMARC; they SHARE the rule set, receipt rule, S3 bucket,
+# Lambda and alarm.
+# ⚠️ A SECOND DOMAIN GOES HERE, NEVER IN A SECOND STACK.
+#    `aws_ses_active_receipt_rule_set` activates one rule set and DEACTIVATES any
+#    other in the same AWS account and region, so a separate stack for a second
+#    domain silently switches this one off. Both domains' Route 53 zones must be
+#    reachable by this provider — for learn-ice-hockey.com that holds, because it
+#    is in the same account.
+# additional_domains = ["learn-ice-hockey.com"]
+
+# Local part for the rewritten From, applied per receiving domain: "noreply"
+# gives noreply@mock-server.com for mail to that domain and
+# noreply@learn-ice-hockey.com for mail to the other.
+# from_local_part = "noreply"
+
+# Email addresses to forward inbound mail to
+# forward_to = ["jamesdbloom@gmail.com"]
+
+# Verified sender address used in the rewritten From header
+# from_address = "noreply@mock-server.com"
+
+# Number of days to keep raw emails in S3
+# email_retention_days = 30
+
+# Email address for Lambda error alarm notifications (defaults to the first
+# address in forward_to). The SNS subscription must be confirmed once via the
+# email AWS sends after the first apply.
+# alarm_email = "jamesdbloom@gmail.com"
+
+# Set to false to skip creating the SNS alarm topic, email subscription, and
+# CloudWatch error alarm. Useful when the SNS management API is unreachable
+# (e.g. behind a corporate TLS-inspection proxy). Monitoring can be applied
+# later from a network where SNS is reachable (such as AWS CloudShell).
+# enable_monitoring = true

@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <groupId>org.mock-server</groupId>
+        <artifactId>mockserver</artifactId>
+        <version>8.0.1-SNAPSHOT</version>
+    </parent>
+
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>mockserver-blob-azure</artifactId>
+
+    <name>MockServer Blob Store - Azure</name>
+    <description>Azure Blob Storage backend for MockServer durable state. Implements the BlobStore SPI against the azure-storage-blob client.</description>
+    <url>https://www.mock-server.com</url>
+
+    <properties>
+        <module.name>org.mockserver.blob.azure</module.name>
+        <!-- azure-storage-blob 12.x targets Java 8+, fully Java-17-compatible.
+             12.35.0 pulls azure-core-http-netty 1.16.5 -> reactor-netty-http/core 1.2.18
+             (matched pair), which is >= 1.2.8, the release that fixes the reactor-netty
+             chained-redirect credential-leak advisory (12.29.1 shipped reactor-netty 1.0.48). -->
+        <azure.storage.blob.version>12.35.2</azure.storage.blob.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Converge reactor-core: the Azure 12.35.0 stack is internally off-by-one on
+                 this transitive — azure-core 1.58.1 declares reactor-core 3.7.18 while
+                 reactor-netty-core 1.2.18 declares 3.7.19. Pin to 3.7.19 (the higher patch,
+                 backward compatible) so maven-enforcer DependencyConvergence stays green. -->
+            <dependency>
+                <groupId>io.projectreactor</groupId>
+                <artifactId>reactor-core</artifactId>
+                <version>3.8.7</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!-- mockserver core SPI (compile scope) -->
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>mockserver-core</artifactId>
+        </dependency>
+
+        <!-- Azure Blob Storage client — lives ONLY in this module -->
+        <dependency>
+            <groupId>com.azure</groupId>
+            <artifactId>azure-storage-blob</artifactId>
+            <version>${azure.storage.blob.version}</version>
+        </dependency>
+
+        <!-- logging -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+
+        <!-- test -->
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>mockserver-testing</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.hamcrest</groupId>
+            <artifactId>hamcrest</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <version>1.21.4</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>mockserver-core</artifactId>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+</project>

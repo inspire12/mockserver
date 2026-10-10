@@ -1,0 +1,14 @@
+{
+  "httpRequest": {
+    "path": "/fwdtmpl"
+  },
+  "httpForwardTemplate": {
+    "templateType": "VELOCITY",
+    "template": "{'path':\"/somePath\",'headers':{'Host':[\"localhost:1081\"]}}",
+    "delay": {
+      "timeUnit": "MILLISECONDS",
+      "value": 5
+    },
+    "primary": true
+  }
+}

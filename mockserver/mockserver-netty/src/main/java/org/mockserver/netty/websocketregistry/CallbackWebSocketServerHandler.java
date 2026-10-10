@@ -1,0 +1,237 @@
+package org.mockserver.netty.websocketregistry;
+
+import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelHandler;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.buffer.Unpooled;
+import io.netty.handler.codec.http.*;
+import io.netty.handler.codec.http.websocketx.*;
+import io.netty.util.AttributeKey;
+import io.netty.util.ReferenceCountUtil;
+import org.mockserver.closurecallback.websocketregistry.LocalCallbackRegistry;
+import org.mockserver.closurecallback.websocketregistry.WebSocketClientRegistry;
+import org.mockserver.codec.HttpChunkLineLimiter;
+import org.mockserver.codec.MockServerHttpServerCodec;
+import org.mockserver.dashboard.DashboardWebSocketHandler;
+import org.mockserver.log.model.LogEntry;
+import org.mockserver.logging.MockServerLogger;
+import org.mockserver.mappers.Http2StreamIds;
+import org.mockserver.mock.HttpState;
+import org.mockserver.netty.HttpRequestHandler;
+import org.mockserver.netty.unification.Http1RequestCutShort;
+import org.mockserver.netty.unification.Http2RequestHeaderLimit;
+import org.mockserver.netty.unification.Http2StreamFaults;
+import org.mockserver.uuid.UUIDService;
+import org.slf4j.event.Level;
+
+import java.util.Arrays;
+import java.util.List;
+
+import static com.google.common.net.HttpHeaders.HOST;
+import static org.mockserver.closurecallback.websocketclient.WebSocketClient.CLIENT_REGISTRATION_ID_HEADER;
+import static org.mockserver.exception.ExceptionHandling.boundedFault;
+import static org.mockserver.exception.ExceptionHandling.connectionClosedException;
+import static org.mockserver.exception.ExceptionHandling.DIRECT_MEMORY_LIMIT_REACHED;
+import static org.mockserver.exception.ExceptionHandling.directMemoryLimitReached;
+import static org.mockserver.exception.ExceptionHandling.isSslOrDecoderFault;
+import static org.mockserver.exception.ExceptionHandling.sniDescription;
+import static org.mockserver.netty.unification.PortUnificationHandler.isHttp2Enabled;
+import static org.mockserver.netty.unification.PortUnificationHandler.isSslEnabledUpstream;
+
+/**
+ * @author jamesdbloom
+ */
+@ChannelHandler.Sharable
+public class CallbackWebSocketServerHandler extends ChannelInboundHandlerAdapter {
+
+    private static final AttributeKey<Boolean> CHANNEL_UPGRADED_FOR_CALLBACK_WEB_SOCKET = AttributeKey.valueOf("CHANNEL_UPGRADED_FOR_CALLBACK_WEB_SOCKET");
+    // The handshaker is created during the HTTP upgrade and read again on a later CloseWebSocketFrame,
+    // so it must span channelRead invocations - but this handler is @Sharable, meaning ONE instance
+    // serves every channel it is added to. A shared mutable instance field would let concurrent
+    // connections (and, once one instance spans a connection's child streams, concurrent streams)
+    // clobber each other's handshake state, so it lives on the channel instead.
+    private static final AttributeKey<WebSocketServerHandshaker> HANDSHAKER = AttributeKey.valueOf("CALLBACK_WEB_SOCKET_HANDSHAKER");
+    private static final String UPGRADE_CHANNEL_FOR_CALLBACK_WEB_SOCKET_URI = "/_mockserver_callback_websocket";
+    private static final String CAPABILITIES_PARAMETER = "capabilities";
+    private static final String CAPABILITIES_HEADER = "X-MockServer-Capabilities";
+    private static final String BREAKPOINT_RELEASED_CAPABILITY = "breakpointReleased";
+    private final MockServerLogger mockServerLogger;
+    private final WebSocketClientRegistry webSocketClientRegistry;
+
+    public CallbackWebSocketServerHandler(HttpState httpStateHandler) {
+        webSocketClientRegistry = httpStateHandler.getWebSocketClientRegistry();
+        mockServerLogger = httpStateHandler.getMockServerLogger();
+    }
+
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+        boolean release = true;
+        try {
+            if (msg instanceof FullHttpRequest && new QueryStringDecoder(((FullHttpRequest) msg).uri()).path().equals(UPGRADE_CHANNEL_FOR_CALLBACK_WEB_SOCKET_URI)) {
+                if (isHttp2Enabled(ctx.channel())) {
+                    if (mockServerLogger.isEnabledForInstance(Level.TRACE)) {
+                        mockServerLogger.logEvent(
+                            new LogEntry()
+                                .setLogLevel(Level.TRACE)
+                                .setMessageFormat("WebSocket upgrade not supported over HTTP/2 for callback connection:{}")
+                                .setArguments(ctx.channel().localAddress())
+                        );
+                    }
+                    // This branch fires ONLY on HTTP/2, so the 501 must carry the request's stream
+                    // id - otherwise it goes out on a phantom server-initiated stream and the client
+                    // hangs instead of being told cleanly that WebSocket upgrade is unsupported.
+                    DefaultFullHttpResponse notImplemented = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.NOT_IMPLEMENTED, Unpooled.EMPTY_BUFFER);
+                    Http2StreamIds.stampFromNettyRequest(notImplemented, (FullHttpRequest) msg);
+                    ctx.channel().writeAndFlush(notImplemented);
+                } else {
+                    upgradeChannel(ctx, (FullHttpRequest) msg);
+                    ctx.channel().attr(CHANNEL_UPGRADED_FOR_CALLBACK_WEB_SOCKET).set(true);
+                }
+            } else if (msg instanceof WebSocketFrame && Boolean.TRUE.equals(ctx.channel().attr(CHANNEL_UPGRADED_FOR_CALLBACK_WEB_SOCKET).get())) {
+                handleWebSocketFrame(ctx, (WebSocketFrame) msg);
+            } else {
+                release = false;
+                ctx.fireChannelRead(msg);
+            }
+        } finally {
+            if (release) {
+                ReferenceCountUtil.release(msg);
+            }
+        }
+    }
+
+    @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) {
+        ctx.flush();
+        // a mid-pipeline handler that swallows channelReadComplete starves Netty's HTTP/2
+        // flow-control flush (Http2ConnectionHandler.channelReadComplete -> writePendingBytes),
+        // stalling any h2 response larger than the peer's initial window - so propagate the event
+        ctx.fireChannelReadComplete();
+    }
+
+    private void upgradeChannel(final ChannelHandlerContext ctx, FullHttpRequest httpRequest) {
+        final WebSocketServerHandshaker handshaker = new WebSocketServerHandshakerFactory(
+            (isSslEnabledUpstream(ctx.channel()) ? "wss" : "ws") + "://" + httpRequest.headers().get(HOST) + UPGRADE_CHANNEL_FOR_CALLBACK_WEB_SOCKET_URI,
+            null,
+            true,
+            Integer.MAX_VALUE
+        ).newHandshaker(httpRequest);
+        if (handshaker == null) {
+            WebSocketServerHandshakerFactory.sendUnsupportedVersionResponse(ctx.channel());
+        } else {
+            ctx.channel().attr(HANDSHAKER).set(handshaker);
+            final String clientId = httpRequest.headers().contains(CLIENT_REGISTRATION_ID_HEADER) ? httpRequest.headers().get(CLIENT_REGISTRATION_ID_HEADER) : UUIDService.getUUID();
+            if (LocalCallbackRegistry.responseClientExists(clientId)
+                || LocalCallbackRegistry.forwardClientExists(clientId)) {
+                // found locally to indicate to client
+                HttpResponse res = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.RESET_CONTENT, ctx.channel().alloc().buffer(0));
+                HttpUtil.setContentLength(res, 0);
+                ctx.channel().writeAndFlush(res, ctx.channel().newPromise());
+            } else {
+                handshaker
+                    .handshake(
+                        ctx.channel(),
+                        httpRequest,
+                        new DefaultHttpHeaders().add(CLIENT_REGISTRATION_ID_HEADER, clientId),
+                        ctx.channel().newPromise()
+                    )
+                    .addListener((ChannelFutureListener) future -> {
+                        ctx.pipeline().remove(DashboardWebSocketHandler.class);
+                        ctx.pipeline().remove(MockServerHttpServerCodec.class);
+                        ctx.pipeline().remove(HttpRequestHandler.class);
+                        if (mockServerLogger.isEnabledForInstance(Level.TRACE)) {
+                            mockServerLogger.logEvent(
+                                new LogEntry()
+                                    .setLogLevel(Level.TRACE)
+                                    .setMessageFormat("registering client " + clientId)
+                            );
+                        }
+                        webSocketClientRegistry.registerClient(clientId, ctx, acceptsBreakpointReleased(httpRequest));
+                        future.channel().closeFuture().addListener((ChannelFutureListener) closeFuture -> {
+                            if (mockServerLogger.isEnabledForInstance(Level.TRACE)) {
+                                mockServerLogger.logEvent(
+                                    new LogEntry()
+                                        .setLogLevel(Level.TRACE)
+                                        .setMessageFormat("unregistering callback for client " + clientId)
+                                );
+                            }
+                            webSocketClientRegistry.unregisterClient(clientId);
+                        });
+                    });
+            }
+        }
+    }
+
+    /**
+     * Whether the client asked to be sent {@code BreakpointReleasedDTO} notices, with an
+     * {@code X-MockServer-Capabilities: breakpointReleased} header (language clients) or a
+     * {@code ?capabilities=breakpointReleased} query parameter (browsers, which cannot set headers).
+     * Clients that do not ask (older clients, which log an unknown message type as an error) are
+     * never sent them.
+     */
+    static boolean acceptsBreakpointReleased(FullHttpRequest httpRequest) {
+        List<String> capabilities = new java.util.ArrayList<>(httpRequest.headers().getAll(CAPABILITIES_HEADER));
+        List<String> fromQuery = new QueryStringDecoder(httpRequest.uri()).parameters().get(CAPABILITIES_PARAMETER);
+        if (fromQuery != null) {
+            capabilities.addAll(fromQuery);
+        }
+        return capabilities.stream()
+            .flatMap(value -> Arrays.stream(value.split(",")))
+            .anyMatch(capability -> BREAKPOINT_RELEASED_CAPABILITY.equals(capability.trim()));
+    }
+
+    private void handleWebSocketFrame(final ChannelHandlerContext ctx, WebSocketFrame frame) {
+        if (frame instanceof CloseWebSocketFrame) {
+            final WebSocketServerHandshaker handshaker = ctx.channel().attr(HANDSHAKER).get();
+            if (handshaker != null) {
+                handshaker.close(ctx.channel(), (CloseWebSocketFrame) frame.retain());
+            } else {
+                ctx.close();
+            }
+        } else if (frame instanceof TextWebSocketFrame) {
+            webSocketClientRegistry.receivedTextWebSocketFrame(((TextWebSocketFrame) frame));
+        } else if (frame instanceof PingWebSocketFrame) {
+            ctx.write(new PongWebSocketFrame(frame.content().retain()));
+        } else {
+            throw new UnsupportedOperationException(frame.getClass().getName() + " frame types not supported");
+        }
+    }
+
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        if (HttpChunkLineLimiter.isRejectedRequestCutShort(ctx.channel(), cause)) {
+            // already logged as the rejection that closed the connection
+        } else if (Http2RequestHeaderLimit.isRefusedRequestCutShort(ctx.channel(), cause)) {
+            // already logged as the refusal that reset the stream
+        } else if (Http2StreamFaults.isRequestCutShort(mockServerLogger, ctx.channel(), cause)) {
+            // an HTTP/2 request cut short by its stream's error, its client's cancel or its connection's end: logged as that
+        } else if (Http1RequestCutShort.isRequestCutShort(mockServerLogger, ctx, cause)) {
+            // an HTTP/1.1 request cut short by its connection's end: logged as that
+        } else if (directMemoryLimitReached(cause)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.ERROR)
+                    .setMessageFormat(DIRECT_MEMORY_LIMIT_REACHED + ctx.channel() + " - " + cause.getMessage())
+            );
+        } else if (connectionClosedException(cause)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(Level.ERROR)
+                    .setMessageFormat("web socket server caught exception")
+                    .setThrowable(cause)
+            );
+        } else if (isSslOrDecoderFault(cause)) {
+            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setMessageFormat("web socket server caught SSL or decoder fault" + sniDescription(ctx.channel()))
+                        .setThrowable(boundedFault(cause))
+                );
+            }
+        }
+        ctx.close();
+    }
+
+}

@@ -1,0 +1,331 @@
+package org.mockserver.llm.codec;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.Test;
+import org.mockserver.llm.StreamingFormat;
+import org.mockserver.logging.MockServerLogger;
+import org.mockserver.mock.action.http.HttpLlmResponseActionHandler;
+import org.mockserver.model.*;
+
+import java.util.List;
+
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.*;
+import static org.mockserver.model.Completion.completion;
+import static org.mockserver.model.HttpLlmResponse.llmResponse;
+import static org.mockserver.model.HttpRequest.request;
+import static org.mockserver.model.ToolUse.toolUse;
+
+public class HttpLlmResponseActionHandlerCodecTest {
+
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
+    @Test
+    public void shouldReturn200ForAnthropicWithCodecRegistered() throws Exception {
+        // given
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        HttpLlmResponse llmResponse = llmResponse()
+            .withProvider(Provider.ANTHROPIC)
+            .withModel("claude-sonnet-4-20250514")
+            .withCompletion(completion().withText("Hello from codec"));
+        HttpRequest request = request().withPath("/v1/messages");
+
+        // when
+        HttpResponse response = handler.handle(llmResponse, request);
+
+        // then — should be 200, not 501
+        assertThat(response.getStatusCode(), is(200));
+        JsonNode root = OBJECT_MAPPER.readTree(response.getBodyAsString());
+        assertThat(root.get("type").asText(), is("message"));
+    }
+
+    @Test
+    public void shouldReturn200ForOpenAiWithCodecRegistered() throws Exception {
+        // given
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        HttpLlmResponse llmResponse = llmResponse()
+            .withProvider(Provider.OPENAI)
+            .withModel("gpt-4o")
+            .withCompletion(completion().withText("Hello from codec"));
+        HttpRequest request = request().withPath("/v1/chat/completions");
+
+        // when
+        HttpResponse response = handler.handle(llmResponse, request);
+
+        // then — should be 200, not 501
+        assertThat(response.getStatusCode(), is(200));
+        JsonNode root = OBJECT_MAPPER.readTree(response.getBodyAsString());
+        assertThat(root.get("object").asText(), is("chat.completion"));
+    }
+
+    @Test
+    public void shouldReturn200ForEveryChatProvider() throws Exception {
+        // After M4 every chat-capable Provider enum value has a registered codec; the
+        // codec-missing 400 path remains in the handler for safety but is not reachable
+        // through any current production code path. This positive test pins the contract:
+        // every chat provider resolves to a codec and returns 200 for a completion.
+        // Rerank-only providers (COHERE, VOYAGE) have no completion path and are covered
+        // by their dedicated rerank tests instead.
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        HttpRequest request = request().withPath("/test");
+
+        for (Provider provider : Provider.values()) {
+            if (provider == Provider.COHERE || provider == Provider.VOYAGE) {
+                continue;
+            }
+            HttpLlmResponse llmResponse = llmResponse()
+                .withProvider(provider)
+                .withCompletion(completion().withText("hello"));
+
+            HttpResponse response = handler.handle(llmResponse, request);
+
+            assertThat("expected 200 for provider " + provider,
+                response.getStatusCode(), is(200));
+        }
+    }
+
+    @Test
+    public void shouldHandleRerankPathForCohere() throws Exception {
+        // given
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        HttpLlmResponse llmResponse = llmResponse()
+            .withProvider(Provider.COHERE)
+            .withRerank(RerankResponse.rerank());
+        HttpRequest request = request()
+            .withPath("/v1/rerank")
+            .withBody("{\"query\":\"q\",\"documents\":[\"alpha\",\"beta\",\"gamma\"]}");
+
+        // when
+        HttpResponse response = handler.handle(llmResponse, request);
+
+        // then
+        assertThat(response.getStatusCode(), is(200));
+        JsonNode root = OBJECT_MAPPER.readTree(response.getBodyAsString());
+        assertThat(root.get("results").size(), is(3));
+    }
+
+    @Test
+    public void shouldHandleRerankPathWithStructuredDocuments() throws Exception {
+        // given — Cohere structured documents (objects with a text field)
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        HttpLlmResponse llmResponse = llmResponse()
+            .withProvider(Provider.VOYAGE)
+            .withRerank(RerankResponse.rerank().withTopN(1));
+        HttpRequest request = request()
+            .withPath("/v1/rerank")
+            .withBody("{\"query\":\"q\",\"documents\":[{\"text\":\"a\"},{\"text\":\"b\"}]}");
+
+        // when
+        HttpResponse response = handler.handle(llmResponse, request);
+
+        // then — Voyage uses the data envelope
+        assertThat(response.getStatusCode(), is(200));
+        JsonNode root = OBJECT_MAPPER.readTree(response.getBodyAsString());
+        assertThat(root.get("data").size(), is(1));
+    }
+
+    @Test
+    public void shouldReturn400ForNullProvider() throws Exception {
+        // given
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        HttpLlmResponse llmResponse = llmResponse()
+            .withCompletion(completion().withText("test"));
+        HttpRequest request = request().withPath("/test");
+
+        // when
+        HttpResponse response = handler.handle(llmResponse, request);
+
+        // then
+        assertThat(response.getStatusCode(), is(400));
+        assertThat(response.getBodyAsString(), containsString("unsupported LLM provider: null"));
+    }
+
+    @Test
+    public void shouldHandleStreamingFlagByRouting() throws Exception {
+        // given
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        HttpLlmResponse llmResponse = llmResponse()
+            .withProvider(Provider.ANTHROPIC)
+            .withModel("claude-sonnet-4-20250514")
+            .withCompletion(completion()
+                .withText("streaming test")
+                .withStreaming(true));
+        HttpRequest request = request().withPath("/v1/messages");
+
+        // when — handleStreaming returns SSE events
+        List<SseEvent> events = handler.handleStreaming(llmResponse, request);
+
+        // then
+        assertThat(events, is(notNullValue()));
+        assertThat(events.size(), is(greaterThan(0)));
+        assertThat(events.get(0).getEvent(), is("message_start"));
+    }
+
+    @Test
+    public void shouldHandleOpenAiStreamingRouting() throws Exception {
+        // given
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        HttpLlmResponse llmResponse = llmResponse()
+            .withProvider(Provider.OPENAI)
+            .withModel("gpt-4o")
+            .withCompletion(completion()
+                .withText("streaming test")
+                .withStreaming(true));
+        HttpRequest request = request().withPath("/v1/chat/completions");
+
+        // when
+        List<SseEvent> events = handler.handleStreaming(llmResponse, request);
+
+        // then
+        assertThat(events, is(notNullValue()));
+        assertThat(events.size(), is(greaterThan(0)));
+        // Last event should be [DONE]
+        assertThat(events.get(events.size() - 1).getData(), is("[DONE]"));
+    }
+
+    @Test
+    public void shouldHandleEmbeddingPath() throws Exception {
+        // given
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        HttpLlmResponse llmResponse = llmResponse()
+            .withProvider(Provider.OPENAI)
+            .withEmbedding(EmbeddingResponse.embedding()
+                .withDimensions(8)
+                .withDeterministicFromInput(true));
+        HttpRequest request = request()
+            .withPath("/v1/embeddings")
+            .withBody("{\"input\":\"test text\",\"model\":\"text-embedding-3-small\"}");
+
+        // when
+        HttpResponse response = handler.handle(llmResponse, request);
+
+        // then
+        assertThat(response.getStatusCode(), is(200));
+        JsonNode root = OBJECT_MAPPER.readTree(response.getBodyAsString());
+        assertThat(root.get("object").asText(), is("list"));
+        assertThat(root.get("data").get(0).get("embedding").size(), is(8));
+    }
+
+    @Test
+    public void shouldReturn400ForAnthropicEmbedding() throws Exception {
+        // given — Anthropic doesn't support embeddings
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        HttpLlmResponse llmResponse = llmResponse()
+            .withProvider(Provider.ANTHROPIC)
+            .withEmbedding(EmbeddingResponse.embedding().withDimensions(8));
+        HttpRequest request = request().withPath("/v1/embeddings");
+
+        // when
+        HttpResponse response = handler.handle(llmResponse, request);
+
+        // then
+        assertThat(response.getStatusCode(), is(400));
+        assertThat(response.getBodyAsString(), containsString("Anthropic does not expose an embeddings endpoint"));
+    }
+
+    // --- Streaming Format Routing ---
+
+    @Test
+    public void shouldReturnNdjsonFormatForOllama() {
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        assertThat(handler.streamingFormatFor(Provider.OLLAMA), is(StreamingFormat.NDJSON));
+    }
+
+    @Test
+    public void shouldReturnAwsEventStreamFormatForBedrock() {
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        assertThat(handler.streamingFormatFor(Provider.BEDROCK), is(StreamingFormat.AWS_EVENT_STREAM));
+    }
+
+    @Test
+    public void shouldReturnConverseEventStreamFormatForBedrockConverseStreamPath() {
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        assertThat(handler.streamingFormatFor(Provider.BEDROCK, request().withPath("/model/amazon.nova-pro-v1:0/converse-stream")),
+            is(StreamingFormat.AWS_CONVERSE_EVENT_STREAM));
+        assertThat(handler.streamingFormatFor(Provider.BEDROCK, request().withPath("/model/amazon.nova-pro-v1:0/invoke-with-response-stream")),
+            is(StreamingFormat.AWS_EVENT_STREAM));
+    }
+
+    @Test
+    public void shouldEncodeBedrockConverseShapeWhenRequestTargetsConverse() throws Exception {
+        // given — GitHub discussion #2757: BEDROCK at /model/{model}/converse must return the Converse envelope
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        HttpLlmResponse llmResponse = llmResponse()
+            .withProvider(Provider.BEDROCK)
+            .withModel("amazon.titan-text-express-v1")
+            .withCompletion(completion()
+                .withText("mocked response")
+                .withUsage(Usage.usage().withInputTokens(5).withOutputTokens(5)));
+        HttpRequest request = request().withPath("/model/amazon.titan-text-express-v1/converse")
+            .withBody("{\"messages\":[{\"role\":\"user\",\"content\":[{\"text\":\"hi\"}]}]}");
+
+        // when
+        HttpResponse response = handler.handle(llmResponse, request);
+
+        // then
+        assertThat(response.getStatusCode(), is(200));
+        JsonNode root = OBJECT_MAPPER.readTree(response.getBodyAsString());
+        assertThat(root.path("output").path("message").path("content").path(0).path("text").asText(), is("mocked response"));
+        assertThat(root.path("usage").path("totalTokens").asInt(-1), is(10));
+    }
+
+    @Test
+    public void shouldStreamBedrockConverseEventsWhenRequestTargetsConverseStream() {
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        HttpLlmResponse llmResponse = llmResponse()
+            .withProvider(Provider.BEDROCK)
+            .withModel("amazon.nova-pro-v1:0")
+            .withCompletion(completion().withText("streamed").withStreaming(true));
+
+        List<SseEvent> events = handler.handleStreaming(llmResponse, request().withPath("/model/amazon.nova-pro-v1:0/converse-stream"));
+
+        assertThat(events.get(0).getEvent(), is("messageStart"));
+        assertThat(events.get(events.size() - 1).getEvent(), is("metadata"));
+    }
+
+    @Test
+    public void shouldReturnSseFormatForNonOllamaAndNonBedrockProviders() {
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        assertThat(handler.streamingFormatFor(Provider.ANTHROPIC), is(StreamingFormat.SSE));
+        assertThat(handler.streamingFormatFor(Provider.OPENAI), is(StreamingFormat.SSE));
+        assertThat(handler.streamingFormatFor(Provider.GEMINI), is(StreamingFormat.SSE));
+        assertThat(handler.streamingFormatFor(Provider.AZURE_OPENAI), is(StreamingFormat.SSE));
+        assertThat(handler.streamingFormatFor(Provider.OPENAI_RESPONSES), is(StreamingFormat.SSE));
+    }
+
+    @Test
+    public void shouldHandleOllamaStreamingRouting() throws Exception {
+        // given
+        HttpLlmResponseActionHandler handler = new HttpLlmResponseActionHandler(new MockServerLogger());
+        HttpLlmResponse llmResponse = llmResponse()
+            .withProvider(Provider.OLLAMA)
+            .withModel("llama3.1")
+            .withCompletion(completion()
+                .withText("streaming test")
+                .withStreaming(true));
+        HttpRequest request = request().withPath("/api/chat");
+
+        // when — handleStreaming returns events for Ollama
+        List<SseEvent> events = handler.handleStreaming(llmResponse, request);
+
+        // then — events should be present and parseable as NDJSON lines
+        assertThat(events, is(notNullValue()));
+        assertThat(events.size(), is(greaterThan(0)));
+
+        // Ollama events should NOT have named SSE event types
+        for (SseEvent event : events) {
+            assertThat(event.getEvent(), is(nullValue()));
+        }
+
+        // Each event's data should be valid JSON (no SSE framing)
+        for (SseEvent event : events) {
+            JsonNode parsed = OBJECT_MAPPER.readTree(event.getData());
+            assertThat(parsed.isObject(), is(true));
+        }
+
+        // Last event should have done:true
+        JsonNode lastChunk = OBJECT_MAPPER.readTree(events.get(events.size() - 1).getData());
+        assertThat(lastChunk.get("done").asBoolean(), is(true));
+    }
+}

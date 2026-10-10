@@ -1,0 +1,9 @@
+200
+{
+  "embedding" : {
+    "values" : "<vector:768>"
+  },
+  "usageMetadata" : {
+    "promptTokenCount" : 7
+  }
+}

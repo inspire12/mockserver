@@ -2,9 +2,29 @@
 
 <h2>Template Restriction Configuration:</h2>
 
+<button id="button_configuration_allow_classes_in_javascript_templates" class="accordion title"><strong>Allow only specific classes in javascript templates</strong></button>
+<div class="panel title">
+    <p>Set comma separated list of the only classes javascript templates are allowed to use via <code>Java.type(...)</code>.</p>
+    <p><strong>By default javascript templates cannot use any Java class at all.</strong> Everything else in a template still works &mdash; the full modern JavaScript standard library is available &mdash; but <code>Java.type(...)</code> and the <code>java.*</code> globals resolve nothing until you list the classes you want here. This is deliberate: a template that can reach <code>java.lang.Runtime</code> can run OS commands inside the MockServer process, so anyone able to register an expectation could run code on your machine.</p>
+    <p>If one of your templates needs a Java class, add just that class (or its package). Setting this to <code>*</code> lets templates resolve any class again &mdash; only do that when every template you render comes from a source you fully trust.</p>
+    <p>When set, this takes precedence over <code>javascriptDisallowedClasses</code>. Entries match a class name exactly, or match a whole package when they end in <code>.*</code> (for example <code>java.util.*</code>).</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">""</span> (no Java classes can be used)</p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.javascriptAllowedClasses(String javascriptAllowedClasses)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.javascriptAllowedClasses=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_JAVASCRIPT_ALLOWED_CLASSES=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.javascriptAllowedClasses=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.javascriptAllowedClasses="java.util.*,java.time.Instant"</code></pre>
+</div>
+
 <button id="button_configuration_disable_classes_in_javascript_templates" class="accordion title"><strong>Disable classes in javascript templates</strong></button>
 <div class="panel title">
     <p>Set comma separate list of classes not allowed to be used by javascript templates</p>
+    <p>Setting this <strong>widens</strong> the default: instead of "no Java class can be used", templates may then use every class except the ones you list here. That is weaker protection, because a list of banned classes can never be complete &mdash; banning <code>java.lang.Runtime</code> still leaves <code>java.lang.ProcessBuilder</code>, and a template can reach other classes indirectly. Prefer <code>javascriptAllowedClasses</code> above, or leave both unset.</p>
     <p>Type: <span class="keyword">string</span> Default: <span class="this_value">""</span></p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.javascriptDisallowedClasses(String javascriptDisallowedClasses)</code></pre>
@@ -33,11 +53,30 @@
     <p>Example:</p>
     <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.javascriptDisallowedText="getRuntime().exec"</code></pre>
 </div>
-    
+
+<button id="button_configuration_javascript_template_execution_timeout" class="accordion title"><strong>JavaScript template execution timeout</strong></button>
+<div class="panel title">
+    <p>Maximum time in milliseconds a JavaScript response template is allowed to run before it is cancelled. A runaway or malicious template (for example one containing an infinite loop) would otherwise pin the worker thread handling that request indefinitely; this cap aborts the evaluation with a clear timeout error instead, so the request fails fast and the thread is freed.</p>
+    <p>The default of <code>5000</code> (5 seconds) is far longer than any legitimate template needs &mdash; a normal template evaluates in well under a second &mdash; so it will not affect real templates. Increase it only if you run unusually heavy templates, or set it to <code>0</code> (or a negative value) to disable the timeout entirely and restore the previous unbounded behaviour.</p>
+    <p>Type: <span class="keyword">long</span> Default: <span class="this_value">5000</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.javascriptTemplateExecutionTimeout(long millis)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.javascriptTemplateExecutionTimeout=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_JAVASCRIPT_TEMPLATE_EXECUTION_TIMEOUT=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.javascriptTemplateExecutionTimeout=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.javascriptTemplateExecutionTimeout="2000"</code></pre>
+</div>
+
 <button id="button_configuration_disable_class_loading_in_velocity_templates" class="accordion title"><strong>Disable class loading in velocity templates</strong></button>
 <div class="panel title">
     <p>If true class loading is not allowed in velocity templates</p>
-    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
+    <p><strong>This is on by default</strong>, so a velocity template cannot load Java classes (for example through <code>$request.class.classLoader.loadClass(...)</code>). That matters because a template that can load <code>java.lang.Runtime</code> can run OS commands inside the MockServer process, so anyone able to register an expectation could run code on your machine. Ordinary templates &mdash; values from the request, the built-in <code>$uuid</code>/<code>$now</code>/<code>$faker</code> helpers, the <code>$json</code>/<code>$xml</code>/<code>$math</code> tools &mdash; are unaffected.</p>
+    <p>Set it to <code>false</code> only if one of your templates genuinely needs to load classes, and only when every template you render comes from a source you fully trust.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">true</span></p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.velocityDisallowClassLoading(boolean velocityDisallowClassLoading)</code></pre>
     <p>System Property:</p>
@@ -80,4 +119,22 @@
     <pre class="code" style="padding: 2px;"><code class="code">mockserver.mustacheDisallowedText=...</code></pre>
     <p>Example:</p>
     <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.mustacheDisallowedText="request.method"</code></pre>
+</div>
+
+<button id="button_configuration_template_faker_seed" class="accordion title"><strong>Template faker seed</strong></button>
+<div class="panel title">
+    <p>Seed for the template <code>faker</code> sample-data helper (Velocity <code>$faker</code>, Mustache <code>{% raw %}{{faker.*}}{% endraw %}</code>, JavaScript <code>faker</code>). By default faker is unseeded, so faker-driven templates produce different, random values on every render.</p>
+    <p>Set a non-zero value to seed faker deterministically so faker-driven templates generate reproducible fixtures across runs &mdash; useful when you want your generated test data to be stable from one run to the next. The seed produces a deterministic sequence of values for a given order of renders; determinism is strongest when fixtures are generated sequentially.</p>
+    <p>The default of <code>0</code> leaves faker unseeded, so existing templates are unaffected.</p>
+    <p>Type: <span class="keyword">long</span> Default: <span class="this_value">0</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.templateFakerSeed(long seed)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.templateFakerSeed=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_TEMPLATE_FAKER_SEED=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.templateFakerSeed=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.templateFakerSeed="42"</code></pre>
 </div>

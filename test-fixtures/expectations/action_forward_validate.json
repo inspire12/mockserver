@@ -1,0 +1,19 @@
+{
+  "httpRequest": {
+    "path": "/validate"
+  },
+  "httpForwardValidateAction": {
+    "host": "backend.example.com",
+    "port": 443,
+    "scheme": "HTTPS",
+    "specUrlOrPayload": "https://example.com/openapi.json",
+    "validateRequest": true,
+    "validateResponse": true,
+    "validationMode": "STRICT",
+    "delay": {
+      "timeUnit": "MILLISECONDS",
+      "value": 10
+    },
+    "primary": true
+  }
+}

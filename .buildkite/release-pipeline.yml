@@ -1,0 +1,362 @@
+# MockServer release pipeline.
+#
+# This file is intentionally short: every step is a single command. All the
+# release logic lives in scripts/release/* which are CI-agnostic.
+# See docs/operations/release-principles.md and docs/operations/release-process.md.
+
+steps:
+  - input: "Release Parameters"
+    fields:
+      - text: "Release Version"
+        key: "release-version"
+        hint: "e.g., 8.0.0"
+        required: true
+        format: "[0-9]+\\.[0-9]+\\.[0-9]+"
+      - text: "Next SNAPSHOT Version"
+        key: "next-version"
+        hint: "e.g., 6.0.1-SNAPSHOT"
+        required: true
+        format: "[0-9]+\\.[0-9]+\\.[0-9]+-SNAPSHOT"
+      - select: "Release Type"
+        key: "release-type"
+        default: "full"
+        options:
+          - { label: "Full Release (all steps)",     value: "full" }
+          - { label: "Maven Central Only",           value: "maven-only" }
+          - { label: "Docker Image Only (re-pub)",   value: "docker-only" }
+          - { label: "Post-Maven (skip Central)",    value: "post-maven" }
+      - select: "Create Versioned Site?"
+        key: "create-versioned-site"
+        # `auto` (the default) derives the correct value from the release version
+        # vs the previous tag: yes for a major/minor release, no for a patch.
+        # The explicit yes/no options are honoured only as a confirmation — the
+        # release scripts fail closed if the choice contradicts the version
+        # (a major/minor + no silently overwrites the previous version's docs
+        # archive, which is why this must not be a free operator choice).
+        default: "auto"
+        options:
+          - { label: "Auto (derive from version — recommended)", value: "auto" }
+          - { label: "No (patch release)", value: "no" }
+          - { label: "Yes (major/minor release)", value: "yes" }
+      - select: "Dry Run?"
+        key: "dry-run"
+        default: "false"
+        options:
+          - { label: "No — actually publish",                     value: "false" }
+          - { label: "Yes — build/validate only, skip publish",   value: "true" }
+
+  - block: ":lock: TOTP Authorization"
+    prompt: "Enter your TOTP code to authorize this release"
+    allowed_teams: ["release-managers"]
+    fields:
+      - text: "TOTP Code"
+        key: "totp-code"
+        hint: "6-digit code from your authenticator app"
+        required: true
+        format: "[0-9]{6}"
+
+  - label: ":shield: Verify TOTP"
+    command: ".buildkite/scripts/release-verify-totp.sh"
+    agents: { queue: "release" }
+
+  - wait
+
+  - label: ":wrench: Prepare"
+    command: ".buildkite/scripts/release-runner.sh prepare"
+    timeout_in_minutes: 10
+    agents: { queue: "release" }
+
+  - wait
+
+  - label: ":maven: Maven Central"
+    command: ".buildkite/scripts/release-runner.sh maven-central"
+    timeout_in_minutes: 180
+    agents: { queue: "release" }
+
+  - wait
+
+  # Downstream publishing proceeds automatically — there is no manual approval
+  # gate here. The Maven Central step above already polls repo1 until the main
+  # MockServer artifacts for this release are live (see the "Wait for Maven
+  # Central sync" loop in scripts/release/components/maven-central.sh, up to
+  # ~2h). All modules publish in one Central deployment and sync together, so
+  # once that poll succeeds the release is confirmed live on Maven Central and
+  # downstream artifacts (npm, PyPI, RubyGems, Helm, Docker, SwaggerHub,
+  # GitHub) can be published without a second human gate.
+
+  - label: ":globe_with_meridians: Versioned Site"
+    command: ".buildkite/scripts/release-runner.sh versioned-site"
+    # Creates CloudFront distributions and mirrors the full historical docs
+    # site (~460 MB, 35k+ objects) into the new versioned bucket — both slow.
+    #
+    # Runs BEFORE Update Version References intentionally: this step reads
+    # only terraform state + pom.xml (bumped earlier by prepare), never the
+    # files touched by update-version-references (_config.yml, package.json,
+    # changelog, etc.). The version-refs commit is sequenced just below.
+    timeout_in_minutes: 60
+    agents: { queue: "release" }
+
+  - wait
+
+  - label: ":bookmark_tabs: Update Version References"
+    command: ".buildkite/scripts/release-runner.sh update-version-references"
+    # Must run before the parallel publish group below. The website (and
+    # several other downstream publishes) clone the repo on a fresh agent
+    # and read the just-committed version from _config.yml / package.json /
+    # etc. If this step ran in finalize (as it used to) the website shipped
+    # with the previous version's _config.yml.
+    timeout_in_minutes: 15
+    agents: { queue: "release" }
+
+  - wait
+
+  - group: ":package: Publish artifacts"
+    steps:
+      - label: ":java: Maven Plugin"
+        command: ".buildkite/scripts/release-runner.sh maven-plugin"
+        timeout_in_minutes: 60
+        agents: { queue: "release" }
+
+      - label: ":docker: Docker Image"
+        command: ".buildkite/scripts/release-runner.sh docker"
+        timeout_in_minutes: 60
+        # release queue: needs mockserver-release/cosign-key (image signing) and
+        # the release-scoped Docker Hub / ECR push credentials. The default queue
+        # runs untrusted PR code and is not granted the release signing key.
+        agents: { queue: "release" }
+
+      - label: ":package: npm"
+        command: ".buildkite/scripts/release-runner.sh npm"
+        timeout_in_minutes: 30
+        agents: { queue: "release" }
+
+      - label: ":helm: Helm Chart"
+        command: ".buildkite/scripts/release-runner.sh helm"
+        timeout_in_minutes: 15
+        agents: { queue: "release" }
+
+      - label: ":book: Javadoc"
+        command: ".buildkite/scripts/release-runner.sh javadoc"
+        # javadoc.sh does two Maven passes on the full reactor: `mvn install`
+        # (~12 min, populates the local repo so `aggregate` can resolve
+        # inter-module deps) then `mvn javadoc:aggregate` (~6-8 min). Pad
+        # generously over the observed ~20 min total to absorb fresh-agent
+        # network variance pulling plugin/dependency POMs from Central.
+        timeout_in_minutes: 45
+        agents: { queue: "release" }
+
+      - label: ":swagger: SwaggerHub"
+        command: ".buildkite/scripts/release-runner.sh swaggerhub"
+        # SwaggerHub is an optional mirror of the OpenAPI spec to a third-party
+        # catalogue. A failure here (e.g. SwaggerHub account / API access) must
+        # not block the release, so the step is allowed to soft-fail.
+        soft_fail: true
+        timeout_in_minutes: 10
+        agents: { queue: "release" }
+
+      - label: ":rocket: Postman Collection"
+        command: ".buildkite/scripts/release-runner.sh postman-collection"
+        # Regenerates the Postman + Bruno collections from the OpenAPI spec and
+        # republishes the Postman collection to the public workspace. Like
+        # SwaggerHub, this is an optional distribution mirror — a failure (e.g.
+        # Postman API access) must not block the release, so it soft-fails.
+        soft_fail: true
+        timeout_in_minutes: 10
+        agents: { queue: "release" }
+
+      - label: ":globe_with_meridians: Website"
+        command: ".buildkite/scripts/release-runner.sh website"
+        timeout_in_minutes: 15
+        agents: { queue: "release" }
+
+      - label: ":page_facing_up: JSON Schema"
+        command: ".buildkite/scripts/release-runner.sh schema"
+        timeout_in_minutes: 10
+        agents: { queue: "release" }
+
+      - label: ":python: PyPI"
+        command: ".buildkite/scripts/release-runner.sh pypi"
+        timeout_in_minutes: 15
+        # Must run on the release queue: PyPI/RubyGems publish tokens
+        # (mockserver-build/pypi, mockserver-build/rubygems) are granted only to
+        # the release-queue agent role. The default queue runs untrusted PR
+        # builds and deliberately has no publish credentials.
+        agents: { queue: "release" }
+
+      - label: ":gem: RubyGems"
+        command: ".buildkite/scripts/release-runner.sh rubygems"
+        timeout_in_minutes: 10
+        agents: { queue: "release" }
+
+      - label: ":github: GitHub Release"
+        command: ".buildkite/scripts/release-runner.sh github"
+        timeout_in_minutes: 10
+        agents: { queue: "release" }
+
+      - label: ":golang: Go Client"
+        command: ".buildkite/scripts/release-runner.sh client-go"
+        soft_fail: true
+        timeout_in_minutes: 10
+        agents: { queue: "release" }
+
+      - label: ":dotnet: .NET Client"
+        command: ".buildkite/scripts/release-runner.sh client-dotnet"
+        soft_fail: true
+        timeout_in_minutes: 15
+        agents: { queue: "release" }
+
+      - label: ":rust: Rust Client"
+        command: ".buildkite/scripts/release-runner.sh client-rust"
+        soft_fail: true
+        timeout_in_minutes: 15
+        agents: { queue: "release" }
+
+      - label: ":php: PHP Client"
+        command: ".buildkite/scripts/release-runner.sh client-php"
+        soft_fail: true
+        timeout_in_minutes: 10
+        agents: { queue: "release" }
+
+      - label: ":package: TC Node"
+        command: ".buildkite/scripts/release-runner.sh tc-node"
+        soft_fail: true
+        timeout_in_minutes: 15
+        agents: { queue: "release" }
+
+      - label: ":python: TC Python"
+        command: ".buildkite/scripts/release-runner.sh tc-python"
+        soft_fail: true
+        timeout_in_minutes: 15
+        agents: { queue: "release" }
+
+      - label: ":dotnet: TC .NET"
+        command: ".buildkite/scripts/release-runner.sh tc-dotnet"
+        soft_fail: true
+        timeout_in_minutes: 15
+        agents: { queue: "release" }
+
+      - label: ":golang: TC Go"
+        command: ".buildkite/scripts/release-runner.sh tc-go"
+        soft_fail: true
+        timeout_in_minutes: 10
+        agents: { queue: "release" }
+
+      - label: ":rust: TC Rust"
+        command: ".buildkite/scripts/release-runner.sh tc-rust"
+        soft_fail: true
+        timeout_in_minutes: 15
+        agents: { queue: "release" }
+
+      - label: ":gem: TC Ruby"
+        command: ".buildkite/scripts/release-runner.sh tc-ruby"
+        soft_fail: true
+        timeout_in_minutes: 10
+        agents: { queue: "release" }
+
+      - label: ":php: TC PHP"
+        command: ".buildkite/scripts/release-runner.sh tc-php"
+        soft_fail: true
+        timeout_in_minutes: 10
+        agents: { queue: "release" }
+
+      - label: ":vs_code: VS Code Extension"
+        command: ".buildkite/scripts/release-runner.sh vscode"
+        soft_fail: true
+        timeout_in_minutes: 15
+        agents: { queue: "release" }
+
+      - label: ":jetbrains: JetBrains Plugin"
+        command: ".buildkite/scripts/release-runner.sh jetbrains"
+        soft_fail: true
+        timeout_in_minutes: 20
+        agents: { queue: "release" }
+
+  - wait
+
+  # MCP must run AFTER the Docker Image step (in the publish group above) has
+  # pushed the labelled image to Docker Hub — the registry rejects the publish
+  # until that image is visible. Steps inside a group run in parallel, so MCP
+  # lives here, after the group's `wait`, rather than inside it. Soft-fail: a
+  # discovery surface, never a release gate.
+  - label: ":robot_face: MCP Registry"
+    command: ".buildkite/scripts/release-runner.sh mcp"
+    soft_fail: true
+    timeout_in_minutes: 10
+    agents: { queue: "release" }
+
+  # Build jlink JVM-less bundles for every platform and upload them to the
+  # GitHub Release created in the publish group above. Lives here, after the
+  # group `wait`, so the release exists before assets are uploaded. Soft-fail:
+  # a convenience self-hosting channel, never a release gate. Generous timeout
+  # — it downloads a target JDK per platform and runs jlink for each.
+  - label: ":package: Binary Bundles"
+    command: ".buildkite/scripts/release-runner.sh binary"
+    soft_fail: true
+    timeout_in_minutes: 60
+    agents: { queue: "release" }
+
+  - wait
+
+  # Package-manager channels that redistribute the binary bundles published in
+  # the two steps above (GitHub Release + jlink bundle assets). They run after
+  # the Binary Bundles `wait` so both the release and its assets exist. Every
+  # step is soft_fail: these are convenience distribution surfaces, never a
+  # release gate. Each component also skips itself gracefully when its target
+  # repo / API secret is not configured (see packaging/<channel>/release-component.md).
+  - group: ":package: Package Managers"
+    steps:
+      - label: ":beer: Homebrew"
+        command: ".buildkite/scripts/release-runner.sh homebrew"
+        soft_fail: true
+        timeout_in_minutes: 10
+        agents: { queue: "release" }
+
+      - label: ":windows: Scoop"
+        command: ".buildkite/scripts/release-runner.sh scoop"
+        soft_fail: true
+        timeout_in_minutes: 10
+        agents: { queue: "release" }
+
+      - label: ":windows: winget"
+        command: ".buildkite/scripts/release-runner.sh winget"
+        soft_fail: true
+        timeout_in_minutes: 10
+        agents: { queue: "release" }
+
+      - label: ":chocolate_bar: Chocolatey"
+        command: ".buildkite/scripts/release-runner.sh chocolatey"
+        soft_fail: true
+        timeout_in_minutes: 10
+        agents: { queue: "release" }
+
+      - label: ":sdk: SDKMAN!"
+        command: ".buildkite/scripts/release-runner.sh sdkman"
+        soft_fail: true
+        timeout_in_minutes: 10
+        agents: { queue: "release" }
+
+      - label: ":package: asdf / mise"
+        command: ".buildkite/scripts/release-runner.sh asdf"
+        soft_fail: true
+        timeout_in_minutes: 10
+        agents: { queue: "release" }
+
+  - wait
+
+  - label: ":sparkles: Finalize"
+    command: ".buildkite/scripts/release-runner.sh finalize"
+    timeout_in_minutes: 30
+    agents: { queue: "release" }
+
+  - wait
+
+  - label: ":mag: Verify"
+    # Post-release safety net: hit every public URL we publish to and confirm
+    # $RELEASE_VERSION is actually live. Catches silent-skip / silent-success
+    # failure modes that the individual component scripts may not surface
+    # (e.g. SwaggerHub leaving versions as unpublished drafts before the
+    # publish/set-default endpoints were wired in, or Javadoc's `aws s3 sync`
+    # being skipped because mvn javadoc:aggregate timed out).
+    command: ".buildkite/scripts/release-runner.sh verify"
+    timeout_in_minutes: 10
+    agents: { queue: "release" }

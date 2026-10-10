@@ -14,6 +14,8 @@
     <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_INITIALIZATION_CLASS=...</code></pre>
     <p>Property File:</p>
     <pre class="code" style="padding: 2px;"><code class="code">mockserver.initializationClass=...</code></pre>
+    <p>Spring <code>@MockServerTest</code>:</p>
+    <pre class="prettyprint lang-java code"><code class="code">@MockServerTest("mockserver.initializationClass=org.mockserver.server.initialize.ExpectationInitializerExample")</code></pre>
     <p>Example:</p>
     <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.initializationClass="org.mockserver.server.initialize.ExpectationInitializerExample"</code></pre>
 </div>
@@ -21,7 +23,7 @@
 <button id="button_configuration_initialization_json_path" class="accordion title"><strong>Expectation Initialization JSON File Path</strong></button>
 <div class="panel title">
     <p>The path to the json file used to initialize expectations in MockServer at startup, if set MockServer will load this file and initialise expectations for each item in the file when is starts.</p>
-    <p>The expected format of the file is a JSON array of expectations, as per the <a target="_blank" href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/Expectations" target="_blank">REST API format</a></p>
+    <p>The expected format of the file is a JSON array of expectations, as per the <a  href="https://app.swaggerhub.com/apis/jamesdbloom/mock-server-openapi/{{ site.mockserver_api_version }}#/Expectations" target="_blank" rel="noopener noreferrer">REST API format</a></p>
     <p>Type: <span class="keyword">string</span> Default: <span class="this_value">null</span></p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.initializationJsonPath(String initializationJsonPath)</code></pre>
@@ -71,9 +73,46 @@
     <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.watchInitializationJson="false"</code></pre>
 </div>
 
+<button id="button_configuration_watch_initialization_json_poll_period_millis" class="accordion title"><strong>Watch Expectation Initialization Files Poll Period</strong></button>
+<div class="panel title">
+    <p>The interval, in milliseconds, at which a watched initialization JSON / OpenAPI file is polled for changes. Only has an effect when <span class="inline_code">watchInitializationJson</span> is enabled.</p>
+    <p>Lower it for faster live reloads at the cost of more frequent file reads; raise it to reduce polling overhead. A non-positive value is treated as <span class="this_value">1</span> millisecond.</p>
+    <p>Type: <span class="keyword">long</span> Default: <span class="this_value">5000</span> (5 seconds)</p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.watchInitializationJsonPollPeriodMillis(long milliseconds)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.watchInitializationJsonPollPeriodMillis=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_WATCH_INITIALIZATION_JSON_POLL_PERIOD_MILLIS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.watchInitializationJsonPollPeriodMillis=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.watchInitializationJsonPollPeriodMillis="1000"</code></pre>
+</div>
+
+<button id="button_configuration_fail_on_initialization_error" class="accordion title"><strong>Fail On Initialization Error</strong></button>
+<div class="panel title">
+    <p>If enabled a failure to load any expectation initializer (a malformed initialization JSON or OpenAPI file, or a broken initialization class) will fail server startup with an exception, instead of logging a warning and continuing with zero expectations from that source.</p>
+    <p>By default (<span class="this_value">false</span>) a broken initializer is logged once at WARN and MockServer still starts — which can silently leave you with missing mocks in CI or Kubernetes. Enable this when a half-initialized server is worse than a crash, so the failure is loud and visible.</p>
+    <p>An invalid expectation inside an otherwise valid initialization JSON file (for example a <span class="keyword">statusCode</span> outside 100 to 999) is skipped with a WARN that names it — its position, id and path — and the rest of the file still loads. With this setting enabled, any skipped expectation also fails startup.</p>
+    <p>For slow (but valid) initializers, use the readiness probe at <span class="keyword">GET /mockserver/ready</span> instead, which returns 503 until initialization completes and 200 thereafter.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.failOnInitializationError(boolean enable)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.failOnInitializationError=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_FAIL_ON_INITIALIZATION_ERROR=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.failOnInitializationError=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.failOnInitializationError="true"</code></pre>
+</div>
+
 <button id="button_configuration_persist_expectations_as_json" class="accordion title"><strong>Persist Expectations As JSON</strong></button>
 <div class="panel title">
     <p>Enable the persisting of expectations as json, which is updated whenever the expectation state is updated (i.e. add, clear, expires, etc)</p>
+    <p>When the persisted file is also the file the expectations are loaded from (<span class="keyword">initializationJsonPath</span> set to the same path, or a cloud blob store restoring it), an expectation in it that could not be loaded would disappear the first time MockServer saves. So before that first save MockServer copies the original file, once, to <span class="keyword">&lt;file&gt;.invalid-entries-&lt;timestamp&gt;.bak</span> next to it and logs a WARN naming the copy; fix the expectations there and copy them back. If the copy cannot be written, MockServer logs an error and does not save over the file, and tries the copy again on the next save.</p>
     <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.persistExpectations(boolean persistExpectations)</code></pre>
@@ -103,6 +142,75 @@
     <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.persistedExpectationsPath="org/mockserver/server/initialize/initializerJson.json"</code></pre>
 </div>
 
+<button id="button_configuration_persist_recorded_expectations" class="accordion title"><strong>Persist Recorded Expectations As JSON</strong></button>
+<div class="panel title">
+    <p>Enable the persisting of recorded expectations (proxy traffic) as json, which is updated whenever a new request is forwarded through the proxy.</p>
+    <p>The persisted file can be loaded on restart using <a href="#button_configuration_initialization_json_path">initializationJsonPath</a> to replay recorded traffic as mock expectations.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.persistRecordedExpectations(boolean enable)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.persistRecordedExpectations=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_PERSIST_RECORDED_EXPECTATIONS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.persistRecordedExpectations=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.persistRecordedExpectations="true"</code></pre>
+</div>
+
+<button id="button_configuration_persisted_recorded_expectations_file_path" class="accordion title"><strong>Persisted Recorded Expectations File Path</strong></button>
+<div class="panel title">
+    <p>The file path used to save persisted recorded expectations as json, which is updated whenever a new request is forwarded through the proxy.</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">persistedRecordedExpectations.json</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.persistedRecordedExpectationsPath(String persistedRecordedExpectationsPath)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.persistedRecordedExpectationsPath=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_PERSISTED_RECORDED_EXPECTATIONS_PATH=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.persistedRecordedExpectationsPath=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.persistedRecordedExpectationsPath="recordedExpectations.json"</code></pre>
+</div>
+
+<button id="button_configuration_persist_recorded_requests_to_disk" class="accordion title"><strong>Persist Recorded Requests To Disk (NDJSON)</strong></button>
+<div class="panel title">
+    <p>When enabled, every recorded exchange — both proxied (<span class="inline_code">FORWARDED_REQUEST</span> log event) and mocked (<span class="inline_code">EXPECTATION_RESPONSE</span> log event) — is appended to an NDJSON file as it completes — one compact JSON object per line (request + response). Lines reach the disk in small batches: as soon as MockServer has caught up with recording, before an import from disk reads the file, and on shutdown. A hard kill loses at most the last few KB of recent lines. The file is opened in append mode, so it survives process restarts and captures the complete session history even as the in-memory event log window evicts old entries under a byte budget.</p>
+    <p>This is the recommended pairing with <a href="/mock_server/configuration_properties.html#button_configuration_max_event_log_size_in_bytes">maxEventLogSizeInBytes</a> for proxying LLM traffic or any workload with large bodies: disk holds everything durably; memory stays bounded. See <a href="/mock_server/performance.html#proxying_large_bodies">Proxying LLM / Large-Body Traffic Without OOM</a> for the full worked example.</p>
+    <p><strong>Note:</strong> disk capture writes the <em>full</em> body before any in-memory truncation (<span class="inline_code">maxLoggedBodyBytes</span>) is applied, so the archive is always complete even when the dashboard shows truncated bodies.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.persistRecordedRequestsToDisk(boolean enable)</code></pre>
+    <pre class="prettyprint lang-java code"><code class="code">Configuration.persistRecordedRequestsToDisk(Boolean enable)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.persistRecordedRequestsToDisk=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_PERSIST_RECORDED_REQUESTS_TO_DISK=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.persistRecordedRequestsToDisk=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.persistRecordedRequestsToDisk="true"</code></pre>
+</div>
+
+<button id="button_configuration_persisted_recorded_requests_path" class="accordion title"><strong>Persisted Recorded Requests File Path</strong></button>
+<div class="panel title">
+    <p>The file path for the NDJSON archive written when <a href="#button_configuration_persist_recorded_requests_to_disk">persistRecordedRequestsToDisk</a> is enabled. The file is opened in append mode on startup, so a fresh session extends the same file. Truncate it manually between sessions, or use <span class="inline_code">--keep-log</span> / omit to start fresh (the <span class="inline_code">launch-with-llm-capture.sh</span> script truncates it automatically unless <span class="inline_code">--keep-log</span> is passed).</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">recordedRequests.ndjson</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.persistedRecordedRequestsPath(String path)</code></pre>
+    <pre class="prettyprint lang-java code"><code class="code">Configuration.persistedRecordedRequestsPath(String path)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.persistedRecordedRequestsPath=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_PERSISTED_RECORDED_REQUESTS_PATH=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.persistedRecordedRequestsPath=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.persistedRecordedRequestsPath="recordedRequests.ndjson"</code></pre>
+</div>
+
 <a id="verification_configuration" class="anchor" href="#verification_configuration">&nbsp;</a>
 
 <h2>Verification Configuration:</h2>
@@ -112,7 +220,7 @@
     <p>The maximum number of requests to return in verification failure result, if more expectations are found the failure result does not list them separately</p>
     <p>Type: <span class="keyword">int</span> Default: <span class="this_value">10</span></p>
     <p>Java Code:</p>
-    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.maximumNumberOfRequestToReturnInVerificationFailure(String maximumNumberOfRequestToReturnInVerificationFailure)</code></pre>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.maximumNumberOfRequestToReturnInVerificationFailure(Integer maximumNumberOfRequestToReturnInVerificationFailure)</code></pre>
     <p>System Property:</p>
     <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maximumNumberOfRequestToReturnInVerificationFailure=...</code></pre>
     <p>Environment Variable:</p>
@@ -120,5 +228,5 @@
     <p>Property File:</p>
     <pre class="code" style="padding: 2px;"><code class="code">mockserver.maximumNumberOfRequestToReturnInVerificationFailure=...</code></pre>
     <p>Example:</p>
-    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maximumNumberOfRequestToReturnInVerificationFailure="org/mockserver/server/initialize/initializerJson.json"</code></pre>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maximumNumberOfRequestToReturnInVerificationFailure="20"</code></pre>
 </div>

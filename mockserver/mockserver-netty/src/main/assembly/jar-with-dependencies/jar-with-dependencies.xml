@@ -1,0 +1,43 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!--
+  The DEFAULT standalone jar. It bundles every platform's Netty natives EXCEPT the QUIC
+  (HTTP/3) ones, which are excluded here and shipped in the `-http3` classifier instead.
+
+  WHY: the quiche natives are 11.22 MiB compressed across five platforms - the single
+  largest item in this jar - and HTTP/3 is experimental and OFF unless `http3Port` is set.
+  The QUIC *classes* (0.41 MiB) stay, so nothing fails to load; MockServer checks
+  `Quic.isAvailable()` when http3Port is set and fails at startup with instructions.
+-->
+<assembly xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xmlns="http://maven.apache.org/plugins/maven-assembly-plugin/assembly/1.1.2"
+          xsi:schemaLocation="http://maven.apache.org/plugins/maven-assembly-plugin/assembly/1.1.2 http://maven.apache.org/xsd/assembly-1.1.2.xsd">
+    <id>jar-with-dependencies</id>
+    <formats>
+        <format>jar</format>
+    </formats>
+    <includeBaseDirectory>false</includeBaseDirectory>
+    <dependencySets>
+        <dependencySet>
+            <outputDirectory>/</outputDirectory>
+            <useProjectArtifact>true</useProjectArtifact>
+            <unpack>true</unpack>
+            <scope>provided</scope>
+            <unpackOptions>
+                <excludes>
+                    <exclude>META-INF/native/*quiche*</exclude>
+                </excludes>
+            </unpackOptions>
+        </dependencySet>
+        <dependencySet>
+            <outputDirectory>/</outputDirectory>
+            <useProjectArtifact>true</useProjectArtifact>
+            <unpack>true</unpack>
+            <scope>runtime</scope>
+            <unpackOptions>
+                <excludes>
+                    <exclude>META-INF/native/*quiche*</exclude>
+                </excludes>
+            </unpackOptions>
+        </dependencySet>
+    </dependencySets>
+</assembly>

@@ -2,6 +2,16 @@ replicaCount: 1
 
 releasenameOverride: ""
 
+# Pod-level securityContext, rendered verbatim into the Deployment's
+# spec.template.spec.securityContext. Any pod-level field is supported. The most
+# common need is fsGroup, so the pod can read/write a mounted PersistentVolume
+# (for example when persisting expectations to a PVC — see persistence below).
+# Empty by default (no pod securityContext is emitted). Example:
+#   podSecurityContext:
+#     fsGroup: 2000
+#     fsGroupChangePolicy: OnRootMismatch
+podSecurityContext: {}
+
 app:
   logLevel: "INFO"
   serverPort: "1080"
@@ -9,8 +19,129 @@ app:
   mountedLibsConfigMapName: "mockserver-config"
   propertiesFileName: "mockserver.properties"
   readOnlyRootFilesystem: false
+  # -- Extra JVM options, passed verbatim via the JAVA_TOOL_OPTIONS environment variable.
+  # Empty by default. The Docker image already caps the heap at 45% of the container memory
+  # limit (-XX:MaxRAMPercentage=45.0), so the in-memory request/expectation rings size off a bounded heap.
+  # The rest is needed outside the heap (metaspace, thread stacks, GC
+  # bookkeeping, Netty off-heap buffers, kernel socket buffers); 512Mi is the smallest supported
+  # resources.limits.memory below (768Mi for a clustered node with the Infinispan backend — see
+  # clustering below). To change the cap, set an explicit -Xmx here — that disables
+  # the image's MaxRAMPercentage. (A different MaxRAMPercentage set via jvmOptions has NO effect:
+  # the image's entrypoint flag is applied last and wins.) MockServer's in-memory log ring sizes
+  # off the heap, so always pair a heap setting with a matching resources.limits.memory below.
+  # GC: the image runs ZGC by default via its own JAVA_TOOL_OPTIONS. The chart sets the
+  # JAVA_TOOL_OPTIONS env var ONLY when this value is non-empty, and doing so REPLACES the image
+  # default entirely — so a non-empty jvmOptions that omits a collector drops ZGC. Include the
+  # collector when you set jvmOptions for another reason (e.g. "-XX:+UseZGC -Xmx512m"), or set
+  # "-XX:+UseG1GC" to switch to G1.
+  # Example - set an explicit heap (overrides the image's MaxRAMPercentage; must fit inside
+  # resources.limits.memory) while KEEPING ZGC:
+  #   jvmOptions: "-XX:+UseZGC -Xmx512m"
+  jvmOptions: ""
   serviceAccountName: default
+  # Seconds Kubernetes waits after SIGTERM before SIGKILL. Must comfortably exceed
+  # preStopSleepSeconds + the server's own in-flight drain (mockserver.stopDrainMillis,
+  # default 15s), or a graceful shutdown gets cut short by the kill.
+  terminationGracePeriodSeconds: 45
+  # Seconds to pause BEFORE MockServer is told to shut down, so Kubernetes has time to
+  # remove this pod from Service endpoints first. On deletion the SIGTERM and the endpoint
+  # removal happen in PARALLEL, and endpoint propagation to kube-proxy/ingress takes
+  # seconds - so without this pause the server can begin shutting down while traffic is
+  # still being routed to it, and those requests fail. MockServer's own drain does not
+  # help here: it waits for requests already IN FLIGHT, not ones still arriving.
+  #
+  # Set 0 to disable (the default). The image is distroless and has NO SHELL, so the
+  # usual `exec: ["sh","-c","sleep 5"]` hook cannot work; this uses the native
+  # `lifecycle.preStop.sleep` action, which the kubelet performs itself.
+  #
+  # REQUIRES KUBERNETES 1.30+. The PodLifecycleSleepAction feature (KEP-3960) is Beta and
+  # on by default from 1.30; in 1.29 it is Alpha and OFF unless the cluster explicitly
+  # enables the PodLifecycleSleepAction feature gate. Enabling this on a cluster that does
+  # not support it is the dangerous case - you would believe you had a graceful-shutdown
+  # pause and not have one - so it is off by default and you should confirm your cluster
+  # version before turning it on. Leave at 0 on older clusters: the block is then omitted
+  # from the manifest entirely.
+  preStopSleepSeconds: 0
   runAsUser: 65534
+  # -- Set MOCKSERVER_PROPERTY_FILE to /config/<propertiesFileName> even when
+  # app.config.enabled is false. Enable this when you mount an EXTERNAL ConfigMap
+  # (Option 2 in the README) that already contains a mockserver.properties file,
+  # so MockServer is actually pointed at it. Default false keeps today's behaviour
+  # (the property-file env is set only for inline app.config).
+  mountConfigMap: false
+  # -- Extra environment variables, appended verbatim to the container's env list.
+  # Each entry is a standard Kubernetes EnvVar (name/value, or name/valueFrom).
+  # Empty by default. Use this to set any MOCKSERVER_* property the chart does not
+  # expose a dedicated value for (see https://www.mock-server.com/mock_server/configuration_properties.html).
+  # Example:
+  #   extraEnv:
+  #     - name: MOCKSERVER_MAX_EXPECTATIONS
+  #       value: "5000"
+  #     - name: MOCKSERVER_TLS_X509_CERTIFICATE_PATH
+  #       value: /tls/Certificate.pem
+  extraEnv: []
+  # TLS certificate material supplied via a Kubernetes Secret.
+  #
+  # ESSENTIAL FOR CLUSTERED / MULTI-REPLICA DEPLOYMENTS. By default each pod
+  # dynamically generates its OWN Certificate Authority (dynamicallyCreateCertificate
+  # AuthorityCertificate=true in the shipped mockserver.properties). Behind a load
+  # balancer that means every pod presents certificates signed by a DIFFERENT CA, so
+  # a client that imported one pod's mockserver-ca.pem gets a TLS trust error the
+  # moment it is routed to another pod — an error that appears INTERMITTENTLY as the
+  # load balancer rotates pods. Supplying ONE shared CA to every replica here (and
+  # leaving dynamic CA generation off) fixes it: all pods sign leaf certificates with
+  # the same CA, so a single imported CA is trusted fleet-wide.
+  #
+  # A Secret — never a ConfigMap — is the correct place for a private key. Enabling
+  # this mounts the Secret read-only at app.tls.mountPath and points MockServer at the
+  # mounted files (and sets dynamicallyCreateCertificateAuthorityCertificate=false).
+  #
+  # Example (create the Secret from PEM files kept OUT of version control):
+  #   app:
+  #     tls:
+  #       enabled: true
+  #   # helm install ... \
+  #   #   --set-file app.tls.certificateAuthorityCertificate=ca.pem \
+  #   #   --set-file app.tls.certificateAuthorityPrivateKey=ca-key.pem
+  #
+  # Example (reference a Secret you manage yourself, e.g. via SealedSecrets/ExternalSecrets):
+  #   app:
+  #     tls:
+  #       enabled: true
+  #       create: false
+  #       existingSecretName: my-mockserver-tls   # must contain CertificateAuthorityCertificate.pem + CertificateAuthorityPrivateKey.pem
+  tls:
+    # -- Mount shared TLS material from a Secret and disable per-pod dynamic CA generation.
+    enabled: false
+    # -- Create the Secret from the inline PEM below (true), or reference an existing
+    # Secret via existingSecretName (false).
+    create: true
+    # -- Name of an existing Secret to mount (required when create is false).
+    existingSecretName: ""
+    # -- Read-only mount path for the TLS material inside the container.
+    mountPath: /tls
+    # -- CA X.509 certificate PEM (the shared trust anchor). Only used when create is true.
+    # Keep it OUT of version control — prefer `--set-file` or an existing/sealed Secret.
+    certificateAuthorityCertificate: ""
+    # -- CA private key PEM (PKCS#8 or PKCS#1). Only used when create is true. SECRET —
+    # supply via `--set-file`, never commit it.
+    certificateAuthorityPrivateKey: ""
+    # -- Optional server X.509 certificate PEM. Only used when create is true. When
+    # omitted MockServer derives leaf certificates from the CA automatically.
+    certificate: ""
+    # -- Optional server private key PEM. Only used when create is true.
+    privateKey: ""
+  # Writable directory (emptyDir) for dynamically generated TLS certificates.
+  #
+  # The default directoryToSaveDynamicSSLCertificate is "." — but with cwd "/", a
+  # non-root uid (65534), and (optionally) a read-only root filesystem, MockServer has
+  # nowhere writable to persist a dynamically generated CA/leaf. Enable this to mount a
+  # writable emptyDir and point directoryToSaveDynamicSSLCertificate at it, so the
+  # single-replica dynamic-CA case does not depend on a non-writable working directory.
+  # Not needed when app.tls.enabled is true (dynamic generation is off then).
+  dynamicCertificateDir:
+    enabled: false
+    path: /dynamic-certificates
   config:
     enabled: false
     # properties: |
@@ -18,14 +149,102 @@ app:
     # initializerJson: |
     #   [{"httpRequest": {"path": "/example"}, "httpResponse": {"body": "response"}}]
     # extraFiles: {}
+    #
+    # Chaos proxy example — deploy MockServer as a reverse proxy in front of a
+    # real upstream and inject faults into the responses it returns, to test how
+    # your services handle an unreliable dependency. Point your service at this
+    # MockServer Service instead of the real upstream. See the
+    # "Chaos Proxy in Kubernetes" guide:
+    # https://www.mock-server.com/mock_server/chaos_testing_kubernetes.html
+    #
+    # The expectation below matches every path and forwards to the upstream, so a
+    # separate mockserver.proxyRemoteHost is not needed. (If persistence.enabled is
+    # also true, omit mockserver.initializationJsonPath — the chart sets the
+    # initialization path to the persisted-expectations file automatically.)
+    #
+    #   config:
+    #     enabled: true
+    #     properties: |
+    #       mockserver.initializationJsonPath=/config/initializerJson.json
+    #     initializerJson: |
+    #       [
+    #         {
+    #           "httpRequest": { "path": "/.*" },
+    #           "httpForward": { "host": "upstream.default.svc.cluster.local", "port": 8080 },
+    #           "chaos": {
+    #             "errorStatus": 503,
+    #             "errorProbability": 0.3,
+    #             "retryAfter": "5",
+    #             "latency": { "timeUnit": "MILLISECONDS", "value": 500 }
+    #           },
+    #           "times": { "unlimited": true }
+    #         }
+    #       ]
     properties: ""
     initializerJson: ""
     extraFiles: {}
+  persistence:
+    # -- Enable persistent storage for expectations.
+    # When enabled, a PersistentVolumeClaim is mounted and MockServer is configured
+    # to persist expectations to it, so they survive pod restarts.
+    #
+    # The chart automatically sets the following environment variables:
+    #   MOCKSERVER_PERSIST_EXPECTATIONS=true
+    #   MOCKSERVER_PERSISTED_EXPECTATIONS_PATH=/persistence/persistedExpectations.json
+    #   MOCKSERVER_INITIALIZATION_JSON_PATH=/persistence/persistedExpectations.json
+    #
+    # These are safe defaults — any matching property in your mockserver.properties
+    # file takes precedence over environment variables.
+    #
+    # Example - enable with chart-managed PVC (simplest):
+    #   persistence:
+    #     enabled: true
+    #
+    # Example - use an existing PVC:
+    #   persistence:
+    #     enabled: true
+    #     existingClaimName: "my-mockserver-data"
+    #
+    # Example - custom StorageClass and size:
+    #   persistence:
+    #     enabled: true
+    #     storageClass: "gp3"
+    #     size: 1Gi
+    #
+    # Example - clustering with shared storage (ReadWriteMany):
+    #   persistence:
+    #     enabled: true
+    #     accessModes:
+    #       - ReadWriteMany
+    #     storageClass: "efs-sc"
+    enabled: false
+    # -- Use an existing PersistentVolumeClaim instead of creating a new one.
+    # If empty, the chart creates a PVC automatically.
+    existingClaimName: ""
+    # -- StorageClass for the PVC. If empty, the cluster default StorageClass is used.
+    storageClass: ""
+    # -- Access modes for the PVC.
+    # Use ReadWriteOnce for single-replica deployments (default).
+    # Use ReadWriteMany (with NFS, AWS EFS, or Azure Files) for clustered deployments.
+    accessModes:
+      - ReadWriteOnce
+    # -- Size of the PVC. Expectation JSON files are typically small.
+    size: 256Mi
+    # -- Mount path inside the container for the persistent volume.
+    mountPath: /persistence
+    # -- Annotations to add to the PVC (only used when creating a new PVC).
+    # Example:
+    #   annotations:
+    #     helm.sh/resource-policy: keep
+    annotations: {}
 
 image:
   repository: mockserver
   snapshot: false
   pullPolicy: IfNotPresent
+  # -- Image variant, appended to the tag: "" (standard), "http3" (adds the QUIC native that
+  # HTTP/3 needs; also set mockserver.http3Port and expose that UDP port) or "graaljs".
+  variant: ""
 
 service:
   annotations: {}
@@ -37,7 +256,49 @@ service:
   port: 1080
   nodePort: ""
   test:
-    image: radial/busyboxplus:curl
+    image: curlimages/curl:8.20.0
+
+# Prometheus Operator ServiceMonitor for scraping MockServer's Prometheus metrics.
+#
+# Disabled by default. Two things are required for metrics to actually flow:
+#   1. The Prometheus Operator CRDs (monitoring.coreos.com/v1) must be installed —
+#      e.g. via kube-prometheus-stack. Without them this template is skipped.
+#   2. MockServer must be started with mockserver.metricsEnabled=true (set it in
+#      app.config.properties), otherwise /mockserver/metrics returns 404.
+#
+# Set `labels` so your Prometheus Operator's serviceMonitorSelector picks this up
+# (commonly the Helm release name of your kube-prometheus-stack, e.g.
+# `release: kube-prometheus-stack`).
+#
+# Example:
+#   serviceMonitor:
+#     enabled: true
+#     interval: 30s
+#     labels:
+#       release: kube-prometheus-stack
+serviceMonitor:
+  # -- Create a Prometheus Operator ServiceMonitor for the metrics endpoint.
+  enabled: false
+  # -- Namespace to create the ServiceMonitor in. Defaults to the release namespace.
+  namespace: ""
+  # -- Additional labels for the ServiceMonitor (match your Prometheus serviceMonitorSelector).
+  labels: {}
+  # -- Scrape interval. If empty, Prometheus' global default is used.
+  interval: 30s
+  # -- Per-scrape timeout. If empty, Prometheus' default is used.
+  scrapeTimeout: ""
+  # -- Metrics path. MockServer serves Prometheus metrics at /mockserver/metrics.
+  path: /mockserver/metrics
+  # -- Scrape scheme (http or https).
+  scheme: http
+  # -- Keep target labels on collision instead of relabelling them.
+  honorLabels: false
+  # -- namespaceSelector for the ServiceMonitor (which namespaces to search for the Service).
+  namespaceSelector: {}
+  # -- relabel_configs applied to the scrape target labels before ingestion.
+  relabelings: []
+  # -- metric_relabel_configs applied to scraped samples before ingestion.
+  metricRelabelings: []
 
 ingress:
   enabled: false
@@ -52,6 +313,23 @@ ingress:
 
 podAnnotations: {}
 
+podLabels: {}
+
+# -- Pod resource requests and limits, rendered verbatim into the container spec.
+# Empty by default (no requests/limits — the pod can consume unbounded node memory).
+# Setting a memory limit is strongly recommended: the JVM caps its heap at 45% of the
+# memory limit (-XX:MaxRAMPercentage=45.0 in the image), and MockServer's in-memory
+# request/expectation rings size off that heap. The rest of the limit is needed outside the
+# heap, so do not go below 512Mi (768Mi for a clustered node with the Infinispan backend). Without a limit the JVM sizes off
+# total node memory and can be OOM-killed under load. Set app.jvmOptions to tune the heap.
+# Example:
+#   resources:
+#     requests:
+#       cpu: 250m
+#       memory: 512Mi
+#     limits:
+#       cpu: "1"
+#       memory: 1Gi
 resources: {}
 
 nodeSelector: {}
@@ -59,5 +337,143 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+# Sidecar / transparent proxy mode
+#
+# When `transparentProxy` is enabled MockServer reads the original destination of
+# intercepted connections (Linux iptables REDIRECT, via SO_ORIGINAL_DST or nf_conntrack) and forwards
+# there, with a graceful Host-header fallback. This requires Linux nodes and the
+# NET_ADMIN capability, and is a no-op on non-Linux hosts. The optional iptables
+# init container redirects outbound TCP to MockServer so application traffic is
+# transparently intercepted without code changes.
+#
+sidecar:
+  enabled: false
+  transparentProxy: false
+  # Add the NET_ADMIN capability (required for SO_ORIGINAL_DST / iptables). Only
+  # applied when transparentProxy is true.
+  netAdmin: true
+  # Optional iptables init container that REDIRECTs outbound TCP to MockServer.
+  # Requires a privileged init container; disable if iptables rules are applied
+  # by the platform (e.g. an Istio CNI plugin) instead.
+  iptables:
+    enabled: false
+    image: "istio/proxyv2:1.20.0"
+    # Destination ports to redirect to MockServer (the transparent proxy port).
+    redirectPorts: "80,443"
+    # The MockServer port iptables REDIRECTs intercepted traffic to.
+    proxyPort: 1080
+    # UID to exclude from iptables REDIRECT. Traffic originating from this UID
+    # is returned (not redirected) to prevent MockServer's own upstream egress
+    # from looping back to itself. Must match app.runAsUser (default 65534).
+    excludeUid: 65534
+
+# Admission webhook for automatic sidecar injection
+#
+# When enabled, deploys a MutatingAdmissionWebhook that automatically injects
+# the MockServer transparent-proxy sidecar and iptables init container into pods
+# that opt in via the `mockserver.org/inject: "true"` annotation. Pods in
+# namespaces labelled `mockserver.org/sidecar-injection: enabled` (or matching
+# the custom namespaceSelector) are evaluated.
+#
+# This automates what users previously had to configure manually via the
+# `sidecar` values above. The webhook approach removes the need to hand-edit
+# every Deployment; just label the namespace and annotate the pods.
+#
+webhook:
+  enabled: false
+  # Webhook deployment image (the webhook handler itself)
+  image:
+    repository: mockserver/mockserver-webhook
+    tag: ""    # defaults to Chart.AppVersion
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  # failurePolicy: Ignore means pods are created even if the webhook is down
+  failurePolicy: Ignore
+  # Timeout for the webhook call (seconds)
+  timeoutSeconds: 10
+  # Scope for the webhook rule: Namespaced (default) or Cluster
+  scope: "Namespaced"
+  # namespaceSelector for the MutatingWebhookConfiguration.
+  # Default: only namespaces with label `mockserver.org/sidecar-injection: enabled`
+  # Override to target different labels.
+  # namespaceSelector:
+  #   matchLabels:
+  #     mockserver.org/sidecar-injection: enabled
+  namespaceSelector: {}
+  # objectSelector for fine-grained pod selection (in addition to namespaceSelector)
+  objectSelector: {}
+  # Sidecar injection configuration (what gets injected into target pods)
+  sidecar:
+    # image: ""                  # defaults to <image.repository>/mockserver:mockserver-<appVersion>
+    iptablesImage: "alpine:3.19"
+    serverPort: 1080
+    redirectPorts: "80,443"
+    runAsUser: 65534
+    logLevel: "INFO"
+  # TLS bootstrap: self-signed (default) or cert-manager.
+  # Self-signed: two Helm hook Jobs work together —
+  #   1. A pre-install/pre-upgrade Job generates a self-signed CA + server cert
+  #      and creates the TLS Secret (so the Deployment can mount it immediately).
+  #   2. A post-install/post-upgrade Job reads ca.crt from the Secret and patches
+  #      the MutatingWebhookConfiguration's caBundle (the MWC must exist first).
+  # This split avoids a deadlock under `helm install --wait` and GitOps tools.
+  # No external dependencies.
+  certManager:
+    enabled: false
+    duration: "8760h"     # 1 year
+    renewBefore: "720h"   # 30 days
+  tls:
+    # Image for the two self-signed TLS bootstrap Jobs. Uses the purpose-built
+    # kube-webhook-certgen (generate the CA + serving-cert Secret, then patch the
+    # webhook caBundle) published on registry.k8s.io — a stable, long-lived
+    # registry, unlike the withdrawn bitnami/kubectl tags. The tool issues a
+    # long-lived self-signed cert and reuses it across upgrades; use the
+    # cert-manager path (webhook.certManager.enabled) if you need a controlled
+    # validity period or automatic rotation. Override with your own mirrored
+    # image (any kube-webhook-certgen build) for airgapped clusters.
+    setupImage: "registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.4.4"
+  # caBundle: set this to a base64-encoded CA certificate if you manage TLS
+  # yourself (outside both the self-signed Job and cert-manager). When the
+  # self-signed Job runs, it patches this value into the webhook config.
+  caBundle: ""
+  # Resource limits for the webhook deployment
+  resources: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Clustering — opt-in clustered deployment using the Infinispan state backend.
+#
+# REQUIRES the -clustered image variant (mockserver/mockserver:clustered-<version>)
+# which includes the Infinispan/JGroups libraries. The default image does NOT
+# support clustering — setting clustering.enabled without switching to the
+# -clustered image will fail at startup with a ClassNotFoundException.
+# Give clustered pods a resources.limits.memory of at least 768Mi (1Gi recommended):
+# Infinispan/JGroups need more non-heap memory, and 512Mi is OOM-killed under load.
+#
+# When enabled the chart:
+#   1. Creates a headless Service for JGroups DNS_PING pod discovery
+#   2. Sets environment variables for the Infinispan backend, cluster name,
+#      JGroups transport, and DNS_PING query address
+#   3. Allows replicaCount > 1 with state replication across pods
+#
+# Example:
+#   replicaCount: 3
+#   clustering:
+#     enabled: true
+#   image:
+#     repositoryNameAndTag: "mockserver/mockserver:clustered-8.0.0"
+clustering:
+  enabled: false
+  # -- Cluster name for JGroups. All pods that should share state must use
+  # the same value. Only relevant when clustering.enabled is true.
+  clusterName: "mockserver-cluster"
+  # -- JGroups transport configuration file. The default uses TCP + DNS_PING
+  # for Kubernetes headless-Service discovery. Override for non-k8s stacks.
+  transportConfig: "jgroups-kubernetes.xml"
+  # -- JGroups bind port for inter-pod cluster communication (TCP).
+  jgroupsPort: 7800
 
 imagePullSecrets: []

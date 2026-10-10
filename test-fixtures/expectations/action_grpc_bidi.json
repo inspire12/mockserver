@@ -1,0 +1,36 @@
+{
+  "httpRequest": {
+    "path": "/grpc/BidiMethod"
+  },
+  "grpcBidiResponse": {
+    "statusName": "OK",
+    "headers": {
+      "x-meta": [
+        "v"
+      ]
+    },
+    "messages": [
+      {
+        "json": "{\"greeting\":\"hi\"}"
+      }
+    ],
+    "rules": [
+      {
+        "matchJson": "{\"name\":\"world\"}",
+        "responses": [
+          {
+            "json": "{\"reply\":\"hello world\"}",
+            "templateType": "MUSTACHE"
+          }
+        ]
+      }
+    ],
+    "closeConnection": true,
+    "statusMessage": "success",
+    "delay": {
+      "timeUnit": "MILLISECONDS",
+      "value": 10
+    },
+    "primary": true
+  }
+}
