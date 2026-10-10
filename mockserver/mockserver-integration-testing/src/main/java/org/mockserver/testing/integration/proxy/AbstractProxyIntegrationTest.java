@@ -969,7 +969,7 @@ public abstract class AbstractProxyIntegrationTest {
                 );
             fail("expected exception to be thrown");
         } catch (AssertionError ae) {
-            assertThat(ae.getMessage(), startsWith("Request not found exactly 0 times, expected:<{" + NEW_LINE +
+            assertThat(ae.getMessage(), startsWith("Request found 1 time but should have been found exactly 0 times, expected:<{" + NEW_LINE +
                 "  \"path\" : \"" + "/test_headers_and_body" + "\"" + NEW_LINE +
                 "}> but was:<{"));
         }

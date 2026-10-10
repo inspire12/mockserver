@@ -246,7 +246,7 @@ describe('VerificationView', () => {
     // Expand and fill response body
     await user.click(screen.getByText('Response matcher (optional)'));
     const bodyField = screen.getByLabelText(/Response body/);
-    await user.type(bodyField, '{{"result":"ok"}}');
+    await user.type(bodyField, '{{"result":"ok"}');
 
     await user.click(screen.getByRole('button', { name: 'Verify' }));
 
@@ -256,7 +256,7 @@ describe('VerificationView', () => {
 
     const [, init] = fetchMock.mock.calls[0]!;
     const body = JSON.parse(init.body as string);
-    expect(body.httpResponse).toHaveProperty('body');
+    expect(body.httpResponse.body).toEqual({ type: 'JSON', json: '{"result":"ok"}' });
   });
 
   it('shows response matcher in sequence mode steps', async () => {
@@ -469,5 +469,157 @@ describe('VerificationView — launchpad draft consumption', () => {
     renderView();
     expect(screen.getByLabelText('Path')).toHaveValue('/health');
     expect(useDashboardStore.getState().pendingVerificationDraft).toBeNull();
+  });
+});
+
+function stubVerify(status: number, text = '') {
+  const fetchMock = vi.fn().mockResolvedValue({ status, statusText: '', text: async () => text });
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
+
+interface SentVerify {
+  httpRequest: { body?: unknown; headers?: Record<string, string[]> };
+}
+
+function sentBody(fetchMock: ReturnType<typeof vi.fn>): SentVerify {
+  const [, init] = fetchMock.mock.calls[0]!;
+  return JSON.parse((init as RequestInit).body as string) as SentVerify;
+}
+
+describe('VerificationView body matching (E2E-VERIFY-1)', () => {
+  it('sends plain body text as a substring matcher, not an exact string', async () => {
+    const fetchMock = stubVerify(202);
+    const user = userEvent.setup();
+    renderView();
+    await user.type(screen.getByLabelText('Body (substring/JSON match)'), 'widget');
+    await user.click(screen.getByRole('button', { name: 'Verify' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(sentBody(fetchMock).httpRequest.body).toEqual({ type: 'STRING', string: 'widget', subString: true });
+  });
+
+  it('sends a JSON body as a partial JSON matcher', async () => {
+    const fetchMock = stubVerify(202);
+    const user = userEvent.setup();
+    renderView();
+    await user.type(screen.getByLabelText('Body (substring/JSON match)'), '{{"order":"widget"}');
+    await user.click(screen.getByRole('button', { name: 'Verify' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(sentBody(fetchMock).httpRequest.body).toEqual({ type: 'JSON', json: '{"order":"widget"}' });
+  });
+});
+
+describe('VerificationView input validation', () => {
+  it('rejects a header line without ":" inline instead of dropping it (E2E-VERIFY-2)', async () => {
+    const fetchMock = stubVerify(202);
+    const user = userEvent.setup();
+    renderView();
+    await user.type(screen.getByLabelText('Path'), '/y');
+    await user.type(screen.getByLabelText('Headers (Name: value per line)'), 'X-Required-Header abc');
+
+    expect(screen.getByText('"X-Required-Header abc" is not Name: value')).toBeInTheDocument();
+    expect(screen.getByText('Fix the fields marked in red to verify.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Verify' })).toBeDisabled();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await user.clear(screen.getByLabelText('Headers (Name: value per line)'));
+    await user.type(screen.getByLabelText('Headers (Name: value per line)'), 'X-Required-Header: abc');
+    expect(screen.queryByText(/is not Name: value/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Verify' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(sentBody(fetchMock).httpRequest.headers).toEqual({ 'X-Required-Header': ['abc'] });
+  });
+
+  it('rejects a query line without "=" and counts further bad lines', async () => {
+    stubVerify(202);
+    const user = userEvent.setup();
+    renderView();
+    await user.type(screen.getByLabelText('Query (key=value per line)'), 'page{Enter}=2{Enter}size=3');
+    expect(screen.getByText('"page" is not key=value (and 1 more)')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Verify' })).toBeDisabled();
+  });
+
+  it('keeps a section holding an invalid response header open so the error stays visible', async () => {
+    stubVerify(202);
+    const user = userEvent.setup();
+    renderView();
+    await user.click(screen.getByRole('button', { name: 'Expand Response matcher (optional)' }));
+    await user.type(screen.getByLabelText('Response headers (Name: value per line)'), 'Broken');
+    const header = screen.getByRole('button', { name: 'Collapse Response matcher (optional)' });
+    expect(header).toBeDisabled();
+    expect(screen.getByText('"Broken" is not Name: value')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Verify' })).toBeDisabled();
+  });
+
+  it('rejects an invalid step in sequence mode', async () => {
+    stubVerify(202);
+    const user = userEvent.setup();
+    renderView();
+    await user.click(screen.getByRole('button', { name: 'Ordered sequence' }));
+    await user.type(screen.getAllByLabelText('Headers (Name: value per line)')[1]!, 'nocolon');
+    expect(screen.getByRole('button', { name: 'Verify sequence' })).toBeDisabled();
+  });
+
+  it('flags "between 3 and 1" instead of silently verifying "exactly 3" (E2E-VERIFY-5)', async () => {
+    const fetchMock = stubVerify(202);
+    const user = userEvent.setup();
+    renderView();
+    await user.click(screen.getByRole('combobox', { name: 'Times mode' }));
+    await user.click(screen.getByRole('option', { name: 'between' }));
+    await user.clear(screen.getByLabelText('min'));
+    await user.type(screen.getByLabelText('min'), '3');
+    await user.clear(screen.getByLabelText('max'));
+    await user.type(screen.getByLabelText('max'), '1');
+
+    expect(screen.getByText('Must not be less than min')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Verify' })).toBeDisabled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a count the server cannot parse before sending it (E2E-VERIFY-4)', async () => {
+    const fetchMock = stubVerify(202);
+    const user = userEvent.setup();
+    renderView();
+    await user.clear(screen.getByLabelText('times'));
+    await user.type(screen.getByLabelText('times'), '3000000000');
+    expect(screen.getByText('At most 2147483647')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Verify' })).toBeDisabled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('shows a 400 as invalid input, not as a failed verification (E2E-VERIFY-4)', async () => {
+    stubVerify(400, 'incorrect verification json format');
+    const user = userEvent.setup();
+    renderView();
+    await user.type(screen.getByLabelText('Path'), '/y');
+    await user.click(screen.getByRole('button', { name: 'Verify' }));
+    await waitFor(() => expect(screen.getByText('The request was rejected as invalid.')).toBeInTheDocument());
+    expect(screen.queryByText('Verification failed')).not.toBeInTheDocument();
+  });
+});
+
+describe('VerificationView accessibility (E2E-VERIFY-3)', () => {
+  it('names the method and times-mode selects and the quick-scope input', () => {
+    renderView();
+    expect(screen.getByRole('combobox', { name: 'Method' })).toHaveTextContent('Any method');
+    expect(screen.getByRole('combobox', { name: 'Times mode' })).toHaveTextContent('at least');
+    expect(screen.getByRole('textbox', { name: 'Quick scope' })).toBeInTheDocument();
+  });
+
+  it('renders each matcher-section header as one button with no button nested inside', () => {
+    renderView();
+    for (const name of ['Collapse Request matcher (optional)', 'Expand Response matcher (optional)']) {
+      const header = screen.getByRole('button', { name });
+      expect(header.tagName).toBe('BUTTON');
+      expect(header.querySelector('button, [role="button"]')).toBeNull();
+    }
+  });
+
+  it('toggles a matcher section from the keyboard', async () => {
+    const user = userEvent.setup();
+    renderView();
+    screen.getByRole('button', { name: 'Expand Response matcher (optional)' }).focus();
+    await user.keyboard('{Enter}');
+    expect(screen.getByRole('button', { name: 'Collapse Response matcher (optional)' })).toHaveAttribute('aria-expanded', 'true');
   });
 });

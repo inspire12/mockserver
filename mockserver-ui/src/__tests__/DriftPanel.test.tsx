@@ -293,3 +293,49 @@ describe('DriftPanel', () => {
     });
   });
 });
+
+describe('DriftPanel filter and clear wording', () => {
+  const twoDrifts: DriftResponse = {
+    count: 2,
+    drifts: [
+      { expectationId: 'e1', driftType: 'STATUS', field: 'sc', confidence: 0.9, epochTimeMs: 1717000000000 },
+      { expectationId: 'e2', driftType: 'HEADER_ADDED', field: 'X-New', confidence: 0.8, epochTimeMs: 1717000000000 },
+    ],
+  };
+
+  it('says no records match the filter, not "No drift detected", when a filter hides every row (E2E-VERIFY-6)', async () => {
+    stubFetchDrift(twoDrifts);
+    const user = userEvent.setup();
+    renderPanel();
+    await waitFor(() => expect(screen.getByText('2 detected')).toBeInTheDocument());
+
+    await user.type(screen.getByLabelText('Filter by expectation'), 'zzz');
+    expect(screen.getByText('No drift records match the filter “zzz”.')).toBeInTheDocument();
+    expect(screen.queryByText(/No drift detected/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the count the Clear dialog opened with while it closes (E2E-VERIFY-10)', async () => {
+    let cleared = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: { method?: string }) => {
+        if (init?.method === 'PUT') {
+          cleared = true;
+          return { ok: true, status: 200 };
+        }
+        return { ok: true, status: 200, json: async () => (cleared ? { count: 0, drifts: [] } : twoDrifts) };
+      }),
+    );
+    const user = userEvent.setup();
+    renderPanel();
+    await waitFor(() => expect(screen.getByText('2 detected')).toBeInTheDocument());
+
+    await user.click(screen.getByRole('button', { name: /Clear/i }));
+    expect(screen.getByText('This removes all 2 detected drift records. This cannot be undone.')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Clear drift records/i }));
+
+    await waitFor(() => expect(screen.getByText('0 detected')).toBeInTheDocument());
+    expect(screen.queryByText(/This removes all 0 detected/)).not.toBeInTheDocument();
+  });
+});
+

@@ -57,6 +57,8 @@ keywords: mock drift detection, stub validation, proxy mode, schema drift, contr
   </tbody>
 </table>
 
+<p>For the three schema drift types, <code>expectedValue</code> and <code>actualValue</code> hold the field's JSON type (<code>string</code>, <code>integer</code>, <code>number</code>, <code>boolean</code>, <code>object</code> or <code>array</code>) rather than its value, because schema drift compares the shape of the two responses, not their data. For example, a stub returning <code>{"id": 7}</code> and a real API returning <code>{"id": "7"}</code> gives a <code>SCHEMA_TYPE_CHANGED</code> drift for <code>$.id</code> with expected <code>integer</code> and actual <code>string</code>.</p>
+
 <p>Non-semantic headers (<code>date</code>, <code>x-request-id</code>, <code>content-length</code>, <code>transfer-encoding</code>, <code>connection</code>, <code>keep-alive</code>, <code>server</code>) are automatically excluded from comparison.</p>
 
 <h2 id="retrieving">Retrieving drift records</h2>
@@ -83,6 +85,7 @@ keywords: mock drift detection, stub validation, proxy mode, schema drift, contr
       "expectationId": "abc-123",
       "driftType": "SCHEMA_FIELD_ADDED",
       "field": "$.newField",
+      "actualValue": "string",
       "confidence": 0.9,
       "epochTimeMs": 1717145600000
     }
@@ -231,7 +234,7 @@ $client->clearDrift();</code></pre>
       "expectationId": "abc-123",
       "driftType": "SCHEMA_FIELD_REMOVED",
       "field": "$.role",
-      "expectedValue": "admin",
+      "expectedValue": "string",
       "confidence": 0.95,
       "epochTimeMs": 1717145600000,
       "semanticSeverity": "BREAKING",

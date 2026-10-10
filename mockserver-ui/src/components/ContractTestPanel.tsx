@@ -54,7 +54,7 @@ function ErrorList({ errors }: { errors: string[] }) {
           component="li"
           variant="caption"
           color="error"
-          sx={{ fontFamily: 'monospace' }}
+          sx={{ fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}
         >
           {err}
         </Typography>

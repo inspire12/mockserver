@@ -271,3 +271,28 @@ describe('ContractTestPanel — Validate Recorded Traffic mode', () => {
     });
   });
 });
+
+describe('ContractTestPanel multi-line validation errors (E2E-VERIFY-8)', () => {
+  it('keeps the line breaks of a multi-line validation error', async () => {
+    const multiLine = 'response body validation error: 2 errors:\n - $.id: string found, integer expected\n - $.name: is missing but it is required';
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ...mixedReport,
+        results: [{ ...mixedReport.results[1]!, validationErrors: [multiLine] }],
+      }),
+    })));
+    const user = userEvent.setup();
+    renderPanel();
+    await user.type(screen.getByRole('textbox', { name: /OpenAPI spec/i }), 'https://example.com/openapi.json');
+    await user.type(screen.getByRole('textbox', { name: /Target base URL/i }), 'http://localhost:8080');
+    await user.click(screen.getByRole('button', { name: /Run contract test/i }));
+
+    const item = await screen.findByText(/response body validation error: 2 errors:/);
+    expect(item.tagName).toBe('LI');
+    expect(item.textContent).toBe(multiLine);
+    expect(item).toHaveStyle({ whiteSpace: 'pre-wrap' });
+  });
+});
+

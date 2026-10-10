@@ -29,6 +29,7 @@ import org.mockserver.uuid.UUIDService;
 import org.mockserver.verify.Disposition;
 import org.mockserver.verify.Verification;
 import org.mockserver.verify.VerificationSequence;
+import org.mockserver.verify.VerificationTimes;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.event.Level;
@@ -1509,9 +1510,9 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
                         Integer maximumNumberOfRequestToReturnInVerificationFailure = verification.getMaximumNumberOfRequestToReturnInVerificationFailure() != null ? verification.getMaximumNumberOfRequestToReturnInVerificationFailure() : configuration.maximumNumberOfRequestToReturnInVerificationFailure();
                         if (allRequests.size() < maximumNumberOfRequestToReturnInVerificationFailure) {
                             String serializedAllRequestInLog = allRequests.size() == 1 ? requestDefinitionSerializer.serialize(true, allRequests.get(0)) : requestDefinitionSerializer.serialize(true, allRequests);
-                            failureMessage = "Request not found " + verification.getTimes() + ", expected:<" + serializedRequestToBeVerified + "> but was:<" + serializedAllRequestInLog + ">";
+                            failureMessage = countMismatch("Request", verification.getTimes(), matchedCount) + ", expected:<" + serializedRequestToBeVerified + "> but was:<" + serializedAllRequestInLog + ">";
                         } else {
-                            failureMessage = "Request not found " + verification.getTimes() + ", expected:<" + serializedRequestToBeVerified + "> but was found " + matchedCount + " time" + (matchedCount == 1 ? "" : "s") + " among " + allRequests.size() + " total requests";
+                            failureMessage = countMismatch("Request", verification.getTimes(), matchedCount) + ", expected:<" + serializedRequestToBeVerified + "> but was found " + matchedCount + " time" + (matchedCount == 1 ? "" : "s") + " among " + allRequests.size() + " total requests";
                         }
                         if (configuration.detailedVerificationFailures() && !allRequests.isEmpty() && verification.getHttpRequest() instanceof HttpRequest) {
                             String diffSummary = buildClosestMatchDiff((HttpRequest) verification.getHttpRequest(), allRequests);
@@ -1519,17 +1520,23 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
                                 failureMessage += diffSummary;
                             }
                         }
-                        final Object[] arguments = new Object[]{verification.getHttpRequest(), allRequests.size() == 1 ? allRequests.get(0) : allRequests};
+                        final Object received = allRequests.size() == 1 ? allRequests.get(0) : allRequests;
                         if (logResult && mockServerLogger.isEnabledForInstance(Level.INFO)) {
-                            mockServerLogger.logEvent(
-                                new LogEntry()
-                                    .setType(VERIFICATION_FAILED)
-                                    .setLogLevel(Level.INFO)
-                                    .setCorrelationId(logCorrelationId)
-                                    .setHttpRequest(verification.getHttpRequest())
+                            LogEntry logEntry = new LogEntry()
+                                .setType(VERIFICATION_FAILED)
+                                .setLogLevel(Level.INFO)
+                                .setCorrelationId(logCorrelationId)
+                                .setHttpRequest(verification.getHttpRequest());
+                            if (foundTooOften(verification.getTimes(), matchedCount)) {
+                                logEntry
+                                    .setMessageFormat("request found too often, it should have been found " + verification.getTimes() + ", expected:{}but was:{}")
+                                    .setArguments(verification.getHttpRequest(), received);
+                            } else {
+                                logEntry
                                     .setMessageFormat("request not found " + verification.getTimes() + ", expected:{}but was:{}")
-                                    .setArguments(arguments)
-                            );
+                                    .setArguments(verification.getHttpRequest(), received);
+                            }
+                            mockServerLogger.logEvent(logEntry);
                         }
                         resultConsumer.accept(failureMessage);
                     });
@@ -1693,6 +1700,21 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
         }
     }
 
+    /**
+     * Lead phrase of a count-verification failure. "not found" is only true when too FEW matched;
+     * when an upper bound was exceeded the subject WAS found, too often, so say that instead.
+     */
+    static String countMismatch(String subject, VerificationTimes times, int matchedCount) {
+        if (foundTooOften(times, matchedCount)) {
+            return subject + " found " + matchedCount + " time" + (matchedCount == 1 ? "" : "s") + " but should have been found " + times;
+        }
+        return subject + " not found " + times;
+    }
+
+    private static boolean foundTooOften(VerificationTimes times, int matchedCount) {
+        return times.getAtMost() != -1 && matchedCount > times.getAtMost();
+    }
+
     private void verifyResponse(Verification verification, String logCorrelationId, boolean logResult, Consumer<String> resultConsumer) {
         RequestDefinition requestFilter = verification.getHttpRequest() != null
             ? verification.getHttpRequest().withLogCorrelationId(logCorrelationId)
@@ -1719,9 +1741,9 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
                         String serializedAllResponsesInLog = allResponses.size() == 1
                             ? httpResponseSerializer.serialize(allResponses.get(0))
                             : httpResponseSerializer.serialize(allResponses);
-                        failureMessage = "Response not found " + verification.getTimes() + ", expected:<" + serializedResponseToBeVerified + "> but was:<" + serializedAllResponsesInLog + ">";
+                        failureMessage = countMismatch("Response", verification.getTimes(), matchedCount) + ", expected:<" + serializedResponseToBeVerified + "> but was:<" + serializedAllResponsesInLog + ">";
                     } else {
-                        failureMessage = "Response not found " + verification.getTimes() + ", expected:<" + serializedResponseToBeVerified + "> but was found " + matchedCount + " time" + (matchedCount == 1 ? "" : "s") + " among " + allPairs.size() + " recorded responses";
+                        failureMessage = countMismatch("Response", verification.getTimes(), matchedCount) + ", expected:<" + serializedResponseToBeVerified + "> but was found " + matchedCount + " time" + (matchedCount == 1 ? "" : "s") + " among " + allPairs.size() + " recorded responses";
                     }
                     // Mirror the request side (buildClosestMatchDiff): when detailed failures are on and
                     // there is at least one recorded response to compare against, append a field-level
@@ -1743,15 +1765,21 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
                         }
                     }
                     if (logResult && mockServerLogger.isEnabledForInstance(Level.INFO)) {
-                        mockServerLogger.logEvent(
-                            new LogEntry()
-                                .setType(VERIFICATION_FAILED)
-                                .setLogLevel(Level.INFO)
-                                .setCorrelationId(logCorrelationId)
-                                .setHttpRequest(verification.getHttpRequest())
+                        LogEntry logEntry = new LogEntry()
+                            .setType(VERIFICATION_FAILED)
+                            .setLogLevel(Level.INFO)
+                            .setCorrelationId(logCorrelationId)
+                            .setHttpRequest(verification.getHttpRequest());
+                        if (foundTooOften(verification.getTimes(), matchedCount)) {
+                            logEntry
+                                .setMessageFormat("response found too often, it should have been found " + verification.getTimes() + ", expected:{}but was:{}")
+                                .setArguments(verification.getHttpResponse(), allPairs);
+                        } else {
+                            logEntry
                                 .setMessageFormat("response not found " + verification.getTimes() + ", expected:{}but was:{}")
-                                .setArguments(verification.getHttpResponse(), allPairs)
-                        );
+                                .setArguments(verification.getHttpResponse(), allPairs);
+                        }
+                        mockServerLogger.logEvent(logEntry);
                     }
                     resultConsumer.accept(failureMessage);
                 } else {

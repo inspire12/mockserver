@@ -12,6 +12,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.core.Is.is;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
@@ -51,6 +52,8 @@ public class DriftAnalyzerTest {
         assertThat(records, hasSize(1));
         assertThat(records.get(0).getDriftType(), is(DriftType.SCHEMA_FIELD_ADDED));
         assertThat(records.get(0).getField(), is("$.email"));
+        assertThat(records.get(0).getExpectedValue(), is(nullValue()));
+        assertThat(records.get(0).getActualValue(), is("string"));
     }
 
     @Test
@@ -69,6 +72,8 @@ public class DriftAnalyzerTest {
         assertThat(records, hasSize(1));
         assertThat(records.get(0).getDriftType(), is(DriftType.SCHEMA_FIELD_REMOVED));
         assertThat(records.get(0).getField(), is("$.role"));
+        assertThat(records.get(0).getExpectedValue(), is("string"));
+        assertThat(records.get(0).getActualValue(), is(nullValue()));
     }
 
     @Test
@@ -87,6 +92,8 @@ public class DriftAnalyzerTest {
         assertThat(records, hasSize(1));
         assertThat(records.get(0).getDriftType(), is(DriftType.SCHEMA_TYPE_CHANGED));
         assertThat(records.get(0).getField(), is("$.count"));
+        assertThat(records.get(0).getExpectedValue(), is("integer"));
+        assertThat(records.get(0).getActualValue(), is("string"));
     }
 
     @Test

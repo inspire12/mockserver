@@ -107,6 +107,9 @@ export default function DriftPanel({ connectionParams }: DriftPanelProps) {
   const [busy, setBusy] = useState(false);
   const [filterText, setFilterText] = useState('');
   const [confirmOpen, setConfirmOpen] = useState(false);
+  // Snapshot of the count when the dialog opened: the live count refreshes to 0 on
+  // confirm, which would otherwise rewrite the message while the dialog fades out.
+  const [confirmCount, setConfirmCount] = useState(0);
 
   // Auto-refresh the read-only drift feed. The lib throws on a non-OK response,
   // so a 500 surfaces as a real error and a 404 routes to the "not available"
@@ -172,7 +175,7 @@ export default function DriftPanel({ connectionParams }: DriftPanelProps) {
               color="error"
               startIcon={<DeleteSweepIcon fontSize="small" />}
               disabled={busy || data.count === 0}
-              onClick={() => setConfirmOpen(true)}
+              onClick={() => { setConfirmCount(data.count); setConfirmOpen(true); }}
             >
               Clear
             </Button>
@@ -215,7 +218,11 @@ export default function DriftPanel({ connectionParams }: DriftPanelProps) {
       )}
 
       <Paper variant="outlined" sx={{ p: 1.25 }}>
-        {filteredDrifts.length === 0 ? (
+        {filteredDrifts.length === 0 && data.drifts.length > 0 ? (
+          <Typography variant="body2" color="text.secondary" sx={{ p: 2, textAlign: 'center' }}>
+            No drift records match the filter &ldquo;{filterText.trim()}&rdquo;.
+          </Typography>
+        ) : filteredDrifts.length === 0 ? (
           <Typography variant="body2" color="text.secondary" sx={{ p: 2, textAlign: 'center' }}>
             No drift detected. MockServer compares proxied responses against stubs in proxy mode.
           </Typography>
@@ -303,7 +310,7 @@ export default function DriftPanel({ connectionParams }: DriftPanelProps) {
       <ConfirmDialog
         open={confirmOpen}
         title="Clear all drift records?"
-        message={`This removes all ${data.count} detected drift record${data.count === 1 ? '' : 's'}. This cannot be undone.`}
+        message={`This removes all ${confirmCount} detected drift record${confirmCount === 1 ? '' : 's'}. This cannot be undone.`}
         confirmLabel="Clear drift records"
         onConfirm={handleClear}
         onClose={() => setConfirmOpen(false)}

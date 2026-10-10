@@ -822,7 +822,7 @@ sitemap:
     <li><strong>Ordered sequence</strong> — describe two or more requests that must have been received <em>in this order</em> (other requests may occur in between). Add or remove steps as needed, then click <strong>Verify sequence</strong>.</li>
 </ul>
 
-<p>Each request matcher accepts the same fields as the rest of MockServer: a method, a path, header name/value lines, query <code>key=value</code> lines, and a body to match as a substring or JSON. Leave a field blank to match any value. This is the visual equivalent of the <a href="/mock_server/verification.html">verification API</a> — handy for confirming, during exploratory testing, that a client made the calls you expected.</p>
+<p>Each request matcher accepts the same fields as the rest of MockServer: a method, a path, header name/value lines, query <code>key=value</code> lines, and a body to match as a substring or JSON: plain text matches anywhere in the body, and a JSON object or array matches any JSON body that contains those fields. Leave a field blank to match any value. A header or query line without its <code>:</code> or <code>=</code> is flagged in red and blocks the check rather than being ignored, so a typo can never turn into a false pass. This is the visual equivalent of the <a href="/mock_server/verification.html">verification API</a> — handy for confirming, during exploratory testing, that a client made the calls you expected.</p>
 
 <a id="ui_contract_section" class="anchor" href="#ui_contract_section">&nbsp;</a>
 

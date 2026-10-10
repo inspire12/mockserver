@@ -25,11 +25,16 @@ public final class StructuralShapeDiff {
         private final List<String> addedPaths;
         private final List<String> removedPaths;
         private final List<String> typeChangedPaths;
+        private final Map<String, String> baselineTypes;
+        private final Map<String, String> liveTypes;
 
-        ShapeDiff(List<String> addedPaths, List<String> removedPaths, List<String> typeChangedPaths) {
+        ShapeDiff(List<String> addedPaths, List<String> removedPaths, List<String> typeChangedPaths,
+                  Map<String, String> baselineTypes, Map<String, String> liveTypes) {
             this.addedPaths = addedPaths;
             this.removedPaths = removedPaths;
             this.typeChangedPaths = typeChangedPaths;
+            this.baselineTypes = baselineTypes;
+            this.liveTypes = liveTypes;
         }
 
         /** Paths present in the live document but not the baseline. */
@@ -45,6 +50,16 @@ public final class StructuralShapeDiff {
         /** Paths present in both but with a different value type. */
         public List<String> getTypeChangedPaths() {
             return typeChangedPaths;
+        }
+
+        /** The value type (object, array, string, boolean, integer, number) at a baseline path, or null. */
+        public String getBaselineType(String path) {
+            return baselineTypes.get(path);
+        }
+
+        /** The value type at a live path, or null. */
+        public String getLiveType(String path) {
+            return liveTypes.get(path);
         }
 
         /** True if the two documents differ structurally. */
@@ -83,7 +98,7 @@ public final class StructuralShapeDiff {
                 typeChanged.add(entry.getKey());
             }
         }
-        return new ShapeDiff(added, removed, typeChanged);
+        return new ShapeDiff(added, removed, typeChanged, baselineShape, liveShape);
     }
 
     private static void collect(String path, JsonNode node, Map<String, String> shape) {

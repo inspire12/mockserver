@@ -657,6 +657,22 @@ export function parseKeyValueLines(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/**
+ * The non-empty lines `parseKeyValueLines` drops: no separator, or an empty key
+ * before it. Kept beside the parser so a caller that warns about or rejects
+ * these lines sees exactly what would be dropped.
+ */
+export function ignoredKeyValueLines(text: string, separator: ':' | '='): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .filter((line) => {
+      const idx = line.indexOf(separator);
+      return idx < 0 || line.slice(0, idx).trim().length === 0;
+    });
+}
+
 export function escapeJava(s: string): string {
   return s
     .replace(/\\/g, '\\\\')

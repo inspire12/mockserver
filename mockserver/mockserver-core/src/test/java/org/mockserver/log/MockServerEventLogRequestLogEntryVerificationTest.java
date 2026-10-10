@@ -23,6 +23,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.junit.Assert.fail;
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.CoreMatchers.startsWith;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.collection.IsCollectionWithSize.hasSize;
 import static org.mockserver.character.Character.NEW_LINE;
@@ -35,6 +36,8 @@ import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 import static org.mockserver.verify.Verification.verification;
 import static org.mockserver.verify.VerificationTimes.atLeast;
+import static org.mockserver.verify.VerificationTimes.atMost;
+import static org.mockserver.verify.VerificationTimes.between;
 import static org.mockserver.verify.VerificationTimes.exactly;
 
 /**
@@ -511,6 +514,45 @@ public class MockServerEventLogRequestLogEntryVerificationTest {
     }
 
     @Test
+    public void shouldSayFoundTooOftenWhenAnUpperBoundIsExceeded() {
+        // given
+        HttpRequest httpRequest = new HttpRequest().withPath("some_path");
+
+        // when
+        mockServerEventLog.add(new LogEntry().setHttpRequest(httpRequest).setType(RECEIVED_REQUEST));
+        mockServerEventLog.add(new LogEntry().setHttpRequest(httpRequest).setType(RECEIVED_REQUEST));
+        mockServerEventLog.add(new LogEntry().setHttpRequest(httpRequest).setType(RECEIVED_REQUEST));
+
+        // then
+        assertThat(verify(verification().withRequest(request().withPath("some_path")).withTimes(atMost(1))),
+            startsWith("Request found 3 times but should have been found at most once, expected:<{"));
+        assertThat(verify(verification().withRequest(request().withPath("some_path")).withTimes(between(1, 2))),
+            startsWith("Request found 3 times but should have been found between 1 and 2 times, expected:<{"));
+        assertThat(verify(verification().withRequest(request().withPath("some_path")).withTimes(exactly(2))),
+            startsWith("Request found 3 times but should have been found exactly 2 times, expected:<{"));
+        // too few is still "not found"
+        assertThat(verify(verification().withRequest(request().withPath("some_path")).withTimes(between(4, 5))),
+            startsWith("Request not found between 4 and 5 times, expected:<{"));
+    }
+
+    @Test
+    public void shouldSayFoundTooOftenWhenAResponseUpperBoundIsExceeded() {
+        // given
+        HttpRequest httpRequest = new HttpRequest().withPath("some_path");
+        HttpResponse httpResponse = new HttpResponse().withStatusCode(200);
+
+        // when
+        mockServerEventLog.add(new LogEntry().setHttpRequest(httpRequest).setHttpResponse(httpResponse).setType(FORWARDED_REQUEST));
+        mockServerEventLog.add(new LogEntry().setHttpRequest(httpRequest).setHttpResponse(httpResponse).setType(FORWARDED_REQUEST));
+
+        // then
+        assertThat(verify(verification().withResponse(response().withStatusCode(200)).withTimes(atMost(1))),
+            startsWith("Response found 2 times but should have been found at most once, expected:<{"));
+        assertThat(verify(verification().withResponse(response().withStatusCode(200)).withTimes(atLeast(3))),
+            startsWith("Response not found at least 3 times, expected:<{"));
+    }
+
+    @Test
     public void shouldFailVerificationWithExactOneTime() {
         // given
 
@@ -560,7 +602,7 @@ public class MockServerEventLogRequestLogEntryVerificationTest {
                     )
                     .withTimes(exactly(0))
             ),
-            is("Request not found exactly 0 times, expected:<{" + NEW_LINE +
+            is("Request found 1 time but should have been found exactly 0 times, expected:<{" + NEW_LINE +
                 "  \"path\" : \"some_other_path\"" + NEW_LINE +
                 "}> but was:<[ {" + NEW_LINE +
                 "  \"path\" : \"some_path\"" + NEW_LINE +
@@ -589,7 +631,7 @@ public class MockServerEventLogRequestLogEntryVerificationTest {
                     .withRequest(request())
                     .withTimes(exactly(0))
             ),
-            is("Request not found exactly 0 times, expected:<{ }> but was:<{ }>"));
+            is("Request found 1 time but should have been found exactly 0 times, expected:<{ }> but was:<{ }>"));
     }
 
     @Test

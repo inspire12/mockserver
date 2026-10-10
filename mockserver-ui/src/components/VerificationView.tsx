@@ -7,6 +7,7 @@ import Select from '@mui/material/Select';
 import MenuItem from '@mui/material/MenuItem';
 import Button from '@mui/material/Button';
 import IconButton from '@mui/material/IconButton';
+import ButtonBase from '@mui/material/ButtonBase';
 import Alert from '@mui/material/Alert';
 import Collapse from '@mui/material/Collapse';
 import ToggleButton from '@mui/material/ToggleButton';
@@ -17,9 +18,11 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import type { ConnectionParams } from '../hooks/useConnectionParams';
-import { parseKeyValueLines } from '../lib/standardCodegen';
+import { parseKeyValueLines, ignoredKeyValueLines } from '../lib/standardCodegen';
 import { buildBaseUrl } from '../lib/mcpClient';
 import {
+  bodyMatcher,
+  timesSpecProblem,
   verifyRequest,
   verifySequence,
   type VerificationTimesMode,
@@ -71,7 +74,8 @@ function buildHttpRequest(form: RequestForm): Record<string, unknown> {
   if (headers) req['headers'] = headers;
   const query = parseKeyValueLines(form.queryString, '=');
   if (query) req['queryStringParameters'] = query;
-  if (form.body.trim()) req['body'] = form.body;
+  const body = bodyMatcher(form.body);
+  if (body) req['body'] = body;
   return req;
 }
 
@@ -87,9 +91,36 @@ function buildHttpResponse(form: ResponseForm): Record<string, unknown> {
   }
   const headers = parseKeyValueLines(form.headers, ':');
   if (headers) resp['headers'] = headers;
-  if (form.body.trim()) resp['body'] = form.body;
+  const body = bodyMatcher(form.body);
+  if (body) resp['body'] = body;
   return resp;
 }
+
+/**
+ * Inline error for a "Name: value" / "key=value" lines field, or undefined. A line the
+ * parser cannot split would otherwise be dropped from the matcher, loosening the check
+ * into a false pass, so it blocks verifying instead.
+ */
+function linesError(text: string, separator: ':' | '='): string | undefined {
+  const bad = ignoredKeyValueLines(text, separator);
+  if (bad.length === 0) return undefined;
+  const format = separator === ':' ? 'Name: value' : 'key=value';
+  const more = bad.length > 1 ? ` (and ${bad.length - 1} more)` : '';
+  return `"${bad[0]}" is not ${format}${more}`;
+}
+
+interface RequestErrors { headers?: string; queryString?: string }
+interface ResponseErrors { headers?: string }
+
+function requestErrors(form: RequestForm): RequestErrors {
+  return { headers: linesError(form.headers, ':'), queryString: linesError(form.queryString, '=') };
+}
+
+function responseErrors(form: ResponseForm): ResponseErrors {
+  return { headers: linesError(form.headers, ':') };
+}
+
+const hasError = (errors: RequestErrors | ResponseErrors): boolean => Object.values(errors).some(Boolean);
 
 /**
  * Filter-DSL "quick scope" for a request matcher. Uses the same operator syntax as
@@ -125,6 +156,7 @@ function ScopeField({ id, form, onChange, busy }: { id: string; form: RequestFor
       <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start', flexWrap: 'wrap' }}>
         <OperatorSearchField
           id={id}
+          ariaLabel="Quick scope"
           value={term}
           onChange={setTerm}
           fields={REQUEST_SCOPE_FIELDS}
@@ -145,6 +177,7 @@ function ScopeField({ id, form, onChange, busy }: { id: string; form: RequestFor
 }
 
 function RequestFields({ scopeId, form, onChange, busy }: { scopeId: string; form: RequestForm; onChange: (f: RequestForm) => void; busy?: boolean }) {
+  const errors = requestErrors(form);
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
       <ScopeField id={scopeId} form={form} onChange={onChange} busy={busy} />
@@ -154,6 +187,7 @@ function RequestFields({ scopeId, form, onChange, busy }: { scopeId: string; for
           displayEmpty
           value={form.method}
           onChange={(e) => onChange({ ...form, method: e.target.value })}
+          inputProps={{ 'aria-label': 'Method' }}
           sx={{ width: { xs: '100%', sm: 195 } }}
           renderValue={(v) => (v ? String(v) : 'Any method')}
         >
@@ -164,8 +198,10 @@ function RequestFields({ scopeId, form, onChange, busy }: { scopeId: string; for
       </Box>
       <Box sx={{ display: 'flex', gap: 1 }}>
         <TextField size="small" label="Headers (Name: value per line)" multiline minRows={1} maxRows={4}
+          error={!!errors.headers} helperText={errors.headers}
           value={form.headers} onChange={(e) => onChange({ ...form, headers: e.target.value })} sx={{ flex: 1 }} />
         <TextField size="small" label="Query (key=value per line)" multiline minRows={1} maxRows={4}
+          error={!!errors.queryString} helperText={errors.queryString}
           value={form.queryString} onChange={(e) => onChange({ ...form, queryString: e.target.value })} sx={{ flex: 1 }} />
       </Box>
       <TextField size="small" label="Body (substring/JSON match)" multiline minRows={1} maxRows={6}
@@ -176,11 +212,13 @@ function RequestFields({ scopeId, form, onChange, busy }: { scopeId: string; for
 }
 
 function ResponseFields({ form, onChange }: { form: ResponseForm; onChange: (f: ResponseForm) => void }) {
+  const errors = responseErrors(form);
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
       <TextField size="small" label="Status code" placeholder="200" value={form.statusCode}
         onChange={(e) => onChange({ ...form, statusCode: e.target.value })} sx={{ width: { xs: '100%', sm: 150 } }} />
       <TextField size="small" label="Response headers (Name: value per line)" multiline minRows={1} maxRows={4}
+        error={!!errors.headers} helperText={errors.headers}
         value={form.headers} onChange={(e) => onChange({ ...form, headers: e.target.value })} sx={{ flex: 1 }} />
       <TextField size="small" label="Response body (substring/JSON match)" multiline minRows={1} maxRows={6}
         value={form.body} onChange={(e) => onChange({ ...form, body: e.target.value })}
@@ -197,31 +235,33 @@ function MatcherSection({
   title,
   caption,
   expanded,
+  invalid,
   onToggle,
   children,
 }: {
   title: string;
   caption?: string;
   expanded: boolean;
+  /** A section holding an invalid field cannot be collapsed, so its error is never hidden. */
+  invalid?: boolean;
   onToggle: () => void;
   children: ReactNode;
 }) {
   return (
     <Box sx={{ mt: 1.5 }}>
-      <Box
+      <ButtonBase
         onClick={onToggle}
-        sx={{ display: 'flex', alignItems: 'center', cursor: 'pointer', userSelect: 'none' }}
-        role="button"
+        disabled={!!invalid}
+        focusRipple
+        sx={{ display: 'flex', alignItems: 'center', gap: 0.5, p: 0.5, borderRadius: 1, userSelect: 'none' }}
         aria-expanded={expanded}
         aria-label={expanded ? `Collapse ${title}` : `Expand ${title}`}
       >
-        <IconButton size="small" aria-label={expanded ? `Collapse ${title}` : `Expand ${title}`}>
-          {expanded ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
-        </IconButton>
+        {expanded ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
         <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 500 }}>
           {title}
         </Typography>
-      </Box>
+      </ButtonBase>
       <Collapse in={expanded}>
         <Box sx={{ mt: 1, pl: 1 }}>
           {caption && (
@@ -233,6 +273,15 @@ function MatcherSection({
         </Box>
       </Collapse>
     </Box>
+  );
+}
+
+/** Says why the Verify button is disabled; the offending fields carry the detail. */
+function InvalidFormHint() {
+  return (
+    <Typography variant="caption" color="error" sx={{ ml: 'auto' }}>
+      Fix the fields marked in red to verify.
+    </Typography>
   );
 }
 
@@ -326,6 +375,10 @@ export default function VerificationView({ connectionParams }: { connectionParam
     }
   }, []);
 
+  const timesProblem = timesSpecProblem({ mode: timesMode, count, atMost });
+  const singleInvalid = hasError(requestErrors(single)) || hasError(responseErrors(singleResponse)) || timesProblem != null;
+  const sequenceInvalid = sequence.some((r) => hasError(requestErrors(r))) || seqResponses.some((r) => hasError(responseErrors(r)));
+
   const verifySingle = () => run(() => {
     const httpResponse = buildHttpResponse(singleResponse);
     return verifyRequest(
@@ -386,6 +439,7 @@ export default function VerificationView({ connectionParams }: { connectionParam
           <MatcherSection
             title="Request matcher (optional)"
             expanded={singleRequestExpanded}
+            invalid={hasError(requestErrors(single))}
             onToggle={() => setSingleRequestExpanded(!singleRequestExpanded)}
           >
             <RequestFields scopeId="verify-scope-single" form={single} onChange={setSingle} busy={busy} />
@@ -394,29 +448,34 @@ export default function VerificationView({ connectionParams }: { connectionParam
             title="Response matcher (optional)"
             caption="Match against responses recorded from proxied/forwarded traffic."
             expanded={singleResponseExpanded}
+            invalid={hasError(responseErrors(singleResponse))}
             onToggle={() => setSingleResponseExpanded(!singleResponseExpanded)}
           >
             <ResponseFields form={singleResponse} onChange={setSingleResponse} />
           </MatcherSection>
           <Box sx={{ display: 'flex', gap: 1, mt: 1.5, alignItems: 'center', flexWrap: 'wrap' }}>
             <Typography variant="body2" color="text.secondary">Received</Typography>
-            <Select size="small" value={timesMode} onChange={(e) => setTimesMode(e.target.value as VerificationTimesMode)} sx={{ width: { xs: '100%', sm: 150 } }}>
+            <Select size="small" value={timesMode} onChange={(e) => setTimesMode(e.target.value as VerificationTimesMode)}
+              inputProps={{ 'aria-label': 'Times mode' }} sx={{ width: { xs: '100%', sm: 150 } }}>
               <MenuItem value="atLeast">at least</MenuItem>
               <MenuItem value="atMost">at most</MenuItem>
               <MenuItem value="exactly">exactly</MenuItem>
               <MenuItem value="between">between</MenuItem>
             </Select>
             <TextField size="small" type="number" label={timesMode === 'between' ? 'min' : 'times'} value={count}
-              onChange={(e) => setCount(Math.max(0, Number(e.target.value) || 0))} sx={{ width: 90 }} />
+              error={timesProblem?.field === 'count'} helperText={timesProblem?.field === 'count' ? timesProblem.message : undefined}
+              onChange={(e) => setCount(Math.max(0, Number(e.target.value) || 0))} sx={{ width: timesProblem?.field === 'count' ? 150 : 90 }} />
             {timesMode === 'between' && (
               <>
                 <Typography variant="body2" color="text.secondary">and</Typography>
                 <TextField size="small" type="number" label="max" value={atMost}
-                  onChange={(e) => setAtMost(Math.max(0, Number(e.target.value) || 0))} sx={{ width: 90 }} />
+                  error={timesProblem?.field === 'atMost'} helperText={timesProblem?.field === 'atMost' ? timesProblem.message : undefined}
+                  onChange={(e) => setAtMost(Math.max(0, Number(e.target.value) || 0))} sx={{ width: timesProblem?.field === 'atMost' ? 150 : 90 }} />
               </>
             )}
             <Typography variant="body2" color="text.secondary">time(s)</Typography>
-            <Button variant="contained" size="small" disabled={busy} onClick={verifySingle} sx={{ ml: 'auto' }}>
+            {singleInvalid && <InvalidFormHint />}
+            <Button variant="contained" size="small" disabled={busy || singleInvalid} onClick={verifySingle} sx={{ ml: singleInvalid ? 0 : 'auto' }}>
               Verify
             </Button>
           </Box>
@@ -433,6 +492,7 @@ export default function VerificationView({ connectionParams }: { connectionParam
                 <MatcherSection
                   title="Request matcher (optional)"
                   expanded={seqRequestExpanded[i] ?? true}
+                  invalid={hasError(requestErrors(row))}
                   onToggle={() => setSeqRequestExpanded(seqRequestExpanded.map((v, j) => j === i ? !v : v))}
                 >
                   <RequestFields scopeId={`verify-scope-step-${i}`} form={row} onChange={(f) => setSequence(sequence.map((r, j) => j === i ? f : r))} busy={busy} />
@@ -441,6 +501,7 @@ export default function VerificationView({ connectionParams }: { connectionParam
                   title="Response matcher (optional)"
                   caption="Match against responses recorded from proxied/forwarded traffic."
                   expanded={seqResponseExpanded[i] ?? false}
+                  invalid={hasError(responseErrors(seqResponses[i] ?? emptyResponse()))}
                   onToggle={() => setSeqResponseExpanded(seqResponseExpanded.map((v, j) => j === i ? !v : v))}
                 >
                   <ResponseFields form={seqResponses[i] ?? emptyResponse()} onChange={(f) => setSeqResponses(seqResponses.map((r, j) => j === i ? f : r))} />
@@ -456,7 +517,8 @@ export default function VerificationView({ connectionParams }: { connectionParam
             <Button size="small" startIcon={<AddIcon />} onClick={addSequenceStep}>
               Add step
             </Button>
-            <Button variant="contained" size="small" disabled={busy} onClick={verifySeq} sx={{ ml: 'auto' }}>
+            {sequenceInvalid && <InvalidFormHint />}
+            <Button variant="contained" size="small" disabled={busy || sequenceInvalid} onClick={verifySeq} sx={{ ml: sequenceInvalid ? 0 : 'auto' }}>
               Verify sequence
             </Button>
           </Box>

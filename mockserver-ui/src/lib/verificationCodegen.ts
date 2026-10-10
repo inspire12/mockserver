@@ -19,6 +19,7 @@ import {
   rustClientVersionRequirement,
 } from './standardCodegen';
 import {
+  betweenUpperBound,
   buildVerifyBody,
   buildVerifySequenceBody,
   type VerificationTimesSpec,
@@ -51,6 +52,32 @@ export interface VerificationCodegenInput {
 const hasKeys = (o: Record<string, unknown> | undefined): boolean =>
   !!o && Object.keys(o).length > 0;
 
+type BodyMatcherWire = { type?: string; string?: string; subString?: boolean; json?: string };
+
+/** A request/response matcher's body as built by `bodyMatcher`, or undefined. */
+function typedBody(m: Record<string, unknown>): BodyMatcherWire | undefined {
+  const b = m['body'];
+  return b && typeof b === 'object' ? (b as BodyMatcherWire) : undefined;
+}
+
+/** Java expression for a body matcher: json("…") or subString("…"). */
+function bodyToJava(body: BodyMatcherWire): string {
+  return body.type === 'JSON'
+    ? `json("${escapeJava(body.json ?? '')}")`
+    : `subString("${escapeJava(body.string ?? '')}")`;
+}
+
+/** Static imports the Java snippet needs for the typed bodies it renders. */
+function javaBodyImports(matchers: (Record<string, unknown> | undefined)[], imports: Set<string>): void {
+  for (const m of matchers) {
+    const body = m ? typedBody(m) : undefined;
+    if (!body) continue;
+    imports.add(body.type === 'JSON'
+      ? 'import static org.mockserver.model.JsonBody.json;'
+      : 'import static org.mockserver.model.StringBody.subString;');
+  }
+}
+
 /** Render request matcher fields as Java builder calls (request().withMethod(...)...). */
 function requestToJava(req: Record<string, unknown>): string {
   const lines: string[] = ['request()'];
@@ -71,9 +98,8 @@ function requestToJava(req: Record<string, unknown>): string {
       lines.push(`    .withQueryStringParameter("${escapeJava(k)}", ${values})`);
     }
   }
-  if (typeof req['body'] === 'string' && req['body']) {
-    lines.push(`    .withBody("${escapeJava(req['body'])}")`);
-  }
+  const body = typedBody(req);
+  if (body) lines.push(`    .withBody(${bodyToJava(body)})`);
   return lines.join('\n');
 }
 
@@ -89,9 +115,8 @@ function responseToJava(resp: Record<string, unknown>): string {
       }
     }
   }
-  if (typeof resp['body'] === 'string' && resp['body']) {
-    lines.push(`    .withBody("${escapeJava(resp['body'])}")`);
-  }
+  const body = typedBody(resp);
+  if (body) lines.push(`    .withBody(${bodyToJava(body)})`);
   return lines.join('\n');
 }
 
@@ -106,7 +131,7 @@ function timesToJava(times: VerificationTimesSpec): string {
     case 'atMost': return `VerificationTimes.atMost(${count})`;
     case 'exactly': return `VerificationTimes.exactly(${count})`;
     case 'between': {
-      const upper = Math.max(count, Math.floor(times.atMost ?? count));
+      const upper = betweenUpperBound(times);
       return `VerificationTimes.between(${count}, ${upper})`;
     }
   }
@@ -176,6 +201,7 @@ export function verifyToJava(input: VerificationCodegenInput): string {
   if (input.mode === 'sequence') {
     const hasAnyResp = input.httpResponses.some((r) => r && Object.keys(r).length > 0);
     imports.add('import static org.mockserver.model.HttpRequest.request;');
+    javaBodyImports([...input.httpRequests, ...(hasAnyResp ? input.httpResponses : [])], imports);
 
     if (hasAnyResp) {
       // Response-paired sequence: verify(verificationSequence().withRequests(...).withResponses(...))
@@ -225,6 +251,7 @@ export function verifyToJava(input: VerificationCodegenInput): string {
   if (hasReq) imports.add('import static org.mockserver.model.HttpRequest.request;');
   if (hasResp) imports.add('import static org.mockserver.model.HttpResponse.response;');
   imports.add('import org.mockserver.verify.VerificationTimes;');
+  javaBodyImports([hasReq ? input.httpRequest : undefined, hasResp ? input.httpResponse : undefined], imports);
 
   const lines: string[] = [];
   for (const imp of Array.from(imports).sort()) lines.push(imp);
@@ -268,7 +295,7 @@ function nodeTimesArgs(times: VerificationTimesSpec): string {
     case 'atMost': return `undefined, ${count}`;
     case 'exactly': return `${count}, ${count}`;
     case 'between': {
-      const upper = Math.max(count, Math.floor(times.atMost ?? count));
+      const upper = betweenUpperBound(times);
       return `${count}, ${upper}`;
     }
   }
@@ -343,7 +370,7 @@ function pythonTimesExpr(times: VerificationTimesSpec): string {
     case 'atMost': return `VerificationTimes.at_most(${count})`;
     case 'exactly': return `VerificationTimes.exactly(${count})`;
     case 'between': {
-      const upper = Math.max(count, Math.floor(times.atMost ?? count));
+      const upper = betweenUpperBound(times);
       return `VerificationTimes.between(${count}, ${upper})`;
     }
   }
@@ -414,7 +441,7 @@ function goTimesExpr(times: VerificationTimesSpec): string {
     case 'atMost': return `mockserver.AtMost(${count})`;
     case 'exactly': return `mockserver.ExactlyTimes(${count})`;
     case 'between': {
-      const upper = Math.max(count, Math.floor(times.atMost ?? count));
+      const upper = betweenUpperBound(times);
       return `mockserver.Between(${count}, ${upper})`;
     }
   }
@@ -437,7 +464,10 @@ function requestToGo(req: Record<string, unknown>): string {
       s += `.QueryStringParameter("${escapeJava(k)}"${vs.map((v) => `, "${escapeJava(v)}"`).join('')})`;
     }
   }
-  if (typeof req['body'] === 'string' && req['body']) s += `.Body("${escapeJava(req['body'])}")`;
+  const body = typedBody(req);
+  if (body?.type === 'JSON') s += `.JSONBody("${escapeJava(body.json ?? '')}")`;
+  // The RequestBuilder has no plain typed-body setter; a one-entry ALL_OF carries the substring matcher.
+  else if (body) s += `.AllOfBody(mockserver.SubStringBody("${escapeJava(body.string ?? '')}"))`;
   return s;
 }
 
@@ -451,7 +481,9 @@ function responseToGo(resp: Record<string, unknown>): string {
       s += `.Header("${escapeJava(k)}"${vs.map((v) => `, "${escapeJava(v)}"`).join('')})`;
     }
   }
-  if (typeof resp['body'] === 'string' && resp['body']) s += `.Body("${escapeJava(resp['body'])}")`;
+  // The Go ResponseBuilder can only set a plain (exact-match) body, which the caller flags.
+  const body = typedBody(resp);
+  if (body) s += `.Body("${escapeJava(body.type === 'JSON' ? body.json ?? '' : body.string ?? '')}")`;
   return s;
 }
 
@@ -471,6 +503,11 @@ export function verifyToGo(input: VerificationCodegenInput): string {
     `\tclient := mockserver.New("${host}", ${port})`,
     '',
   ];
+
+  const responseMatchers = input.mode === 'sequence' ? input.httpResponses : [hasResp ? input.httpResponse : undefined];
+  if (responseMatchers.some((r) => r && typedBody(r))) {
+    lines.push('\t// The Go ResponseBuilder sets an exact body: use the JSON or curl tab for a substring/JSON body match.');
+  }
 
   if (input.mode === 'sequence') {
     const hasAnyResp = input.httpResponses.some((r) => r && Object.keys(r).length > 0);
@@ -530,7 +567,7 @@ function csharpTimesExpr(times: VerificationTimesSpec): string {
     case 'exactly': return `VerificationTimes.ExactlyTimes(${count})`;
     case 'between': {
       // C# client has no built-in Between factory; construct manually
-      const upper = Math.max(count, Math.floor(times.atMost ?? count));
+      const upper = betweenUpperBound(times);
       return `new VerificationTimes { AtLeast = ${count}, AtMost = ${upper} }`;
     }
   }
@@ -612,7 +649,7 @@ function rubyTimesExpr(times: VerificationTimesSpec): string {
     case 'atMost': return `VerificationTimes.at_most(${count})`;
     case 'exactly': return `VerificationTimes.exactly(${count})`;
     case 'between': {
-      const upper = Math.max(count, Math.floor(times.atMost ?? count));
+      const upper = betweenUpperBound(times);
       return `VerificationTimes.between(${count}, ${upper})`;
     }
   }
@@ -714,7 +751,7 @@ function rustTimesExpr(times: VerificationTimesSpec): string {
     case 'atMost': return `VerificationTimes::at_most(${count})`;
     case 'exactly': return `VerificationTimes::exactly(${count})`;
     case 'between': {
-      const upper = Math.max(count, Math.floor(times.atMost ?? count));
+      const upper = betweenUpperBound(times);
       return `VerificationTimes::between(${count}, ${upper})`;
     }
   }

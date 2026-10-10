@@ -1040,7 +1040,7 @@ public abstract class AbstractControlPlaneIntegrationTest extends AbstractMockin
                 .withPath(calculatePath("some_path")), VerificationTimes.exactly(0));
             fail("expected exception to be thrown");
         } catch (AssertionError ae) {
-            assertThat(ae.getMessage(), startsWith("Request not found exactly 0 times, expected:<{" + NEW_LINE +
+            assertThat(ae.getMessage(), startsWith("Request found 1 time but should have been found exactly 0 times, expected:<{" + NEW_LINE +
                 "  \"path\" : \"" + calculatePath("some_path") + "\"" + NEW_LINE +
                 "}> but was:<{"));
         }
@@ -1095,7 +1095,7 @@ public abstract class AbstractControlPlaneIntegrationTest extends AbstractMockin
             mockServerClient.verifyZeroInteractions();
             fail("expected exception to be thrown");
         } catch (AssertionError ae) {
-            assertThat(ae.getMessage(), startsWith("Request not found exactly 0 times, expected:<{ }> but was:<{"));
+            assertThat(ae.getMessage(), startsWith("Request found 1 time but should have been found exactly 0 times, expected:<{ }> but was:<{"));
         }
     }
 

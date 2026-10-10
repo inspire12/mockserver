@@ -104,6 +104,7 @@ import {
   type StandardBodyAllOfEntry,
   type AllOfSubBodyType,
   type StandardJwtMatcher,
+  ignoredKeyValueLines,
 } from '../lib/standardCodegen';
 import McpToolsPanel from './McpToolsPanel';
 import ScenarioPanel from './ScenarioPanel';
@@ -504,30 +505,11 @@ function bodyEditorConfig(type: BodyMatcherType): { language: string; schema?: o
 }
 
 /**
- * Count the non-empty lines that `parseKeyValueLines` (in standardCodegen) will
- * silently drop at codegen time: a line with no separator, or one whose key is
- * empty before the separator. Kept deliberately in lockstep with that parser so
- * the surfaced warning reflects exactly what gets dropped — the registered
- * payload is unchanged; this only makes the drop visible.
- */
-function countIgnoredKeyValueLines(text: string, separator: ':' | '='): number {
-  return text
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .filter((line) => {
-      const idx = line.indexOf(separator);
-      if (idx < 0) return true;
-      return line.slice(0, idx).trim().length === 0;
-    }).length;
-}
-
-/**
  * Non-blocking helper text for a matcher line-list field: undefined when every
  * line parses, otherwise "N line(s) ignored — expected <format>".
  */
 function ignoredLinesWarning(text: string, separator: ':' | '=', formatHint: string): string | undefined {
-  const n = countIgnoredKeyValueLines(text, separator);
+  const n = ignoredKeyValueLines(text, separator).length;
   if (n === 0) return undefined;
   return `${n} line${n === 1 ? '' : 's'} ignored — expected ${formatHint}`;
 }

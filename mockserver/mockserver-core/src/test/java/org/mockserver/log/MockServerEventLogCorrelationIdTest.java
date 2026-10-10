@@ -25,6 +25,7 @@ import static org.junit.Assert.fail;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.mockserver.configuration.Configuration.configuration;
@@ -33,6 +34,8 @@ import static org.mockserver.mock.listeners.MockServerMatcherNotifier.Cause.API;
 import static org.mockserver.model.HttpRequest.request;
 import static org.mockserver.model.HttpResponse.response;
 import static org.mockserver.verify.Verification.verification;
+import static org.mockserver.verify.VerificationTimes.atLeast;
+import static org.mockserver.verify.VerificationTimes.atMost;
 import static org.mockserver.verify.VerificationTimes.exactly;
 
 public class MockServerEventLogCorrelationIdTest {
@@ -318,5 +321,24 @@ public class MockServerEventLogCorrelationIdTest {
         } catch (Exception e) {
             fail(e.getMessage());
         }
+    }
+
+    @Test
+    public void shouldLogFoundTooOftenForAnExceededUpperBoundAndNotFoundForTooFew() {
+        configuration.logLevel(Level.INFO);
+        mockServerLogger.logEvent(new LogEntry().setHttpRequest(request("twice")).setType(RECEIVED_REQUEST));
+        mockServerLogger.logEvent(new LogEntry().setHttpRequest(request("twice")).setType(RECEIVED_REQUEST));
+
+        assertThat(verify(verification().withRequest(request("twice")).withTimes(atMost(1))), is(not("")));
+        assertThat(verify(verification().withRequest(request("twice")).withTimes(atLeast(3))), is(not("")));
+
+        List<String> failedFormats = retrieveMessageLogEntries(null).stream()
+            .filter(entry -> entry.getType() == VERIFICATION_FAILED)
+            .map(LogEntry::getMessageFormat)
+            .collect(Collectors.toList());
+        assertThat(failedFormats, contains(
+            "request found too often, it should have been found at most once, expected:{}but was:{}",
+            "request not found at least 3 times, expected:{}but was:{}"
+        ));
     }
 }

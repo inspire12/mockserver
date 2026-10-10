@@ -24,7 +24,7 @@ function renderView() {
   );
 }
 
-const scopeInput = () => screen.getAllByLabelText('Search')[0]!;
+const scopeInput = () => screen.getAllByLabelText('Quick scope')[0]!;
 const applyButton = () => screen.getAllByRole('button', { name: 'Apply scope' })[0]!;
 
 afterEach(cleanup);
@@ -134,9 +134,9 @@ describe('VerificationView quick scope', () => {
     renderView();
 
     await user.click(screen.getByRole('button', { name: 'Ordered sequence' }));
-    expect(screen.getAllByLabelText('Search')).toHaveLength(2);
+    expect(screen.getAllByLabelText('Quick scope')).toHaveLength(2);
 
-    await user.type(screen.getAllByLabelText('Search')[1]!, 'path:/step/*');
+    await user.type(screen.getAllByLabelText('Quick scope')[1]!, 'path:/step/*');
     await user.click(screen.getAllByRole('button', { name: 'Apply scope' })[1]!);
 
     const paths = screen.getAllByLabelText('Path');

@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { timesToWire, verifyRequest, verifySequence, buildVerifyBody, buildVerifySequenceBody } from '../lib/verification';
+import {
+  timesToWire, verifyRequest, verifySequence, buildVerifyBody, buildVerifySequenceBody,
+  bodyMatcher, timesSpecProblem, MAX_VERIFICATION_COUNT,
+} from '../lib/verification';
+import { humanizeError } from '../lib/errorMessage';
 
 const params = { host: '127.0.0.1', port: '1080', secure: false };
 
@@ -13,8 +17,52 @@ describe('timesToWire', () => {
     expect(timesToWire({ mode: 'between', count: 2, atMost: 5 })).toEqual({ atLeast: 2, atMost: 5 });
   });
 
-  it('clamps a between upper bound below the lower bound up to the lower bound', () => {
-    expect(timesToWire({ mode: 'between', count: 4, atMost: 1 })).toEqual({ atLeast: 4, atMost: 4 });
+  it('sends a between upper bound as entered rather than silently raising it to the lower bound', () => {
+    expect(timesToWire({ mode: 'between', count: 4, atMost: 1 })).toEqual({ atLeast: 4, atMost: 1 });
+  });
+});
+
+describe('timesSpecProblem', () => {
+  it('accepts every in-range spec', () => {
+    expect(timesSpecProblem({ mode: 'atLeast', count: 0 })).toBeNull();
+    expect(timesSpecProblem({ mode: 'exactly', count: MAX_VERIFICATION_COUNT })).toBeNull();
+    expect(timesSpecProblem({ mode: 'between', count: 2, atMost: 2 })).toBeNull();
+    expect(timesSpecProblem({ mode: 'between', count: 1, atMost: 3 })).toBeNull();
+  });
+
+  it('flags a between max below its min on the max field', () => {
+    expect(timesSpecProblem({ mode: 'between', count: 3, atMost: 1 })).toEqual({ field: 'atMost', message: 'Must not be less than min' });
+  });
+
+  it('flags a count the server cannot parse (above a Java int)', () => {
+    expect(timesSpecProblem({ mode: 'atLeast', count: 3000000000 })?.field).toBe('count');
+    expect(timesSpecProblem({ mode: 'atLeast', count: MAX_VERIFICATION_COUNT + 1 })?.field).toBe('count');
+    expect(timesSpecProblem({ mode: 'between', count: 1, atMost: 3000000000 })?.field).toBe('atMost');
+  });
+
+  it('ignores the max field outside between mode', () => {
+    expect(timesSpecProblem({ mode: 'atLeast', count: 3, atMost: 1 })).toBeNull();
+  });
+});
+
+describe('bodyMatcher', () => {
+  it('is undefined for a blank body', () => {
+    expect(bodyMatcher('')).toBeUndefined();
+    expect(bodyMatcher('  \n ')).toBeUndefined();
+  });
+
+  it('sends plain text as a SUBSTRING matcher, not an exact string', () => {
+    expect(bodyMatcher('widget')).toEqual({ type: 'STRING', string: 'widget', subString: true });
+  });
+
+  it('sends a JSON object or array as a (partial) JSON matcher', () => {
+    expect(bodyMatcher(' {"order":"widget"} ')).toEqual({ type: 'JSON', json: '{"order":"widget"}' });
+    expect(bodyMatcher('[1,2]')).toEqual({ type: 'JSON', json: '[1,2]' });
+  });
+
+  it('falls back to a substring for text that only looks like JSON, or a JSON scalar', () => {
+    expect(bodyMatcher('{"order":')).toEqual({ type: 'STRING', string: '{"order":', subString: true });
+    expect(bodyMatcher('42')).toEqual({ type: 'STRING', string: '42', subString: true });
   });
 });
 
@@ -108,6 +156,19 @@ describe('verifyRequest / verifySequence', () => {
     const res = await verifyRequest(params, { path: '/o' }, { mode: 'exactly', count: 2 });
     expect(res.verified).toBe(false);
     expect(res.failureMessage).toContain('Request not found');
+  });
+
+  it('throws a 400 (bad input) as an error instead of reporting a failed verification', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ status: 400, statusText: 'Bad Request', text: async () => 'incorrect verification json format' }));
+    const err = await verifyRequest(params, { path: '/o' }, { mode: 'atLeast', count: 1 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(humanizeError(err).message).toBe('The request was rejected as invalid.');
+    expect(humanizeError(err).details).toBe('incorrect verification json format');
+  });
+
+  it('throws a 5xx as an error instead of reporting a failed verification', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ status: 502, statusText: 'Bad Gateway', text: async () => '' }));
+    await expect(verifySequence(params, [{ path: '/a' }])).rejects.toThrow('MockServer returned 502');
   });
 
   it('omits httpRequest from /verify body when request matcher is empty (response-only verify)', async () => {

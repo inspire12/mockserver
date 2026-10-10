@@ -40,9 +40,9 @@ flowchart LR
 | DriftType | Description | Confidence |
 |-----------|-------------|------------|
 | `STATUS` | HTTP status code differs | 1.0 |
-| `SCHEMA_FIELD_ADDED` | JSON field present in real but not stub | 0.9 |
-| `SCHEMA_FIELD_REMOVED` | JSON field present in stub but not real | 0.95 |
-| `SCHEMA_TYPE_CHANGED` | JSON field type changed (e.g. integer to string) | 0.95 |
+| `SCHEMA_FIELD_ADDED` | JSON field present in real but not stub (`actualValue` = its JSON type) | 0.9 |
+| `SCHEMA_FIELD_REMOVED` | JSON field present in stub but not real (`expectedValue` = its JSON type) | 0.95 |
+| `SCHEMA_TYPE_CHANGED` | JSON field type changed (e.g. `expectedValue` `integer`, `actualValue` `string`) | 0.95 |
 | `HEADER_ADDED` | HTTP header present in real but not stub | 0.9 |
 | `HEADER_REMOVED` | HTTP header present in stub but not real | 0.9 |
 | `HEADER_CHANGED` | HTTP header value changed | 0.85 |
@@ -180,7 +180,7 @@ Returns recent drift records.
       "expectationId": "abc-123",
       "driftType": "SCHEMA_FIELD_ADDED",
       "field": "$.newField",
-      "actualValue": null,
+      "actualValue": "string",
       "confidence": 0.9,
       "epochTimeMs": 1717145600000
     }

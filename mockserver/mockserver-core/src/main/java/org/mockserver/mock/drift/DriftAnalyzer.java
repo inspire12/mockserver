@@ -174,6 +174,7 @@ public class DriftAnalyzer {
                     .setExpectationId(expectationId)
                     .setDriftType(DriftType.SCHEMA_FIELD_ADDED)
                     .setField(path)
+                    .setActualValue(shapeDiff.getLiveType(path))
                     .setConfidence(0.9)
                     .setEpochTimeMs(now));
             }
@@ -182,6 +183,7 @@ public class DriftAnalyzer {
                     .setExpectationId(expectationId)
                     .setDriftType(DriftType.SCHEMA_FIELD_REMOVED)
                     .setField(path)
+                    .setExpectedValue(shapeDiff.getBaselineType(path))
                     .setConfidence(0.95)
                     .setEpochTimeMs(now));
             }
@@ -190,6 +192,8 @@ public class DriftAnalyzer {
                     .setExpectationId(expectationId)
                     .setDriftType(DriftType.SCHEMA_TYPE_CHANGED)
                     .setField(path)
+                    .setExpectedValue(shapeDiff.getBaselineType(path))
+                    .setActualValue(shapeDiff.getLiveType(path))
                     .setConfidence(0.95)
                     .setEpochTimeMs(now));
             }

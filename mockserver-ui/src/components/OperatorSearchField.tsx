@@ -69,6 +69,8 @@ interface OperatorSearchFieldProps {
    * the input rather than letting it silently do nothing.
    */
   fields?: readonly string[];
+  /** Accessible name of the input. Defaults to "Search". */
+  ariaLabel?: string;
 }
 
 /**
@@ -87,6 +89,7 @@ export default function OperatorSearchField({
   maxWidth = 240,
   sx,
   fields,
+  ariaLabel = 'Search',
 }: OperatorSearchFieldProps) {
   // Only a restricted surface can produce an unsupported operator, so the
   // unrestricted panels never pay for this beyond a cheap re-parse.
@@ -104,7 +107,7 @@ export default function OperatorSearchField({
       error={unsupported != null}
       helperText={unsupported ?? undefined}
       slotProps={{
-        htmlInput: { 'aria-label': 'Search' },
+        htmlInput: { 'aria-label': ariaLabel },
         input: {
           startAdornment: (
             <InputAdornment position="start">

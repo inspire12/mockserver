@@ -58,6 +58,7 @@ public class BodyWithContentTypeDTODeserializer extends StdDeserializer<BodyWith
         Body.Type type = null;
         Boolean not = null;
         Boolean optional = null;
+        boolean subString = false;
         MediaType contentType = null;
         Charset charset = null;
         org.mockserver.model.HttpTemplate.TemplateType templateType = null;
@@ -113,6 +114,9 @@ public class BodyWithContentTypeDTODeserializer extends StdDeserializer<BodyWith
                     }
                     if (key.equalsIgnoreCase("optional")) {
                         optional = Boolean.parseBoolean(String.valueOf(entry.getValue()));
+                    }
+                    if (key.equalsIgnoreCase("subString")) {
+                        subString = Boolean.parseBoolean(String.valueOf(entry.getValue()));
                     }
                     if (key.equalsIgnoreCase("contentType")) {
                         try {
@@ -196,13 +200,13 @@ public class BodyWithContentTypeDTODeserializer extends StdDeserializer<BodyWith
                         }
                     case STRING:
                         if (contentType != null && isNotBlank(contentType.toString())) {
-                            result = new StringBodyDTO(new StringBody(valueJsonValue, rawBytes, false, contentType), not);
+                            result = new StringBodyDTO(new StringBody(valueJsonValue, rawBytes, subString, contentType), not);
                             break;
                         } else if (charset != null) {
-                            result = new StringBodyDTO(new StringBody(valueJsonValue, rawBytes, false, StringBody.DEFAULT_CONTENT_TYPE.withCharset(charset)), not);
+                            result = new StringBodyDTO(new StringBody(valueJsonValue, rawBytes, subString, StringBody.DEFAULT_CONTENT_TYPE.withCharset(charset)), not);
                             break;
                         } else {
-                            result = new StringBodyDTO(new StringBody(valueJsonValue, rawBytes, false, null), not);
+                            result = new StringBodyDTO(new StringBody(valueJsonValue, rawBytes, subString, null), not);
                             break;
                         }
                     case XML:

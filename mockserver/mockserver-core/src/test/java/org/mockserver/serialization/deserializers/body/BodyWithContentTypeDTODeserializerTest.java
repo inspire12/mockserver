@@ -47,6 +47,32 @@ public class BodyWithContentTypeDTODeserializerTest {
     }
 
     @Test
+    public void shouldKeepSubStringOnAStringResponseBody() throws IOException {
+        // given -- a response matcher (e.g. in a verification) asking for a substring match
+        String json = "{\"httpResponse\":{\"body\":{\"type\":\"STRING\",\"string\":\"shipped\",\"subString\":true}}}";
+
+        // when
+        ExpectationDTO expectationDTO = ObjectMapperFactory.createObjectMapper().readValue(json, ExpectationDTO.class);
+
+        // then
+        StringBody body = (StringBody) expectationDTO.getHttpResponse().buildObject().getBody();
+        assertThat(body.getValue(), is("shipped"));
+        assertThat(body.isSubString(), is(true));
+    }
+
+    @Test
+    public void shouldDefaultSubStringToFalseOnAStringResponseBody() throws IOException {
+        // given
+        String json = "{\"httpResponse\":{\"body\":{\"type\":\"STRING\",\"string\":\"shipped\"}}}";
+
+        // when
+        ExpectationDTO expectationDTO = ObjectMapperFactory.createObjectMapper().readValue(json, ExpectationDTO.class);
+
+        // then
+        assertThat(((StringBody) expectationDTO.getHttpResponse().buildObject().getBody()).isSubString(), is(false));
+    }
+
+    @Test
     public void shouldParseFileBodyWithTemplateType() throws IOException {
         // given
         String json = ("{\"httpResponse\":{\"body\":{\"type\":\"FILE\",\"filePath\":\"some/path.json\",\"templateType\":\"MUSTACHE\",\"contentType\":\"application/json\"}}}");

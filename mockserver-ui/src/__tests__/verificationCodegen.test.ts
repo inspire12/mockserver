@@ -448,3 +448,48 @@ describe('verifyToCurl', () => {
     expect(curl).toContain('-v');
   });
 });
+
+describe('typed body matchers (E2E-VERIFY-1)', () => {
+  const SUBSTRING = { type: 'STRING', string: 'widget', subString: true };
+  const PARTIAL_JSON = { type: 'JSON', json: '{"order":"widget"}' };
+  const TYPED = baseInput({
+    httpRequest: { path: '/x', body: SUBSTRING },
+    httpResponse: { statusCode: 200, body: PARTIAL_JSON },
+  });
+
+  it('renders Java subString(...) and json(...) with their static imports', () => {
+    const code = verifyToJava(TYPED);
+    expect(code).toContain('.withBody(subString("widget"))');
+    expect(code).toContain('.withBody(json("{\\"order\\":\\"widget\\"}"))');
+    expect(code).toContain('import static org.mockserver.model.StringBody.subString;');
+    expect(code).toContain('import static org.mockserver.model.JsonBody.json;');
+  });
+
+  it('imports the body helpers for sequence steps too', () => {
+    const code = verifyToJava(baseInput({ mode: 'sequence', httpRequests: [{ body: PARTIAL_JSON }, { path: '/b' }] }));
+    expect(code).toContain('.withBody(json(');
+    expect(code).toContain('import static org.mockserver.model.JsonBody.json;');
+  });
+
+  it('renders the Go request matcher with JSONBody / a substring ALL_OF, and flags the response-body limit', () => {
+    const json = verifyToGo(baseInput({ httpRequest: { path: '/x', body: PARTIAL_JSON } }));
+    expect(json).toContain('.JSONBody("{\\"order\\":\\"widget\\"}")');
+    const code = verifyToGo(TYPED);
+    expect(code).toContain('.AllOfBody(mockserver.SubStringBody("widget"))');
+    expect(code).toContain('// The Go ResponseBuilder sets an exact body');
+  });
+
+  it('passes the typed bodies through unchanged in the JSON wire body', () => {
+    const parsed = JSON.parse(verifyToJson(TYPED));
+    expect(parsed.httpRequest.body).toEqual(SUBSTRING);
+    expect(parsed.httpResponse.body).toEqual(PARTIAL_JSON);
+  });
+});
+
+describe('between upper bound (E2E-VERIFY-5)', () => {
+  it('is rendered as entered, never raised to the lower bound', () => {
+    const input = baseInput({ times: { mode: 'between', count: 3, atMost: 1 } });
+    expect(verifyToJava(input)).toContain('VerificationTimes.between(3, 1)');
+    expect(JSON.parse(verifyToJson(input)).times).toEqual({ atLeast: 3, atMost: 1 });
+  });
+});
