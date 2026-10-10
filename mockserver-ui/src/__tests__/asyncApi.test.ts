@@ -68,6 +68,17 @@ describe('asyncApi client', () => {
     expect(await verifyAsyncApi(params, '{}')).toEqual({ verified: false, message: 'expected at least 1 message on orders' });
   });
 
+  it('verifyAsyncApi throws the reason from a 400 JSON error body, not the JSON envelope', async () => {
+    const error = "'atMost' must be inside \"count\", e.g. {\"channel\":\"orders\",\"count\":{\"atMost\":1}}";
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ status: 400, statusText: 'Bad Request', text: async () => JSON.stringify({ error }) }));
+    await expect(verifyAsyncApi(params, '{"channel":"orders","atMost":0}')).rejects.toThrow(new Error(error));
+  });
+
+  it('verifyAsyncApi throws a non-JSON error body as it is', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ status: 400, statusText: 'Bad Request', text: async () => 'plain reason' }));
+    await expect(verifyAsyncApi(params, '{}')).rejects.toThrow(new Error('plain reason'));
+  });
+
   it('verifyAsyncApi throws AsyncApiUnavailableError on 501', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ status: 501 }));
     await expect(verifyAsyncApi(params, '{}')).rejects.toBeInstanceOf(AsyncApiUnavailableError);

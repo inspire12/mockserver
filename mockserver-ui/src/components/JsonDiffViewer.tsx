@@ -1,5 +1,6 @@
-import { useId } from 'react';
+import { useCallback, useId, useLayoutEffect, useRef } from 'react';
 import { DiffEditor, loader } from '@monaco-editor/react';
+import type { DiffOnMount } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
@@ -51,6 +52,34 @@ export default function JsonDiffViewer({
   const summaryId = useId();
   const slug = summaryId.replace(/[^a-zA-Z0-9]/g, '');
   const isDark = theme.palette.mode === 'dark';
+  const originalModelPath = `inmemory://mockserver/${slug}-original.json`;
+  const modifiedModelPath = `inmemory://mockserver/${slug}-modified.json`;
+  const name = ariaLabel ?? label;
+
+  // @monaco-editor/react disposes the models while the diff widget still holds
+  // them, which Monaco reports as an uncaught "TextModel got disposed before
+  // DiffEditorWidget model got reset". So the wrapper keeps the models, and this
+  // layout-effect cleanup (it runs before the wrapper's passive one) detaches
+  // them from the live widget first and then disposes them.
+  const editorRef = useRef<{ setModel?: (model: null) => void } | null>(null);
+  const monacoRef = useRef<typeof monaco | null>(null);
+  const handleMount: DiffOnMount = useCallback((editor, monacoInstance) => {
+    editorRef.current = editor;
+    monacoRef.current = monacoInstance as typeof monaco;
+  }, []);
+  useLayoutEffect(() => {
+    return () => {
+      const editor = editorRef.current;
+      const monacoInstance = monacoRef.current;
+      editorRef.current = null;
+      if (!editor || !monacoInstance) return;
+      editor.setModel?.(null);
+      for (const path of [originalModelPath, modifiedModelPath]) {
+        const model = monacoInstance.editor.getModel(monacoInstance.Uri.parse(path));
+        if (model && !model.isDisposed()) model.dispose();
+      }
+    };
+  }, [originalModelPath, modifiedModelPath]);
 
   return (
     <Box>
@@ -75,8 +104,11 @@ export default function JsonDiffViewer({
           theme={isDark ? 'vs-dark' : 'vs'}
           original={original}
           modified={modified}
-          originalModelPath={`inmemory://mockserver/${slug}-original.json`}
-          modifiedModelPath={`inmemory://mockserver/${slug}-modified.json`}
+          originalModelPath={originalModelPath}
+          modifiedModelPath={modifiedModelPath}
+          keepCurrentOriginalModel
+          keepCurrentModifiedModel
+          onMount={handleMount}
           options={{
             readOnly: true,
             renderSideBySide: sideBySide,
@@ -89,6 +121,8 @@ export default function JsonDiffViewer({
             automaticLayout: true,
             renderLineHighlight: 'none',
             scrollbar: { alwaysConsumeMouseWheel: false },
+            tabFocusMode: true,
+            ...(name ? { originalAriaLabel: `${name} (before)`, modifiedAriaLabel: `${name} (after)` } : {}),
           }}
         />
       </Box>

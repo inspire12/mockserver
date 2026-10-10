@@ -140,13 +140,37 @@ export default function JsonEditor({
     [language, schema, modelUri],
   );
 
+  // Tab moves focus by default (no keyboard trap). Monaco's own toggle flips a global
+  // flag that the per-editor option overrides, so this editor binds the same chord —
+  // Ctrl+M, or Ctrl+Shift+M on macOS — to an action scoped to itself. The flag lives
+  // in state because the wrapper re-applies `options` on every render.
+  const [tabMovesFocus, setTabMovesFocus] = useState(true);
+  const tabToggleRef = useRef<{ dispose(): void } | null>(null);
+
   const handleMount: OnMount = useCallback(
-    (_editor, monacoInstance) => {
+    (editor, monacoInstance) => {
       monacoRef.current = monacoInstance as typeof monaco;
       configureJsonDefaults(monacoInstance as typeof monaco);
+      if (typeof editor?.addAction === 'function' && monacoInstance?.KeyMod) {
+        const { KeyMod, KeyCode } = monacoInstance;
+        const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent);
+        tabToggleRef.current?.dispose();
+        tabToggleRef.current = editor.addAction({
+          id: 'mockserver.toggleTabMovesFocus',
+          label: 'Toggle Tab Key Moves Focus',
+          keybindings: [mac ? KeyMod.WinCtrl | KeyMod.Shift | KeyCode.KeyM : KeyMod.CtrlCmd | KeyCode.KeyM],
+          keybindingContext: 'editorTextFocus',
+          run: () => setTabMovesFocus((current) => !current),
+        });
+      }
     },
     [configureJsonDefaults],
   );
+
+  useEffect(() => () => {
+    tabToggleRef.current?.dispose();
+    tabToggleRef.current = null;
+  }, []);
 
   // Re-apply json-language defaults when language or schema change after mount
   // (e.g. the user switches the body matcher type from JSON to JSON Schema).
@@ -220,6 +244,7 @@ export default function JsonEditor({
           '& .monaco-editor .editorPlaceholder': { color: 'text.secondary' },
         }}
         data-testid="json-editor"
+        role="group"
         aria-label={ariaLabel ?? label}
       >
         <Editor
@@ -243,6 +268,11 @@ export default function JsonEditor({
             renderLineHighlight: 'none',
             placeholder,
             scrollbar: { alwaysConsumeMouseWheel: false },
+            // Tab and Shift+Tab move focus like any other form field, so the
+            // editor is never a keyboard trap (WCAG 2.1.2). The focused input is
+            // announced by the field's own name rather than "Editor content".
+            tabFocusMode: tabMovesFocus,
+            ariaLabel: ariaLabel ?? label,
           }}
         />
       </Box>

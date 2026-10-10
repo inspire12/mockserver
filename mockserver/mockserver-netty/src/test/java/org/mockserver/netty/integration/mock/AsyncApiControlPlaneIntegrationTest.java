@@ -183,6 +183,33 @@ public class AsyncApiControlPlaneIntegrationTest {
         assertThat(verify.body, containsString("must not be empty"));
     }
 
+    @Test
+    public void shouldAnswerAnUnparseableSpecWithAJsonErrorThatKeepsTheParserMessage() throws Exception {
+        // when - a YAML document the parser rejects with a multi-line message
+        HttpResult put = send("PUT", "/mockserver/asyncapi", "garbage: [");
+
+        // then - the 400 body is valid JSON (the message's newlines are escaped, not raw)
+        assertThat(put.statusCode, is(400));
+        String error = MAPPER.readTree(put.body).get("error").asText();
+        assertThat(error, startsWith("failed to load AsyncAPI spec: "));
+        assertThat(error, containsString("garbage: ["));
+    }
+
+    @Test
+    public void shouldRejectAVerifyRequestWithACountFieldOutsideCount() throws Exception {
+        // given
+        assertThat(send("PUT", "/mockserver/asyncapi", ASYNC_API_SPEC).statusCode, is(201));
+
+        // when - "atMost" at the top level, where it used to be silently ignored
+        HttpResult verify = send("PUT", "/mockserver/asyncapi/verify", "{ \"channel\": \"orders/shipped\", \"atMost\": 0 }");
+
+        // then - refused with a JSON error naming the field and where it belongs
+        assertThat(verify.statusCode, is(400));
+        String error = MAPPER.readTree(verify.body).get("error").asText();
+        assertThat(error, containsString("'atMost'"));
+        assertThat(error, containsString("\"count\""));
+    }
+
     // --- raw HTTP helper ---
 
     private static final class HttpResult {

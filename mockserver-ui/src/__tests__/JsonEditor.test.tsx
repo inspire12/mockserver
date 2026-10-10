@@ -16,11 +16,14 @@ type EditorMockProps = {
   onChange?: (value: string | undefined) => void;
   onMount?: (editor: unknown, monaco: unknown) => void;
   onValidate?: (markers: Marker[]) => void;
+  options?: Record<string, unknown>;
 };
 
 // Captured so a test can fire validation after render, mimicking Monaco's async
 // diagnostics callback.
 let lastOnValidate: ((markers: Marker[]) => void) | undefined;
+// The Monaco options the component passed, so keyboard/a11y options can be asserted.
+let lastOptions: Record<string, unknown> | undefined;
 
 // A functional jsonDefaults stub whose setDiagnosticsOptions actually mutates the
 // backing `schemas` array, so tests can assert per-editor schema registration and
@@ -43,8 +46,9 @@ const registeredSchemas = () => monacoStub.languages.json.jsonDefaults.diagnosti
 
 vi.mock('@monaco-editor/react', () => ({
   loader: { config: vi.fn() },
-  default: ({ value, language, onChange, onMount, onValidate }: EditorMockProps) => {
+  default: ({ value, language, onChange, onMount, onValidate, options }: EditorMockProps) => {
     lastOnValidate = onValidate;
+    lastOptions = options;
     onMount?.({}, monacoStub);
     return (
       <textarea
@@ -80,6 +84,7 @@ function renderEditor(props: Partial<React.ComponentProps<typeof JsonEditor>> = 
 describe('JsonEditor', () => {
   beforeEach(() => {
     lastOnValidate = undefined;
+    lastOptions = undefined;
     monacoStub.languages.json.jsonDefaults.diagnosticsOptions.schemas = [];
   });
 
@@ -89,6 +94,21 @@ describe('JsonEditor', () => {
     expect(ta.value).toBe('{"a":1}');
     expect(ta.getAttribute('data-language')).toBe('json');
     expect(screen.getByText('JSON body matcher')).toBeInTheDocument();
+  });
+
+  it('lets Tab leave the editor and names its input after the field (no keyboard trap)', () => {
+    renderEditor({ value: '{}', label: 'Response body', ariaLabel: 'Response body' });
+    // Monaco keeps Tab for indentation unless tabFocusMode is on, which traps a
+    // keyboard user inside the field (WCAG 2.1.2).
+    expect(lastOptions?.tabFocusMode).toBe(true);
+    // Without ariaLabel Monaco announces its input as "Editor content".
+    expect(lastOptions?.ariaLabel).toBe('Response body');
+    expect(screen.getByRole('group', { name: 'Response body' })).toBeInTheDocument();
+  });
+
+  it('names the editor input after the visible label when no ariaLabel is given', () => {
+    renderEditor({ value: '{}', label: 'JSON body matcher' });
+    expect(lastOptions?.ariaLabel).toBe('JSON body matcher');
   });
 
   it('propagates edits through onChange', async () => {

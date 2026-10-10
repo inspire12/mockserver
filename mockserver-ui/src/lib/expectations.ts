@@ -71,3 +71,22 @@ export async function fetchExpectation(
   if (!found) throw new Error(`Expectation ${id} is no longer registered`);
   return found;
 }
+
+/**
+ * Every active expectation on the server, whole, as `PUT /mockserver/retrieve?type=active_expectations`
+ * returns it. The dashboard's live list is a capped window; this reaches the ones beyond it.
+ */
+export async function fetchActiveExpectations(
+  params: ConnectionParams,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>[]> {
+  const res = await fetch(`${buildBaseUrl(params)}/mockserver/retrieve?type=active_expectations&format=json`, {
+    method: 'PUT',
+    signal,
+  });
+  await ensureOk(res);
+  const expectations = (await res.json().catch(() => null)) as unknown;
+  return Array.isArray(expectations)
+    ? expectations.filter((e): e is Record<string, unknown> => !!e && typeof e === 'object')
+    : [];
+}

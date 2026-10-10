@@ -5012,6 +5012,8 @@ components:
           $ref: '#/components/schemas/KeyToMultiValue'
         statusCode:
           type: integer
+          minimum: 100
+          maximum: 999
         reasonPhrase:
           type: string
         recoverAfter:
@@ -7143,6 +7145,8 @@ components:
           $ref: '#/components/schemas/KeyToMultiValue'
         statusCode:
           type: integer
+          minimum: 100
+          maximum: 999
         events:
           type: array
           items:

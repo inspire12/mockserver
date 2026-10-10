@@ -168,7 +168,8 @@ export default function AsyncApiDialog({
           label="Verification request (JSON)"
           multiline minRows={5} maxRows={16} fullWidth disabled={unavailable}
           value={verifyBody} onChange={(e) => setVerifyBody(e.target.value)}
-          placeholder={'{\n  "channel": "orders",\n  "atLeast": 1\n}'}
+          placeholder={'{\n  "channel": "orders",\n  "count": { "atLeast": 1 }\n}'}
+          helperText='Count constraints go under "count": atLeast, atMost or exactly. Optional filters: payloadSubstring, or payloadJsonPath with expectedValue.'
           slotProps={{ input: { sx: { typography: 'body2', fontFamily: monospaceFontFamily } } }}
         />
         {verifyResult && (

@@ -35,6 +35,7 @@ import ListItemText from '@mui/material/ListItemText';
 import type { ConnectionParams } from '../hooks/useConnectionParams';
 import { notifyWholeExpectationLoadFailed } from '../hooks/useWithWholeExpectation';
 import { isShortenedExpectation, loadWholeExpectation } from '../lib/fullExpectation';
+import { fetchActiveExpectations } from '../lib/expectations';
 import { useDashboardStore } from '../store';
 import { humanizeError, type HumanError } from '../lib/errorMessage';
 import { monospaceFontFamily } from '../theme';
@@ -67,6 +68,7 @@ import {
   STEP_ACTION_LABELS,
   RESPONDER_CAPABLE_ACTIONS,
   standardChaosErrorStatusError,
+  responseStatusCodeError,
   standardChaosErrorProbabilityError,
   hasStandardChaosRangeErrors,
   type StandardActionPayload,
@@ -1758,6 +1760,35 @@ function triParse(v: string): boolean | undefined {
   return v === '' ? undefined : v === 'true';
 }
 
+/**
+ * A response status code input. A blank field is held as NaN rather than snapping
+ * to 0 or 200, so the form can refuse it (see {@link responseStatusCodeError}).
+ */
+function StatusCodeField({
+  value,
+  onChange,
+  width = 130,
+}: {
+  value: number;
+  onChange: (statusCode: number) => void;
+  width?: number;
+}) {
+  const error = responseStatusCodeError(value);
+  return (
+    <TextField
+      label="Status code"
+      size="small"
+      type="number"
+      value={Number.isNaN(value) ? '' : value}
+      onChange={(e) => onChange(e.target.value.trim() === '' ? NaN : Number(e.target.value))}
+      error={!!error}
+      helperText={error}
+      slotProps={{ htmlInput: { min: 100, max: 999, step: 1 } }}
+      sx={{ width: { xs: '100%', sm: width } }}
+    />
+  );
+}
+
 function StaticHttpPanel({
   state,
   setState,
@@ -1768,14 +1799,7 @@ function StaticHttpPanel({
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
       <Box sx={{ display: 'flex', gap: 1 }}>
-        <TextField
-          label="Status code"
-          size="small"
-          type="number"
-          value={state.statusCode}
-          onChange={(e) => setState({ ...state, statusCode: Number(e.target.value) || 200 })}
-          sx={{ width: { xs: '100%', sm: 130 } }}
-        />
+        <StatusCodeField value={state.statusCode} onChange={(statusCode) => setState({ ...state, statusCode })} />
         <TextField
           label="Reason phrase (optional)"
           size="small"
@@ -2346,13 +2370,9 @@ function ForwardFallbackPanel({
         Fallback response
       </Typography>
       <Box sx={{ display: 'flex', gap: 1 }}>
-        <TextField
-          label="Status code"
-          size="small"
-          type="number"
+        <StatusCodeField
           value={state.fallbackStatusCode}
-          onChange={(e) => setState({ ...state, fallbackStatusCode: Number(e.target.value) || 200 })}
-          sx={{ width: { xs: '100%', sm: 130 } }}
+          onChange={(fallbackStatusCode) => setState({ ...state, fallbackStatusCode })}
         />
         <TextField
           label="Fallback on status codes (comma-separated)"
@@ -2808,14 +2828,7 @@ function SsePanel({
         ID, and retry interval.
       </Typography>
       <Box sx={{ display: 'flex', gap: 1 }}>
-        <TextField
-          label="Status code"
-          size="small"
-          type="number"
-          value={state.statusCode}
-          onChange={(e) => setState({ ...state, statusCode: Number(e.target.value) || 200 })}
-          sx={{ width: { xs: '100%', sm: 130 } }}
-        />
+        <StatusCodeField value={state.statusCode} onChange={(statusCode) => setState({ ...state, statusCode })} />
       </Box>
       <TextField
         label="Headers (Name: value per line)"
@@ -3881,6 +3894,38 @@ interface ExistingMocksListProps {
   selectedKey: string;
   onSelect: (key: string) => void;
   onClear: () => void;
+  /** How many expectations the server holds; above `windowSize` the live list is a capped window. */
+  total?: number;
+  /** How many expectations (of every kind) the live window holds. */
+  windowSize?: number;
+  /** Every active expectation on the server, for a search that reaches past the window. */
+  searchServer?: (signal: AbortSignal) => Promise<JsonListItem[]>;
+  /** Load an expectation found by the server search that is not in the live window. */
+  onSelectItem?: (item: JsonListItem) => void;
+}
+
+function matchesKind(value: Record<string, unknown>, kind: ExpectationKind): boolean {
+  const expKind = kindForExpectation(value);
+  if (kind === 'mcp') {
+    // MCP tools are derived from standard (HTTP) expectations with httpResponse
+    return expKind === 'standard' && value['httpResponse'] != null;
+  }
+  return expKind === kind;
+}
+
+function matchesSearch(item: JsonListItem, kind: ExpectationKind, query: string): boolean {
+  if (!query) return true;
+  const q = query.toLowerCase();
+  return (
+    item.key.toLowerCase().includes(q) ||
+    summaryForExpectation(item.value, kind === 'mcp' ? 'standard' : kind).toLowerCase().includes(q)
+  );
+}
+
+interface ServerSearch {
+  query: string;
+  items?: JsonListItem[];
+  error?: string;
 }
 
 function ExistingMocksList({
@@ -3889,21 +3934,50 @@ function ExistingMocksList({
   selectedKey,
   onSelect,
   onClear,
+  total = 0,
+  windowSize = 0,
+  searchServer,
+  onSelectItem,
 }: ExistingMocksListProps) {
-  // Filter expectations to the current kind. For MCP, show static HTTP
-  // response expectations (the ones that become MCP tools).
-  const filtered = useMemo(() => {
-    return expectations.filter((e) => {
-      const expKind = kindForExpectation(e.value);
-      if (kind === 'mcp') {
-        // MCP tools are derived from standard (HTTP) expectations with httpResponse
-        return expKind === 'standard' && e.value['httpResponse'] != null;
-      }
-      return expKind === kind;
-    });
-  }, [expectations, kind]);
+  const [search, setSearch] = useState('');
+  const query = search.trim();
+  const truncated = total > windowSize && !!searchServer;
+  const [serverSearch, setServerSearch] = useState<ServerSearch | null>(null);
+
+  // Filter expectations to the current kind.
+  const ofKind = useMemo(() => expectations.filter((e) => matchesKind(e.value, kind)), [expectations, kind]);
+
+  // The live list is a capped window, so once the server holds more a search
+  // asks the server for every expectation instead of filtering the window.
+  useEffect(() => {
+    if (!truncated || !query || !searchServer) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      searchServer(controller.signal).then(
+        (items) => setServerSearch({ query, items: items.filter((e) => !e.value['httpLlmResponse']) }),
+        (e: unknown) => {
+          if (!controller.signal.aborted) setServerSearch({ query, error: humanizeError(e).message });
+        },
+      );
+    }, 300);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [truncated, query, searchServer]);
+
+  const serverResult = truncated && query && serverSearch?.query === query ? serverSearch : undefined;
+  const searching = truncated && !!query && !serverResult;
+  const source = serverResult?.items ? serverResult.items.filter((e) => matchesKind(e.value, kind)) : ofKind;
+  const filtered = source.filter((e) => matchesSearch(e, kind, query));
+  const inWindow = useMemo(() => new Set(expectations.map((e) => e.key)), [expectations]);
+  const select = (item: JsonListItem) => {
+    if (inWindow.has(item.key) || !onSelectItem) onSelect(item.key);
+    else onSelectItem(item);
+  };
 
   const label = kind === 'mcp' ? 'MCP (HTTP response)' : kindLabel(kind);
+  const showSearch = ofKind.length > 0 || truncated;
 
   return (
     <Paper variant="outlined" sx={{ p: 1.5 }} data-testid="existing-mocks-list">
@@ -3938,9 +4012,39 @@ function ExistingMocksList({
         </Alert>
       )}
 
-      {filtered.length === 0 ? (
+      {truncated && (
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }} data-testid="existing-mocks-window-notice">
+          This list holds the {windowSize} expectations the dashboard keeps live, of {total} on the server.
+          Search by path or id to reach any of them.
+        </Typography>
+      )}
+
+      {showSearch && (
+        <TextField
+          size="small"
+          fullWidth
+          label="Search by path or id"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          sx={{ mb: 0.5 }}
+        />
+      )}
+
+      {serverResult?.error && (
+        <Alert severity="error" variant="outlined" sx={{ fontSize: '0.72rem', py: 0, px: 1, mb: 0.5 }}>
+          Could not search the server: {serverResult.error}
+        </Alert>
+      )}
+
+      {searching ? (
         <Typography variant="body2" color="text.secondary" sx={{ fontStyle: 'italic', py: 1 }}>
-          No {kindLabel(kind)} mocks yet — fill in the form below to add one.
+          Searching all {total} expectations…
+        </Typography>
+      ) : filtered.length === 0 ? (
+        <Typography variant="body2" color="text.secondary" sx={{ fontStyle: 'italic', py: 1 }}>
+          {query
+            ? `No ${kindLabel(kind)} mocks match “${query}”.`
+            : `No ${kindLabel(kind)} mocks yet — fill in the form below to add one.`}
         </Typography>
       ) : (
         <Box sx={{ maxHeight: 200, overflowY: 'auto', border: 1, borderColor: 'divider', borderRadius: 1 }}>
@@ -3965,7 +4069,7 @@ function ExistingMocksList({
                 <ListItemButton
                   key={e.key}
                   selected={e.key === selectedKey}
-                  onClick={() => onSelect(e.key)}
+                  onClick={() => select(e)}
                   sx={{
                     py: 0.25,
                     px: 1,
@@ -4043,7 +4147,9 @@ function QuickMockForm({
   onSwitchToAdvanced,
 }: QuickMockFormProps) {
   const disabledReason =
-    matcher.path.trim().length === 0 ? 'Enter a request path to match' : null;
+    matcher.path.trim().length === 0
+      ? 'Enter a request path to match'
+      : responseStatusCodeError(staticState.statusCode) ?? null;
   return (
     <Paper variant="outlined" sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 2 }} data-testid="quick-mock-form">
       <Box>
@@ -4079,13 +4185,10 @@ function QuickMockForm({
           2 · Respond with
         </Typography>
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap', mb: 1 }}>
-          <TextField
-            label="Status code"
-            size="small"
-            type="number"
-            sx={{ width: { xs: '100%', sm: 140 } }}
+          <StatusCodeField
+            width={140}
             value={staticState.statusCode}
-            onChange={(e) => setStaticState({ ...staticState, statusCode: Number(e.target.value) || 0 })}
+            onChange={(statusCode) => setStaticState({ ...staticState, statusCode })}
           />
           <TextField
             label="Content-Type"
@@ -4196,6 +4299,7 @@ function getInitialMode(): ComposerMode {
 
 export default function ComposerView({ connectionParams }: ComposerViewProps) {
   const activeExpectations = useDashboardStore((s) => s.activeExpectations);
+  const activeExpectationsTotal = useDashboardStore((s) => s.activeExpectationsTotal);
   const pendingEditExpectation = useDashboardStore((s) => s.pendingEditExpectation);
   const clearPendingEditExpectation = useDashboardStore((s) => s.clearPendingEditExpectation);
   const setView = useDashboardStore((s) => s.setView);
@@ -4569,6 +4673,24 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
       );
     },
     [activeExpectations, connectionParams, loadExistingItem],
+  );
+
+  // An expectation the existing-mocks search found beyond the live window: it
+  // came whole from the server, so it loads directly.
+  const handleLoadFound = useCallback(
+    (item: JsonListItem) => {
+      loadSelectionRef.current++;
+      setLoadFromKey(item.key);
+      loadExistingItem(item);
+    },
+    [loadExistingItem],
+  );
+  const searchAllExpectations = useCallback(
+    async (signal: AbortSignal): Promise<JsonListItem[]> =>
+      (await fetchActiveExpectations(connectionParams, signal))
+        .filter((value) => typeof value['id'] === 'string')
+        .map((value) => ({ key: value['id'] as string, value })),
+    [connectionParams],
   );
 
   // Reset the whole form to a blank HTTP static mock. Shared by the
@@ -4980,6 +5102,10 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
             selectedKey={loadFromKey}
             onSelect={handleLoadExisting}
             onClear={resetForm}
+            total={activeExpectationsTotal}
+            windowSize={activeExpectations.length}
+            searchServer={searchAllExpectations}
+            onSelectItem={handleLoadFound}
           />
         )}
 
@@ -5508,7 +5634,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
                 switch (actionType) {
                   case 'static':
                     return (staticState.bodyFromFile && staticState.filePath.trim().length === 0)
-                      ? 'Enter the response body file path' : null;
+                      ? 'Enter the response body file path' : responseStatusCodeError(staticState.statusCode) ?? null;
                   case 'forward': return (forwardState.host.trim().length > 0 && forwardState.port > 0) ? null : 'Enter a forward host and port';
                   case 'forward_override':
                     return (
@@ -5521,14 +5647,18 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
                       forwardOverrideState.overrideBody.trim().length > 0
                     ) ? null : 'Set at least one override field';
                   case 'forward_fallback':
-                    return (forwardFallbackState.host.trim().length > 0 && forwardFallbackState.port > 0) ? null : 'Enter a fallback host and port';
+                    return (forwardFallbackState.host.trim().length > 0 && forwardFallbackState.port > 0)
+                      ? responseStatusCodeError(forwardFallbackState.fallbackStatusCode) ?? null
+                      : 'Enter a fallback host and port';
                   case 'callback': return callbackState.callbackClass.trim().length > 0 ? null : 'Enter the callback class name';
                   case 'template': return (templateState.template.trim().length > 0 || (templateState.templateFile ?? '').trim().length > 0) ? null : 'Enter a response template or a template file path';
                   case 'error':
                     if (errorState.responseBytesB64.trim().length > 0 && !isValidBase64(errorState.responseBytesB64)) return 'Response bytes are not valid base64';
                     return (errorState.dropConnection || errorState.responseBytesB64.trim().length > 0) ? null : 'Enable drop-connection or enter response bytes';
                   case 'websocket': return null;
-                  case 'sse': return sseState.events.some((ev) => ev.data.trim().length > 0 || ev.event.trim().length > 0) ? null : 'Add at least one SSE event';
+                  case 'sse':
+                    if (!sseState.events.some((ev) => ev.data.trim().length > 0 || ev.event.trim().length > 0)) return 'Add at least one SSE event';
+                    return responseStatusCodeError(sseState.statusCode) ?? null;
                   case 'binary_response':
                     // No data is valid: the matched message gets no reply.
                     if (binaryResponseState.binaryData.trim().length === 0) return null;

@@ -211,6 +211,29 @@ public class MustacheTemplateEngineTest {
     }
 
     @Test
+    public void shouldSayWhyWhenARenderedResponseHasAStatusCodeOutsideOneHundredToNineNineNine() {
+        // given - a status code an HTTP status line cannot carry
+        String template = "{\"statusCode\": 0, \"body\": \"{{ request.path }}\"}";
+        HttpRequest request = request().withPath("/status/zero");
+
+        // when
+        HttpResponse actualHttpResponse = new MustacheTemplateEngine(mockServerLogger, configuration)
+            .executeTemplate(template, request, HttpResponseDTO.class);
+
+        // then - no response, and the logged failure names the field, the range and the consequence
+        assertThat(actualHttpResponse, is(nullValue()));
+        ArgumentCaptor<LogEntry> logEntryCaptor = ArgumentCaptor.forClass(LogEntry.class);
+        verify(mockServerLogger, atLeastOnce()).logEvent(logEntryCaptor.capture());
+        String message = logEntryCaptor.getAllValues().stream()
+            .filter(entry -> entry.getType() == TEMPLATE_GENERATION_FAILED)
+            .findFirst()
+            .map(LogEntry::getMessage)
+            .orElse("");
+        assertThat(message, containsString("$.statusCode: must have a minimum value of 100"));
+        assertThat(message, containsString("the template rendered a statusCode outside 100 to 999"));
+    }
+
+    @Test
     public void shouldHandleHttpRequestsWithMustacheResponseTemplateWithLoopOverEntrySet() throws JsonProcessingException {
         // given
         String template = "{" + NEW_LINE +

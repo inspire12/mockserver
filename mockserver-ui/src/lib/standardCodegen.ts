@@ -455,6 +455,16 @@ export function standardChaosErrorStatusError(v: number | undefined): string | u
   return undefined;
 }
 
+/**
+ * Why a response status code cannot be registered, or undefined when it can. The
+ * server accepts any three-digit code (100–999) — the range an HTTP status line
+ * can carry — so a blank field (NaN), 0, a negative or a four-digit value is refused.
+ */
+export function responseStatusCodeError(v: number): string | undefined {
+  if (!Number.isInteger(v) || v < 100 || v > 999) return 'Status code must be a whole number from 100 to 999';
+  return undefined;
+}
+
 /** Returns an error hint when errorProbability is outside 0.0–1.0. */
 export function standardChaosErrorProbabilityError(v: number | undefined): string | undefined {
   if (v == null) return undefined;

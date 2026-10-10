@@ -2000,7 +2000,7 @@ public class HttpState {
                 );
                 return response()
                     .withStatusCode(BAD_GATEWAY.code())
-                    .withBody("{\"error\":\"" + cfe.getMessage().replace("\"", "'") + "\"}", MediaType.JSON_UTF_8);
+                    .withBody(errorJson(cfe.getMessage()), MediaType.JSON_UTF_8);
             } catch (IllegalArgumentException iae) {
                 mockServerLogger.logEvent(
                     new LogEntry()
@@ -5406,7 +5406,7 @@ public class HttpState {
                 return unexpectedFailure(request, e);
             }
             return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"invalid preemption request: " + sanitizeJsonError(e.getMessage()) + "\"}", MediaType.JSON_UTF_8);
+                .withBody(errorJson("invalid preemption request: " + (e.getMessage() != null ? e.getMessage() : "unparseable JSON")), MediaType.JSON_UTF_8);
         }
     }
 
@@ -5438,13 +5438,6 @@ public class HttpState {
             result.put("mode", mode.name());
         }
         return result;
-    }
-
-    private static String sanitizeJsonError(String message) {
-        if (message == null) {
-            return "unparseable JSON";
-        }
-        return message.replace("\"", "'").replace("\n", " ").replace("\r", " ");
     }
 
     // --- gRPC Chaos endpoint helpers ---
@@ -6123,7 +6116,7 @@ public class HttpState {
                 return unexpectedFailure(request, e);
             }
             return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to set gRPC health status: " + e.getMessage() + "\"}", MediaType.JSON_UTF_8);
+                .withBody(errorJson("failed to set gRPC health status: " + e.getMessage()), MediaType.JSON_UTF_8);
         }
     }
 
@@ -6237,7 +6230,7 @@ public class HttpState {
                 return unexpectedFailure(request, e);
             }
             return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to diff requests: " + e.getMessage() + "\"}", MediaType.JSON_UTF_8);
+                .withBody(errorJson("failed to diff requests: " + e.getMessage()), MediaType.JSON_UTF_8);
         }
     }
 
@@ -8120,7 +8113,7 @@ public class HttpState {
             }
             String message = String.valueOf(e.getMessage());
             return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to load AsyncAPI spec: " + message.replace("\"", "'") + "\"}", MediaType.JSON_UTF_8);
+                .withBody(errorJson("failed to load AsyncAPI spec: " + message), MediaType.JSON_UTF_8);
         }
     }
 
@@ -8282,14 +8275,14 @@ public class HttpState {
             }
         } catch (IllegalArgumentException e) {
             return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"" + String.valueOf(e.getMessage()).replace("\"", "'") + "\"}", MediaType.JSON_UTF_8);
+                .withBody(errorJson(String.valueOf(e.getMessage())), MediaType.JSON_UTF_8);
         } catch (Exception e) {
             if (!isClientError(e)) {
                 return unexpectedFailure(request, e);
             }
             String message = String.valueOf(e.getMessage());
             return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to verify Pact contract: " + message.replace("\"", "'") + "\"}", MediaType.JSON_UTF_8);
+                .withBody(errorJson("failed to verify Pact contract: " + message), MediaType.JSON_UTF_8);
         }
     }
 
@@ -8314,14 +8307,14 @@ public class HttpState {
             }
         } catch (IllegalArgumentException e) {
             return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"" + String.valueOf(e.getMessage()).replace("\"", "'") + "\"}", MediaType.JSON_UTF_8);
+                .withBody(errorJson(String.valueOf(e.getMessage())), MediaType.JSON_UTF_8);
         } catch (Exception e) {
             if (!isClientError(e)) {
                 return unexpectedFailure(request, e);
             }
             String message = String.valueOf(e.getMessage());
             return response().withStatusCode(BAD_REQUEST.code())
-                .withBody("{\"error\":\"failed to verify async messages: " + message.replace("\"", "'") + "\"}", MediaType.JSON_UTF_8);
+                .withBody(errorJson("failed to verify async messages: " + message), MediaType.JSON_UTF_8);
         }
     }
 
@@ -8363,8 +8356,8 @@ public class HttpState {
                     phases.add(org.mockserver.mock.breakpoint.BreakpointPhase.valueOf(phaseName));
                 } catch (IllegalArgumentException e) {
                     return response().withStatusCode(BAD_REQUEST.code())
-                        .withBody("{\"error\":\"unknown phase '" + phaseName.replace("\"", "'") + "'; valid phases are: "
-                            + java.util.Arrays.toString(org.mockserver.mock.breakpoint.BreakpointPhase.values()) + "\"}", MediaType.JSON_UTF_8);
+                        .withBody(errorJson("unknown phase '" + phaseName + "'; valid phases are: "
+                            + java.util.Arrays.toString(org.mockserver.mock.breakpoint.BreakpointPhase.values())), MediaType.JSON_UTF_8);
                 }
             }
 

@@ -159,7 +159,9 @@ Verify that recorded messages match the given criteria. Mirrors the semantics of
 | `payloadSubstring` | string | no | Payload must contain this substring |
 | `payloadJsonPath` | string | no | Dot-notation JSON path to extract from the payload (e.g. `user.name`) |
 | `expectedValue` | string | no | Expected value at the JSON path (used with `payloadJsonPath`) |
-| `count` | object | no | Count constraints: `{atLeast, atMost, exactly}`. Default: `{atLeast: 1}` |
+| `count` | object | no | Count constraints: `{atLeast, atMost, exactly}`, each a whole number of at least 0. Default: `{atLeast: 1}` |
+
+Any other field is refused with a 400 rather than ignored (`rejectUnknownFields` in `AsyncApiControlPlaneImpl`): an ignored `atMost` at the top level, for example, would leave the check at the default "at least 1". A count field at the top level gets a message saying it belongs under `count`.
 
 **Responses:**
 
@@ -167,7 +169,7 @@ Verify that recorded messages match the given criteria. Mirrors the semantics of
 |--------|---------|
 | 202 Accepted | Verification passed |
 | 406 Not Acceptable | Verification failed (body contains human-readable failure reason) |
-| 400 Bad Request | Malformed request (missing channel, invalid JSON) |
+| 400 Bad Request | Malformed request (missing channel, invalid JSON, an unknown field, a count that is not a whole number of at least 0); the body is `{"error": "..."}` |
 | 501 Not Implemented | mockserver-async module is not on the classpath; the response body names the artifact, where its version comes from, and the container mount point, so a caller can act on it without leaving the error |
 
 **Example — verify at least 1 message on "orders" with a specific user name:**

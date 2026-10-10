@@ -9,6 +9,7 @@ import java.util.*;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
+import static org.junit.Assert.assertThrows;
 
 /**
  * Tests for {@link AsyncApiControlPlaneImpl#verify(String)}.
@@ -264,6 +265,53 @@ public class AsyncApiControlPlaneVerifyTest {
     @Test(expected = IllegalArgumentException.class)
     public void shouldThrowWhenChannelFieldMissing() {
         controlPlane.verify("{\"payloadSubstring\":\"hello\"}");
+    }
+
+    @Test
+    public void shouldRejectACountFieldAtTheTopLevel() {
+        addMessages(msg("orders", "a"));
+
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+            () -> controlPlane.verify("{\"channel\":\"orders\",\"atMost\":0}"));
+        assertThat(e.getMessage(), is("'atMost' must be inside \"count\", e.g. {\"channel\":\"orders\",\"count\":{\"atMost\":1}}"));
+    }
+
+    @Test
+    public void shouldRejectAnUnknownTopLevelField() {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+            () -> controlPlane.verify("{\"channel\":\"orders\",\"payloadContains\":\"x\"}"));
+        assertThat(e.getMessage(), is("unknown field 'payloadContains' in verification request; valid fields are [channel, payloadSubstring, payloadJsonPath, expectedValue, count]"));
+    }
+
+    @Test
+    public void shouldRejectAnUnknownCountField() {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+            () -> controlPlane.verify("{\"channel\":\"orders\",\"count\":{\"atleast\":1}}"));
+        assertThat(e.getMessage(), is("unknown field 'atleast' in \"count\"; valid fields are [atLeast, atMost, exactly]"));
+    }
+
+    @Test
+    public void shouldRejectACountThatIsNotAnObject() {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+            () -> controlPlane.verify("{\"channel\":\"orders\",\"count\":1}"));
+        assertThat(e.getMessage(), is("\"count\" must be an object with atLeast, atMost or exactly"));
+    }
+
+    @Test
+    public void shouldRejectACountValueThatIsNotAWholeNumberOfAtLeastZero() {
+        for (String value : new String[]{"-1", "1.5", "\"2\"", "true"}) {
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> controlPlane.verify("{\"channel\":\"orders\",\"count\":{\"exactly\":" + value + "}}"));
+            assertThat(value, e.getMessage(), is("\"count\".exactly must be a whole number of at least 0"));
+        }
+    }
+
+    @Test
+    public void shouldHonourAnAtMostInsideCount() {
+        addMessages(msg("orders", "a"));
+
+        assertThat(controlPlane.verify("{\"channel\":\"orders\",\"count\":{\"atMost\":0}}"),
+            is("expected at most 0 message(s) matching channel 'orders' but found 1"));
     }
 
     // ---- JSON path edge cases ----

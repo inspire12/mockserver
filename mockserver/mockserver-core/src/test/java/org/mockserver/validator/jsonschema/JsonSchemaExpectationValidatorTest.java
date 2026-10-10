@@ -115,6 +115,34 @@ public class JsonSchemaExpectationValidatorTest {
     }
 
     @Test
+    public void shouldAcceptEveryThreeDigitResponseStatusCode() {
+        for (int statusCode : new int[]{100, 200, 599, 999}) {
+            assertThat(String.valueOf(statusCode), jsonSchemaValidator.isValid(
+                "{ \"httpRequest\" : { \"path\" : \"/s\" }, \"httpResponse\" : { \"statusCode\" : " + statusCode + " } }"), is(""));
+        }
+    }
+
+    @Test
+    public void shouldRejectAResponseStatusCodeOutsideOneHundredToNineNineNine() {
+        // an HTTP status line carries three digits: 0 or 1000 was registered and then served as "HTTP/1.1 0"
+        for (int statusCode : new int[]{-5, 0, 99, 1000}) {
+            String result = jsonSchemaValidator.isValid(
+                "{ \"httpRequest\" : { \"path\" : \"/s\" }, \"httpResponse\" : { \"statusCode\" : " + statusCode + " } }");
+            assertThat(String.valueOf(statusCode), result, containsString("$.httpResponse.statusCode: must have a " + (statusCode < 100 ? "minimum value of 100" : "maximum value of 999")));
+        }
+    }
+
+    @Test
+    public void shouldRejectAnOutOfRangeStatusCodeInAFallbackSequenceOrSseResponse() {
+        assertThat(jsonSchemaValidator.isValid("{ \"httpRequest\" : { \"path\" : \"/s\" }, \"httpForwardWithFallback\" : { \"httpForward\" : { \"host\" : \"localhost\", \"port\" : 1 }, \"fallbackResponse\" : { \"statusCode\" : 0 } } }"),
+            containsString("$.httpForwardWithFallback.fallbackResponse.statusCode: must have a minimum value of 100"));
+        assertThat(jsonSchemaValidator.isValid("{ \"httpRequest\" : { \"path\" : \"/s\" }, \"httpResponses\" : [ { \"statusCode\" : 200 }, { \"statusCode\" : 1000 } ] }"),
+            containsString("$.httpResponses[1].statusCode: must have a maximum value of 999"));
+        assertThat(jsonSchemaValidator.isValid("{ \"httpRequest\" : { \"path\" : \"/s\" }, \"httpSseResponse\" : { \"statusCode\" : 0, \"events\" : [ { \"data\" : \"x\" } ] } }"),
+            containsString("$.httpSseResponse.statusCode: must have a minimum value of 100"));
+    }
+
+    @Test
     public void shouldValidateExpectationWithGenerateFromSchemaResponse() {
         // when — an httpResponse carrying an inline JSON schema is accepted by the schema
         assertThat(jsonSchemaValidator.isValid("{" + NEW_LINE +

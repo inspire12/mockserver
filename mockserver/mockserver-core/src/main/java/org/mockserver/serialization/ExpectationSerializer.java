@@ -19,6 +19,7 @@ import java.io.Writer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 
 import static org.apache.commons.lang3.StringUtils.isBlank;
@@ -216,6 +217,38 @@ public class ExpectationSerializer implements Serializer<Expectation> {
     }
 
     public Expectation[] deserializeArray(String jsonExpectations, boolean allowEmpty, BiFunction<String, List<Expectation>, List<Expectation>> expectationModifier) {
+        return deserializeArray(jsonExpectations, allowEmpty, expectationModifier, null);
+    }
+
+    /**
+     * Like {@link #deserializeArray(String, boolean, BiFunction)}, except that an entry which fails validation is
+     * left out and passed to {@code invalidEntryHandler} (as a description naming the entry, and the validation
+     * errors) instead of failing the whole array. For loading expectation files, where one bad entry should not
+     * cost the rest; the control-plane API stays strict.
+     */
+    public Expectation[] deserializeArrayDroppingInvalidEntries(String jsonExpectations, BiFunction<String, List<Expectation>, List<Expectation>> expectationModifier, BiConsumer<String, String> invalidEntryHandler) {
+        return deserializeArray(jsonExpectations, true, expectationModifier, invalidEntryHandler);
+    }
+
+    /**
+     * Names an entry of an expectation array for a log message: its position, and its id and request path when
+     * it has them.
+     */
+    static String describeEntry(JsonNode entry, int index, int count) {
+        StringBuilder description = new StringBuilder("expectation ").append(index + 1).append(" of ").append(count);
+        JsonNode id = entry.get("id");
+        if (id != null && id.isTextual()) {
+            description.append(" (id \"").append(id.asText()).append("\")");
+        }
+        JsonNode httpRequest = entry.get("httpRequest");
+        JsonNode path = httpRequest != null ? httpRequest.get("path") : null;
+        if (path != null && path.isValueNode()) {
+            description.append(" for path \"").append(path.asText()).append("\"");
+        }
+        return description.toString();
+    }
+
+    private Expectation[] deserializeArray(String jsonExpectations, boolean allowEmpty, BiFunction<String, List<Expectation>, List<Expectation>> expectationModifier, @Nullable BiConsumer<String, String> invalidEntryHandler) {
         List<Expectation> expectations = new ArrayList<>();
         if (isBlank(jsonExpectations)) {
             throw new IllegalArgumentException("1 error:" + NEW_LINE + " - an expectation or expectation array is required but value was \"" + jsonExpectations + "\"");
@@ -241,16 +274,16 @@ public class ExpectationSerializer implements Serializer<Expectation> {
                             );
                         }
                     }
-                    if (jsonExpectationList.get(i).has("specUrlOrPayload")) {
-                        try {
+                    try {
+                        if (jsonExpectationList.get(i).has("specUrlOrPayload")) {
                             expectations.addAll(expectationModifier.apply(jsonExpectation, openAPIExpectationSerializer.deserializeToExpectations(jsonExpectation)));
-                        } catch (IllegalArgumentException iae) {
-                            validationErrorsList.add(iae.getMessage());
-                        }
-                    } else {
-                        try {
+                        } else {
                             expectations.addAll(expectationModifier.apply(jsonExpectation, Collections.singletonList(deserialize(jsonExpectation))));
-                        } catch (IllegalArgumentException iae) {
+                        }
+                    } catch (IllegalArgumentException iae) {
+                        if (invalidEntryHandler != null) {
+                            invalidEntryHandler.accept(describeEntry(jsonExpectationList.get(i), i, jsonExpectationList.size()), iae.getMessage());
+                        } else {
                             validationErrorsList.add(iae.getMessage());
                         }
                     }

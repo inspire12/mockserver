@@ -472,6 +472,7 @@ public class AsyncApiControlPlaneImpl implements AsyncApiControlPlane {
         if (request == null || !request.has("channel")) {
             throw new IllegalArgumentException("verification request must contain a 'channel' field");
         }
+        rejectUnknownFields(request);
 
         String channel = request.get("channel").asText();
         String payloadSubstring = textOrNull(request, "payloadSubstring");
@@ -512,6 +513,42 @@ public class AsyncApiControlPlaneImpl implements AsyncApiControlPlane {
         // Check count constraints
         return checkCount(channel, matchingCount, atLeast, atMost, exactly,
             payloadSubstring, payloadJsonPath, expectedValue);
+    }
+
+    private static final List<String> VERIFY_FIELDS = List.of("channel", "payloadSubstring", "payloadJsonPath", "expectedValue", "count");
+    private static final List<String> COUNT_FIELDS = List.of("atLeast", "atMost", "exactly");
+
+    /**
+     * A misplaced or misspelt field would otherwise be ignored, and the verification would quietly
+     * check the default "at least one message" instead of what the caller asked for.
+     */
+    private static void rejectUnknownFields(JsonNode request) {
+        for (Iterator<String> names = request.fieldNames(); names.hasNext(); ) {
+            String name = names.next();
+            if (COUNT_FIELDS.contains(name)) {
+                throw new IllegalArgumentException("'" + name + "' must be inside \"count\", e.g. {\"channel\":\"orders\",\"count\":{\"" + name + "\":1}}");
+            }
+            if (!VERIFY_FIELDS.contains(name)) {
+                throw new IllegalArgumentException("unknown field '" + name + "' in verification request; valid fields are " + VERIFY_FIELDS);
+            }
+        }
+        JsonNode count = request.get("count");
+        if (count == null || count.isNull()) {
+            return;
+        }
+        if (!count.isObject()) {
+            throw new IllegalArgumentException("\"count\" must be an object with atLeast, atMost or exactly");
+        }
+        for (Iterator<String> names = count.fieldNames(); names.hasNext(); ) {
+            String name = names.next();
+            if (!COUNT_FIELDS.contains(name)) {
+                throw new IllegalArgumentException("unknown field '" + name + "' in \"count\"; valid fields are " + COUNT_FIELDS);
+            }
+            JsonNode value = count.get(name);
+            if (!value.isIntegralNumber() || !value.canConvertToInt() || value.asInt() < 0) {
+                throw new IllegalArgumentException("\"count\"." + name + " must be a whole number of at least 0");
+            }
+        }
     }
 
     private boolean matchesPayloadCriteria(RecordedMessage msg, String payloadSubstring,

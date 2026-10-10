@@ -119,16 +119,21 @@ export default function AsyncApiPanel({ connectionParams }: AsyncApiPanelProps) 
     );
   }, [recordedMessages, filterText]);
 
+  // A loaded spec is not a broker connection: only a publisher or subscriber
+  // means MockServer is actually attached to a broker.
+  const brokerAttached = (status?.publishers ?? 0) + (status?.subscribers ?? 0) > 0;
   const connectionColor: 'success' | 'warning' | 'error' | 'default' = unavailable
     ? 'error'
-    : status?.loaded
+    : status?.loaded && brokerAttached
       ? 'success'
       : 'default';
 
   const connectionLabel = unavailable
     ? 'unavailable'
     : status?.loaded
-      ? 'connected'
+      ? brokerAttached
+        ? 'broker connected'
+        : 'spec loaded, no broker'
       : 'no spec loaded';
 
   return (
@@ -148,7 +153,7 @@ export default function AsyncApiPanel({ connectionParams }: AsyncApiPanelProps) 
         {status?.loaded && status.specTitle && (
           <Chip
             size="small"
-            label={`${status.specTitle} (v${status.specVersion ?? '?'})`}
+            label={status.specVersion ? `${status.specTitle} · AsyncAPI ${status.specVersion}` : status.specTitle}
             variant="outlined"
           />
         )}

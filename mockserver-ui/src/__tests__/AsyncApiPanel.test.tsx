@@ -121,7 +121,7 @@ describe('AsyncApiPanel', () => {
     });
   });
 
-  it('shows connected chip when spec is loaded', async () => {
+  function stubStatus(publishers: number, subscribers: number) {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
@@ -129,21 +129,41 @@ describe('AsyncApiPanel', () => {
         status: 200,
         json: async () => ({
           loaded: true,
-          specTitle: 'API',
-          specVersion: '2.0.0',
+          specTitle: 'Orders',
+          specVersion: '3.0.0',
           channels: [],
-          publishers: 0,
-          subscribers: 0,
+          publishers,
+          subscribers,
           recordedMessages: [],
         }),
       }),
     );
+  }
 
+  it('says a spec is loaded, not "connected", when no broker is attached', async () => {
+    stubStatus(0, 0);
     render(<AsyncApiPanel connectionParams={params} />);
-
     await waitFor(() => {
-      expect(screen.getByText('connected')).toBeInTheDocument();
+      expect(screen.getByText('spec loaded, no broker')).toBeInTheDocument();
     });
+    expect(screen.queryByText(/connected/)).not.toBeInTheDocument();
+  });
+
+  it('says the broker is connected once a publisher or subscriber is attached', async () => {
+    stubStatus(0, 1);
+    render(<AsyncApiPanel connectionParams={params} />);
+    await waitFor(() => {
+      expect(screen.getByText('broker connected')).toBeInTheDocument();
+    });
+  });
+
+  it('labels the spec version as the AsyncAPI document version, not the API version', async () => {
+    stubStatus(0, 0);
+    render(<AsyncApiPanel connectionParams={params} />);
+    await waitFor(() => {
+      expect(screen.getByText('Orders · AsyncAPI 3.0.0')).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/\(v3\.0\.0\)/)).not.toBeInTheDocument();
   });
 
   it('shows error alert when fetch fails', async () => {

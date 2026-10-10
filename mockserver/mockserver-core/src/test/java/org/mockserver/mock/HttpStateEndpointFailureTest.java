@@ -1,5 +1,7 @@
 package org.mockserver.mock;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.After;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -274,6 +276,12 @@ public class HttpStateEndpointFailureTest {
             assertThat(response.getStatusCode(), is(400));
             assertThat(response.getBodyAsString(), containsString(testCase.clientErrorFragment));
             assertThat(response.getBodyAsString(), not(containsString(UNEXPECTED_FAILURE_MESSAGE)));
+            String contentType = response.getBody() != null ? response.getBody().getContentType() : null;
+            if (contentType != null && contentType.contains("json")) {
+                // an exception message carries newlines and quotes; a hand-built body left them raw
+                JsonNode body = new ObjectMapper().readTree(response.getBodyAsString());
+                assertThat("the error body is a JSON object", body.isObject(), is(true));
+            }
         }
     }
 

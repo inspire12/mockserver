@@ -188,7 +188,7 @@ sitemap:
 
 <h2>Get Started</h2>
 
-<p>The <strong>Get Started</strong> view is the first screen you see when no expectations or traffic have been recorded yet. It presents five action cards covering the key things MockServer does — open any one to jump straight in, or use the navigation tabs above for the full feature set:</p>
+<p>The <strong>Get Started</strong> view is the first screen you see. It presents six action cards covering the key things MockServer does — open any one to jump straight in, or use the navigation tabs above for the full feature set:</p>
 
 <img class="ui_image" src="/images/MockServerGetStarted.png" alt="MockServer Get Started">
 
@@ -198,9 +198,9 @@ sitemap:
     </thead>
     <tbody>
         <tr>
-            <td><strong>Breakpoints</strong></td>
-            <td>Pause requests and responses mid-flight — proxied, mocked, or unmatched — then inspect, edit, continue, or abort them.</td>
-            <td>Opens the <a href="#ui_breakpoints_section">Breakpoints</a> view</td>
+            <td><strong>Mocking</strong></td>
+            <td>Build mock responses by hand, or import an OpenAPI / Swagger spec, Postman collection, WSDL, or HAR file to generate stubs automatically.</td>
+            <td><strong>Create Mock</strong> opens the <a href="#ui_composer_section">Mocks</a> view; <strong>Import OpenAPI</strong> opens the OpenAPI <a href="#ui_import_section">import</a> dialog</td>
         </tr>
         <tr>
             <td><strong>Debugging Proxy</strong></td>
@@ -208,26 +208,31 @@ sitemap:
             <td>Opens the <a href="#ui_traffic_section">Traffic</a> view</td>
         </tr>
         <tr>
-            <td><strong>LLM / AI Debugging</strong></td>
-            <td>Mock LLM providers like OpenAI and Anthropic, and inspect agent runs — conversations, tool calls, tokens, and cost — grouped by session.</td>
-            <td>Opens the <a href="#ui_sessions_section">Trace</a> view</td>
-        </tr>
-        <tr>
-            <td><strong>Mocking</strong></td>
-            <td>Build mock responses by hand, or import an OpenAPI / Swagger spec, Postman collection, WSDL, or HAR file to generate stubs automatically.</td>
-            <td>Opens the OpenAPI <a href="#ui_import_section">import</a> dialog</td>
+            <td><strong>Breakpoints</strong></td>
+            <td>Pause requests and responses mid-flight — proxied, mocked, or unmatched — then inspect, edit, continue, or abort them.</td>
+            <td>Opens the <a href="#ui_breakpoints_section">Breakpoints</a> view</td>
         </tr>
         <tr>
             <td><strong>Chaos Testing</strong></td>
             <td>Inject latency, errors, and dropped connections to test how your system copes when the APIs it depends on misbehave.</td>
             <td>Opens the <a href="#ui_chaos_section">Chaos</a> view</td>
         </tr>
+        <tr>
+            <td><strong>Performance Testing</strong></td>
+            <td>Drive load at a chosen arrival rate against any target, ramp it up and down, and watch live throughput and latency.</td>
+            <td>Opens the <a href="#ui_performance_section">Performance</a> view</td>
+        </tr>
+        <tr>
+            <td><strong>LLM Optimise</strong></td>
+            <td>Capture LLM traffic through the proxy, then analyse it to optimise prompts, inference cost, safety, and speed.</td>
+            <td>Opens the <a href="#ui_optimise_section">LLM Optimise</a> view</td>
+        </tr>
     </tbody>
 </table>
 
-<p>Below the cards, a <strong>More in the tabs above</strong> list links to the remaining views — <a href="#ui_dashboard_section">Dashboard</a> (active mocks &amp; live event log), <a href="#ui_library_section">Library</a> (import / export, Postman, WSDL, HAR), <a href="#ui_verification_section">Verify</a> (assert which requests were received), <a href="#ui_drift_section">Drift</a> (spot when an upstream API changes), <a href="#ui_async_section">Async</a> (Kafka / MQTT / AMQP broker mocking), <a href="#ui_performance_section">Performance</a> (load scenarios and live metrics graphs), and <a href="#ui_metrics_section">Metrics</a> (Prometheus stats).</p>
+<p>Below the cards, a <strong>More in the tabs above</strong> list links to the remaining views — <a href="#ui_dashboard_section">Dashboard</a> (active mocks &amp; live event log), <a href="#ui_library_section">Library</a> (import / export, Postman, WSDL, HAR), <a href="#ui_verification_section">Verification</a> (assert which requests were received), <a href="#ui_drift_section">Drift</a> (spot when an upstream API changes), <a href="#ui_async_section">Async</a> (Kafka / MQTT / AMQP broker mocking), and <a href="#ui_metrics_section">Metrics</a> (Prometheus stats).</p>
 
-<p>When the first expectation or traffic record arrives, MockServer automatically navigates to the Dashboard view. The Get Started view remains accessible at any time via the <strong>Get Started</strong> button (rocket icon) in the navigation bar.</p>
+<p>MockServer never moves you away from Get Started on its own. When the server already has mocks or recorded requests, a banner says so (for example "This server has 3 active mocks") with an <strong>Open Dashboard</strong> button. The Get Started view stays available at any time from the navigation bar.</p>
 
 <a id="ui_dashboard_section" class="anchor" href="#ui_dashboard_section">&nbsp;</a>
 
@@ -475,7 +480,11 @@ sitemap:
 
 <h2>Mocks</h2>
 
-<p>The Mocks view lets you create or edit mock expectations without writing any code. Open it using the <strong>Mocks</strong> button in the navigation bar.</p>
+<p>The Mocks view lets you create or edit mock expectations without writing any code. Open it using the <strong>Mocks</strong> button in the navigation bar. It has two tabs: <strong>Compose</strong>, for building mocks, and <strong>Scenarios</strong>, for the state machines your mocks step through.</p>
+
+<p>A <strong>Quick mock</strong> / <strong>Advanced</strong> switch at the top picks how much of the form you see. <strong>Quick mock</strong> covers the most common case — a method and path, and a response status code, content type and body — on one short form. <strong>Advanced</strong> shows every option described below. Switching keeps what you have typed. The status code must be a whole number from 100 to 999; until it is, the register button stays disabled and says why.</p>
+
+<p>Code editors in the form (such as the response body) behave like any other field for the keyboard: <strong>Tab</strong> and <strong>Shift+Tab</strong> move to the next or previous field, and screen readers announce the editor by the field's name. To type a Tab character inside an editor instead, press <strong>Ctrl+M</strong> (<strong>Ctrl+Shift+M</strong> on macOS) while it has focus; press it again to make Tab move between fields once more.</p>
 
 <img class="ui_image" src="/images/MockServerComposer.png" alt="MockServer Composer">
 
@@ -492,7 +501,7 @@ sitemap:
 
 <h3>Standard HTTP Expectation</h3>
 
-<p>The <strong>Edit existing or add new</strong> dropdown lists every active non-LLM expectation. Picking one prefills all fields so you can edit it in place; the Reset button clears the selection to start fresh.</p>
+<p>In Advanced mode, the <strong>Existing HTTP mocks</strong> list shows the active expectations of the selected kind. Click one to prefill every field and edit it in place; while you edit, a before-and-after view shows exactly what will change. <strong>New / clear</strong> drops the selection and empties the form. A search box filters the list by path or id. The dashboard keeps a limited number of expectations live (the same window as the Dashboard's Active Expectations); when the server holds more, the list says how many are shown out of the total, and searching looks through every expectation on the server so you can still find and edit any of them.</p>
 <p>Saving an edited mock changes only the fields you edited. Fields this form cannot edit (for example a per-message delay, or <code>primary</code>) are listed under <strong>Other fields</strong> below the action and are saved as shown; use a field's remove button to drop it. The code tabs include these fields, so the code you copy registers the same mock. Where a language's client library has no place for a field, the snippet names that field in a <code>NOTE</code> comment instead of leaving it out silently; the JSON and curl tabs always carry every field.</p>
 <p>WebSocket messages and responses, WebSocket frame matchers, SSE events and gRPC stream messages are edited one per row, with buttons to move a row up or down or remove it. A row keeps its own other fields (such as a per-message delay) when you edit, move or remove other rows; a row you add starts with none. A message can span several lines; to add several messages at once, paste them one per line into an empty row (a pasted JSON value, such as pretty-printed JSON, stays one message), or use a row's <strong>Split</strong> button.</p>
 
@@ -500,14 +509,14 @@ sitemap:
 
 <ol>
     <li><strong>Match a request</strong> — Expectation ID (optional — used to update an existing expectation), Method, Path, Headers, Query string parameters, Cookies, Path parameters, Body matcher, "Body is binary (base64)" toggle, HTTPS-only toggle, Priority (higher wins when multiple expectations match), Times (how many times the expectation can be used; 0 means unlimited). Prefix any string field or any entry line with <code>!</code> to negate it — for example, <code>!GET</code> matches any method except GET.</li>
-    <li><strong>Respond with</strong> — choose a response action: Static HTTP response, Forward to upstream, Forward with override, Class callback, Response template, or Error / fault injection.</li>
+    <li><strong>Respond with</strong> — choose one of twelve response actions: Static HTTP response, Forward to upstream, Forward with override, Forward with fallback, Class callback, Response template, Error / fault injection, WebSocket response, SSE response, Binary response, Forward template, or Forward class callback.</li>
     <li><strong>Action details</strong> — fields specific to the chosen action (status code and body for a static response; host and port for forwarding; template text for a template response; etc.).</li>
-    <li><strong>Review &amp; register</strong> — a read-only preview of the generated expectation in Java, JSON, or curl format. Click <strong>Register expectation</strong> to activate it on the server. If the Expectation ID field is filled, this updates the existing expectation in place.</li>
+    <li><strong>Review &amp; register</strong> — a read-only preview of the generated expectation as code, in nine tabs: Java, Node.js, Python, Go, C#, Ruby, Rust, JSON and curl. <strong>Test Matcher</strong> checks whether a sample request would match, and <strong>Try It</strong> sends a real request to the server. Click <strong>Register expectation</strong> to activate it on the server. If the Expectation ID field is filled, this updates the existing expectation in place.</li>
 </ol>
 
 <h3>LLM Conversation</h3>
 
-<p>The <strong>Edit existing or add new</strong> dropdown lists active scripted LLM conversation scenarios by name (for example, <code>weather-agent (2 turns)</code>). Picking one prefills the form with the existing scenario's configuration.</p>
+<p>The <strong>Existing LLM scenarios</strong> list shows active scripted LLM conversation scenarios by name (for example, <code>weather-agent (2 turns)</code>). Clicking one prefills the form with the existing scenario's configuration.</p>
 
 <p>The form is split into three steps:</p>
 
@@ -731,7 +740,7 @@ sitemap:
 
 <img class="ui_image" src="/images/MockServerAsyncAPI.png" alt="MockServer AsyncAPI Broker Mock">
 
-<p>At the top a status chip shows whether a spec is loaded (and its title and version). The view then shows:</p>
+<p>At the top a status chip shows <em>no spec loaded</em>, <em>spec loaded, no broker</em> (a spec is loaded but MockServer has no publisher or subscriber attached to a broker), or <em>broker connected</em>. A second chip shows the spec's title and its AsyncAPI document version (for example <em>Orders · AsyncAPI 3.0.0</em>). The view then shows:</p>
 
 <ul>
     <li><strong>Channels</strong> — each channel (topic) defined by the loaded AsyncAPI spec, whether it has a message schema, and how many example messages it carries.</li>

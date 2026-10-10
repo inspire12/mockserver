@@ -10,7 +10,9 @@
       "$ref": "#/definitions/keyToMultiValue"
     },
     "statusCode": {
-      "type": "integer"
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 999
     },
     "events": {
       "type": "array",

@@ -695,6 +695,65 @@ public class ExpectationInitializerLoaderTest {
         );
     }
 
+    // --- an invalid entry in a JSON initializer file ---------------------------------------------
+
+    private static final String ONE_INVALID_OF_THREE = "[" +
+        " { \"id\" : \"good-one\", \"httpRequest\" : { \"path\" : \"/one\" }, \"httpResponse\" : { \"statusCode\" : 200 } }," +
+        " { \"id\" : \"bad-zero\", \"httpRequest\" : { \"path\" : \"/zero\" }, \"httpResponse\" : { \"statusCode\" : 0 } }," +
+        " { \"id\" : \"good-two\", \"httpRequest\" : { \"path\" : \"/two\" }, \"httpResponse\" : { \"statusCode\" : 201 } }" +
+        " ]";
+
+    private static File initializerFile(String json) throws Exception {
+        File file = File.createTempFile("mockserverOneInvalidEntry", ".json");
+        file.deleteOnExit();
+        Files.write(file.toPath(), json.getBytes(StandardCharsets.UTF_8));
+        return file;
+    }
+
+    @Test
+    public void shouldLoadTheValidExpectationsAndSkipAnInvalidOneWithAWarningNamingIt() throws Exception {
+        // given - a statusCode of 0, as the dashboard registered for a blank status code before 9.0.0
+        File file = initializerFile(ONE_INVALID_OF_THREE);
+        Configuration configuration = configuration().initializationJsonPath(file.getAbsolutePath());
+        java.util.List<org.mockserver.log.model.LogEntry> logged = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        MockServerLogger capturingLogger = new MockServerLogger(configuration().logLevel("INFO"), ExpectationInitializerLoaderTest.class) {
+            @Override
+            public void logEvent(org.mockserver.log.model.LogEntry logEntry) {
+                logged.add(logEntry);
+            }
+        };
+
+        // when
+        Expectation[] loaded = new ExpectationInitializerLoader(configuration, capturingLogger, mock(RequestMatchers.class)).loadExpectations();
+
+        // then - the other two load, and a WARN names the skipped one and why
+        assertThat(java.util.Arrays.stream(loaded).map(Expectation::getId).collect(java.util.stream.Collectors.toList()), is(java.util.Arrays.asList("good-one", "good-two")));
+        java.util.List<String> warnings = logged.stream()
+            .filter(entry -> entry.getLogLevel() == org.slf4j.event.Level.WARN)
+            .map(org.mockserver.log.model.LogEntry::getMessage)
+            .collect(java.util.stream.Collectors.toList());
+        assertThat(String.valueOf(warnings), warnings.stream().anyMatch(message -> message.contains("skipping an invalid expectation")
+            && message.contains("expectation 2 of 3 (id \"bad-zero\") for path \"/zero\"")
+            && message.contains(file.getAbsolutePath())
+            && message.contains("$.httpResponse.statusCode: must have a minimum value of 100")), is(true));
+    }
+
+    @Test
+    public void shouldFailStartupOnAnInvalidEntryWhenFailOnInitializationErrorEnabled() throws Exception {
+        // given - the flag asks for strictness, so a skipped entry still fails startup
+        File file = initializerFile(ONE_INVALID_OF_THREE);
+        Configuration configuration = configuration()
+            .initializationJsonPath(file.getAbsolutePath())
+            .failOnInitializationError(true);
+
+        // when / then
+        ExpectationInitializerException exception = org.junit.Assert.assertThrows(
+            ExpectationInitializerException.class,
+            () -> new ExpectationInitializerLoader(configuration, new MockServerLogger(configuration, ExpectationInitializerLoaderTest.class), mock(RequestMatchers.class))
+        );
+        assertThat(exception.getCause().getMessage(), is("skipped 1 invalid expectation(s): expectation 2 of 3 (id \"bad-zero\") for path \"/zero\""));
+    }
+
     @Test
     public void shouldFailFastWhenOpenAPIInitializerIsInvalidAndFailOnInitializationErrorEnabled() throws Exception {
         // given - an OpenAPI file that fails to parse

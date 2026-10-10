@@ -68,6 +68,8 @@ public class ExpectationFileSystemPersistence implements MockServerMatcherListen
     private final boolean initializationPathMatchesPersistencePath;
     private final BlobStore blobStore;
     private final java.util.concurrent.locks.ReentrantLock writeOrderLock = new java.util.concurrent.locks.ReentrantLock();
+    private final AtomicBoolean unloadableEntriesChecked = new AtomicBoolean(false);
+    private volatile byte[] restoredDocumentWithSkippedEntries;
 
     /**
      * Creates persistence backed by the given {@link BlobStore}. The blob key is
@@ -172,7 +174,9 @@ public class ExpectationFileSystemPersistence implements MockServerMatcherListen
                         );
                     }
                     byte[] data = serialize(expectations).getBytes(UTF_8);
-                    blobStore.put(blobKey, data, Collections.emptyMap());
+                    if (backUpUnloadableEntriesOnce()) {
+                        blobStore.put(blobKey, data, Collections.emptyMap());
+                    }
                 } catch (Throwable throwable) {
                     mockServerLogger.logEvent(
                         new LogEntry()
@@ -185,6 +189,61 @@ public class ExpectationFileSystemPersistence implements MockServerMatcherListen
                 writeOrderLock.unlock();
             }
         }
+    }
+
+    /**
+     * The first write replaces the document the expectations were loaded from. When that document holds
+     * expectations that could not be loaded (skipped as invalid, or the whole document unparseable), they
+     * would vanish from it, so the original is first copied, once, to
+     * {@code <persisted file>.invalid-entries-<timestamp>.bak} and a WARN names the copy.
+     *
+     * @return false when the copy failed: the caller must then not overwrite the original; the copy is
+     * tried again on the next save
+     */
+    private boolean backUpUnloadableEntriesOnce() {
+        if (!unloadableEntriesChecked.compareAndSet(false, true)) {
+            return true;
+        }
+        byte[] original = restoredDocumentWithSkippedEntries;
+        String backupKey = null;
+        try {
+            if (original == null && blobStore instanceof FilesystemBlobStore && initializationPathMatchesPersistencePath) {
+                Optional<Blob> current = blobStore.get(blobKey);
+                if (current.isPresent() && holdsUnloadableExpectations(new String(current.get().getData(), UTF_8))) {
+                    original = current.get().getData();
+                }
+            }
+            if (original == null) {
+                return true;
+            }
+            backupKey = blobKey + ".invalid-entries-" + java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")) + ".bak";
+            blobStore.put(backupKey, original, Collections.emptyMap());
+            restoredDocumentWithSkippedEntries = null;
+            logEvent(WARN, "persisted expectations " + blobKey + " held expectations that could not be loaded, which saving would remove;"
+                + " the original was copied to " + backupKey + " - fix them there and copy them back", null);
+            return true;
+        } catch (Throwable throwable) {
+            // keep the original: invalid entries must never be lost because their copy could not be written
+            restoredDocumentWithSkippedEntries = original;
+            unloadableEntriesChecked.set(false);
+            logEvent(Level.ERROR, "exception copying persisted expectations " + blobKey + " that hold expectations that could not be loaded to "
+                + (backupKey != null ? backupKey : blobKey + ".invalid-entries-<timestamp>.bak")
+                + "; not saving over the original, the copy is tried again on the next save", throwable);
+            return false;
+        }
+    }
+
+    private boolean holdsUnloadableExpectations(String json) {
+        if (!isNotBlank(json)) {
+            return false;
+        }
+        AtomicBoolean skipped = new AtomicBoolean(false);
+        try {
+            new ExpectationSerializer(mockServerLogger != null ? mockServerLogger : new MockServerLogger(ExpectationFileSystemPersistence.class), configuration).deserializeArrayDroppingInvalidEntries(json, (entry, deserialised) -> deserialised, (entry, errors) -> skipped.set(true));
+        } catch (IllegalArgumentException unparseable) {
+            return true;
+        }
+        return skipped.get();
     }
 
     /**
@@ -273,7 +332,17 @@ public class ExpectationFileSystemPersistence implements MockServerMatcherListen
                 logEvent(INFO, "persisted expectations blob at key " + blobKey + " is empty - nothing to restore", null);
                 return;
             }
-            Expectation[] expectations = new ExpectationSerializer(mockServerLogger, configuration).deserializeArray(json, true);
+            // an invalid entry is skipped with a WARN naming it, rather than costing the whole restore
+            AtomicBoolean skipped = new AtomicBoolean(false);
+            Expectation[] expectations = new ExpectationSerializer(mockServerLogger, configuration).deserializeArrayDroppingInvalidEntries(json, (entry, deserialised) -> deserialised,
+                (entry, errors) -> {
+                    skipped.set(true);
+                    logEvent(WARN, "skipping invalid " + entry + " in persisted expectations at blob store key " + blobKey
+                        + "; the other expectations are restored; it failed validation with: " + errors, null);
+                });
+            if (skipped.get()) {
+                restoredDocumentWithSkippedEntries = blob.get().getData();
+            }
             if (expectations == null || expectations.length == 0) {
                 logEvent(INFO, "persisted expectations blob at key " + blobKey + " contained no expectations - nothing to restore", null);
                 return;

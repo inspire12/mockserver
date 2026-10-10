@@ -220,10 +220,11 @@ public class ExpectationInitializerLoader {
                     // expectation, so a List.contains() would be O(n) per item and O(n^2) over the
                     // file — a latent cost that grows with large initializer fixtures.
                     Set<String> expectationIds = new HashSet<>();
+                    List<String> skippedEntries = new ArrayList<>();
                     try {
                         String jsonExpectations = FileReader.readFileFromClassPathOrPath(initializationJsonPath);
                         if (isNotBlank(jsonExpectations)) {
-                            expectations = expectationSerializer.deserializeArray(jsonExpectations, true, (expectationString, deserialisedExpectations) -> {
+                            expectations = expectationSerializer.deserializeArrayDroppingInvalidEntries(jsonExpectations, (expectationString, deserialisedExpectations) -> {
                                 for (int i = 0; i < deserialisedExpectations.size(); i++) {
                                     int counter = 0;
                                     String expectationId;
@@ -234,7 +235,22 @@ public class ExpectationInitializerLoader {
                                     deserialisedExpectations.get(i).withIdIfNull(expectationId);
                                 }
                                 return deserialisedExpectations;
+                            }, (entry, errors) -> {
+                                // one invalid entry is skipped, not the whole file
+                                skippedEntries.add(entry);
+                                if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(WARN)) {
+                                    mockServerLogger.logEvent(
+                                        new LogEntry()
+                                            .setType(SERVER_CONFIGURATION)
+                                            .setLogLevel(WARN)
+                                            .setMessageFormat("skipping an invalid expectation in JSON initialization file:{}which is:{}the other expectations in the file are loaded; it failed validation with:{}")
+                                            .setArguments(initializationJsonPath, entry, errors)
+                                    );
+                                }
                             });
+                        }
+                        if (!skippedEntries.isEmpty() && configuration.failOnInitializationError()) {
+                            throw new IllegalArgumentException("skipped " + skippedEntries.size() + " invalid expectation(s): " + String.join(", ", skippedEntries));
                         }
                     } catch (Throwable throwable) {
                         if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(WARN)) {

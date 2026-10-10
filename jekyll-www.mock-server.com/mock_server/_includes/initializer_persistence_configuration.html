@@ -94,6 +94,7 @@
 <div class="panel title">
     <p>If enabled a failure to load any expectation initializer (a malformed initialization JSON or OpenAPI file, or a broken initialization class) will fail server startup with an exception, instead of logging a warning and continuing with zero expectations from that source.</p>
     <p>By default (<span class="this_value">false</span>) a broken initializer is logged once at WARN and MockServer still starts — which can silently leave you with missing mocks in CI or Kubernetes. Enable this when a half-initialized server is worse than a crash, so the failure is loud and visible.</p>
+    <p>An invalid expectation inside an otherwise valid initialization JSON file (for example a <span class="keyword">statusCode</span> outside 100 to 999) is skipped with a WARN that names it — its position, id and path — and the rest of the file still loads. With this setting enabled, any skipped expectation also fails startup.</p>
     <p>For slow (but valid) initializers, use the readiness probe at <span class="keyword">GET /mockserver/ready</span> instead, which returns 503 until initialization completes and 200 thereafter.</p>
     <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
     <p>Java Code:</p>
@@ -111,6 +112,7 @@
 <button id="button_configuration_persist_expectations_as_json" class="accordion title"><strong>Persist Expectations As JSON</strong></button>
 <div class="panel title">
     <p>Enable the persisting of expectations as json, which is updated whenever the expectation state is updated (i.e. add, clear, expires, etc)</p>
+    <p>When the persisted file is also the file the expectations are loaded from (<span class="keyword">initializationJsonPath</span> set to the same path, or a cloud blob store restoring it), an expectation in it that could not be loaded would disappear the first time MockServer saves. So before that first save MockServer copies the original file, once, to <span class="keyword">&lt;file&gt;.invalid-entries-&lt;timestamp&gt;.bak</span> next to it and logs a WARN naming the copy; fix the expectations there and copy them back. If the copy cannot be written, MockServer logs an error and does not save over the file, and tries the copy again on the next save.</p>
     <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.persistExpectations(boolean persistExpectations)</code></pre>

@@ -15,6 +15,7 @@ import org.slf4j.event.Level;
 import static org.apache.commons.lang3.StringUtils.isEmpty;
 import static org.apache.commons.lang3.StringUtils.uncapitalize;
 import static org.mockserver.log.model.LogEntry.LogMessageType.TEMPLATE_GENERATION_FAILED;
+import static org.mockserver.character.Character.NEW_LINE;
 import static org.mockserver.validator.jsonschema.JsonSchemaHttpRequestValidator.jsonSchemaHttpRequestValidator;
 import static org.mockserver.validator.jsonschema.JsonSchemaHttpResponseValidator.jsonSchemaHttpResponseValidator;
 
@@ -46,6 +47,9 @@ public class HttpTemplateOutputDeserializer {
             if (isEmpty(validationErrors)) {
                 result = objectMapper.readValue(json, dtoClass).buildObject();
             } else {
+                if (validationErrors.contains("statusCode: must have a")) {
+                    validationErrors += NEW_LINE + NEW_LINE + "the template rendered a statusCode outside 100 to 999; an HTTP status line carries a three-digit code, so the rendered response was not used";
+                }
                 // The template rendered output that is not a valid HttpResponse/HttpRequest. Classify this
                 // as TEMPLATE_GENERATION_FAILED (not a generic ERROR) and carry both the validation errors
                 // and the offending rendered output, correlated to the request. Returning null makes the

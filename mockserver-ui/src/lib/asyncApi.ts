@@ -113,5 +113,15 @@ export async function verifyAsyncApi(params: ConnectionParams, body: string): Pr
   if (res.status === 501) throw await unavailableError(res);
   if (res.status === 202) return { verified: true, message: '' };
   if (res.status === 406) return { verified: false, message: await res.text() };
-  throw new Error((await res.text()) || `HTTP ${res.status} ${res.statusText}`);
+  // a 400 carries {"error": "..."}; show the reason, not the JSON envelope
+  const text = await res.text();
+  let message = text;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    const err = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>).error : undefined;
+    if (typeof err === 'string') message = err;
+  } catch {
+    // not JSON — show the body as it is
+  }
+  throw new Error(message || `HTTP ${res.status} ${res.statusText}`);
 }

@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
@@ -210,6 +211,111 @@ public class ExpectationBlobStoreRestoreTest {
             // persistedExpectationsPath, so a differently-named path silently misses
             assertThat("a key miss must be reported, with the key it looked for",
                 capturingLogger.messagesContaining("no persisted expectations found in blob store under key " + blobKeyFor(persistedExpectationsPath)), is(not(empty())));
+        } finally {
+            if (persistence != null) {
+                persistence.stop();
+            }
+        }
+    }
+
+    @Test
+    public void shouldRestoreTheValidExpectationsAndSkipAnInvalidOneWithAWarningNamingIt() throws Exception {
+        String persistedExpectationsPath = temporaryPersistedExpectationsPath("restoreOneInvalid");
+        InMemoryBlobStore blobStore = new InMemoryBlobStore();
+        // a statusCode of 0, as the dashboard registered for a blank status code before 9.0.0
+        String json = "[" +
+            " { \"id\" : \"good-one\", \"httpRequest\" : { \"path\" : \"/one\" }, \"httpResponse\" : { \"statusCode\" : 200 } }," +
+            " { \"id\" : \"bad-zero\", \"httpRequest\" : { \"path\" : \"/zero\" }, \"httpResponse\" : { \"statusCode\" : 0 } }," +
+            " { \"id\" : \"good-two\", \"httpRequest\" : { \"path\" : \"/two\" }, \"httpResponse\" : { \"statusCode\" : 201 } }" +
+            " ]";
+        blobStore.put(blobKeyFor(persistedExpectationsPath), json.getBytes(StandardCharsets.UTF_8), Collections.emptyMap());
+
+        CapturingMockServerLogger capturingLogger = new CapturingMockServerLogger();
+        ExpectationFileSystemPersistence persistence = null;
+        try {
+            persistence = new ExpectationFileSystemPersistence(persistenceConfiguration(persistedExpectationsPath), capturingLogger, requestMatchers, blobStore);
+
+            assertThat(activeExpectationIds(), contains("good-one", "good-two"));
+            assertThat(capturingLogger.messagesContaining("skipping invalid expectation 2 of 3 (id \"bad-zero\") for path \"/zero\""), is(not(empty())));
+            assertThat(capturingLogger.messagesContaining("$.httpResponse.statusCode: must have a minimum value of 100"), is(not(empty())));
+
+            // and - the first save, which drops the skipped entry, first copies the restored document once
+            requestMatchers.add(new Expectation(org.mockserver.model.HttpRequest.request().withPath("/added")).withId("added"), org.mockserver.mock.listeners.MockServerMatcherNotifier.Cause.API);
+            String backupPrefix = blobKeyFor(persistedExpectationsPath) + ".invalid-entries-";
+            long deadline = System.currentTimeMillis() + 20_000;
+            while (blobStore.list(backupPrefix).isEmpty() || !new String(blobStore.get(blobKeyFor(persistedExpectationsPath)).get().getData(), StandardCharsets.UTF_8).contains("added")) {
+                if (System.currentTimeMillis() > deadline) {
+                    throw new AssertionError("timed out waiting for the save and its backup: " + blobStore.list(""));
+                }
+                Thread.sleep(50);
+            }
+            List<String> backups = blobStore.list(backupPrefix);
+            assertThat(backups.size(), is(1));
+            assertThat(new String(blobStore.get(backups.get(0)).get().getData(), StandardCharsets.UTF_8), is(json));
+            assertThat(capturingLogger.messagesContaining("the original was copied to " + backups.get(0)), is(not(empty())));
+        } finally {
+            if (persistence != null) {
+                persistence.stop();
+            }
+        }
+    }
+
+    @Test
+    public void shouldNotSaveOverTheOriginalWhenItsBackupCannotBeWrittenAndRetryOnTheNextSave() throws Exception {
+        String persistedExpectationsPath = temporaryPersistedExpectationsPath("restoreBackupFails");
+        AtomicBoolean failBackups = new AtomicBoolean(true);
+        InMemoryBlobStore blobStore = new InMemoryBlobStore() {
+            @Override
+            public void put(String key, byte[] data, java.util.Map<String, String> metadata) {
+                if (key.contains(".invalid-entries-") && failBackups.get()) {
+                    throw new IllegalStateException("backup bucket refused the write");
+                }
+                super.put(key, data, metadata);
+            }
+        };
+        String key = blobKeyFor(persistedExpectationsPath);
+        String json = "[" +
+            " { \"id\" : \"good-one\", \"httpRequest\" : { \"path\" : \"/one\" }, \"httpResponse\" : { \"statusCode\" : 200 } }," +
+            " { \"id\" : \"bad-zero\", \"httpRequest\" : { \"path\" : \"/zero\" }, \"httpResponse\" : { \"statusCode\" : 0 } }" +
+            " ]";
+        blobStore.put(key, json.getBytes(StandardCharsets.UTF_8), Collections.emptyMap());
+
+        CapturingMockServerLogger capturingLogger = new CapturingMockServerLogger();
+        ExpectationFileSystemPersistence persistence = null;
+        try {
+            persistence = new ExpectationFileSystemPersistence(persistenceConfiguration(persistedExpectationsPath), capturingLogger, requestMatchers, blobStore);
+            assertThat(activeExpectationIds(), contains("good-one"));
+
+            // when - a save while the backup cannot be written
+            requestMatchers.add(new Expectation(org.mockserver.model.HttpRequest.request().withPath("/added")).withId("added"), org.mockserver.mock.listeners.MockServerMatcherNotifier.Cause.API);
+            String refusal = "exception copying persisted expectations " + key + " that hold expectations that could not be loaded to " + key + ".invalid-entries-";
+            long deadline = System.currentTimeMillis() + 20_000;
+            while (capturingLogger.messagesContaining(refusal).isEmpty()) {
+                if (System.currentTimeMillis() > deadline) {
+                    throw new AssertionError("timed out waiting for the refused backup: " + capturingLogger.allMessages());
+                }
+                Thread.sleep(50);
+            }
+
+            // then - the original, with its invalid entry, is untouched, and the ERROR names both and the cause
+            assertThat(new String(blobStore.get(key).get().getData(), StandardCharsets.UTF_8), is(json));
+            assertThat(capturingLogger.messagesContainingAll(refusal, "not saving over the original", "backup bucket refused the write"), is(not(empty())));
+
+            // and when - the next save, once the backup can be written
+            failBackups.set(false);
+            requestMatchers.add(new Expectation(org.mockserver.model.HttpRequest.request().withPath("/added-again")).withId("added-again"), org.mockserver.mock.listeners.MockServerMatcherNotifier.Cause.API);
+            deadline = System.currentTimeMillis() + 20_000;
+            while (!new String(blobStore.get(key).get().getData(), StandardCharsets.UTF_8).contains("added-again")) {
+                if (System.currentTimeMillis() > deadline) {
+                    throw new AssertionError("timed out waiting for the retried save: " + capturingLogger.allMessages());
+                }
+                Thread.sleep(50);
+            }
+
+            // then - the backup is written first, holding the original
+            List<String> backups = blobStore.list(key + ".invalid-entries-");
+            assertThat(backups.size(), is(1));
+            assertThat(new String(blobStore.get(backups.get(0)).get().getData(), StandardCharsets.UTF_8), is(json));
         } finally {
             if (persistence != null) {
                 persistence.stop();
