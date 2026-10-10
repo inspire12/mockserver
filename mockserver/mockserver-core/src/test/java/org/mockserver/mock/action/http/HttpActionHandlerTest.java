@@ -690,6 +690,7 @@ public class HttpActionHandlerTest {
         actionHandler.processAction(request, mockResponseWriter, mockChannelHandlerContext, new HashSet<>(), false, true);
 
         // then
+        verify(mockResponseWriter).respondingDirectly(mockChannelHandlerContext);
         verify(mockHttpErrorActionHandler).handle(error, request, mockChannelHandlerContext);
         verify(mockServerLogger).logEvent(
             new LogEntry()
@@ -873,6 +874,43 @@ public class HttpActionHandlerTest {
                 && resp.getBodyAsString().contains("gRPC bidi streaming is not supported in WAR deployments")),
             eq(false)
         );
+    }
+
+    @Test
+    public void shouldAnnounceResponsesWrittenStraightToTheChannel() {
+        Expectation[] directlyWritten = {
+            new Expectation(request).thenRespondWithSse(HttpSseResponse.sseResponse().withEvent(SseEvent.sseEvent().withData("event"))),
+            new Expectation(request).thenRespondWithLlm(HttpLlmResponse.llmResponse().withProvider(Provider.OPENAI)
+                .withCompletion(Completion.completion().withText("streamed").withStreaming(true))),
+            new Expectation(request).thenRespondWithWebSocket(HttpWebSocketResponse.webSocketResponse()),
+            new Expectation(request).thenRespondWithGrpcStream(GrpcStreamResponse.grpcStreamResponse().withStatusName("OK"))
+        };
+        for (Expectation directExpectation : directlyWritten) {
+            // given
+            when(mockHttpStateHandler.firstMatchingExpectation(request)).thenReturn(directExpectation);
+            ResponseWriter responseWriter = mock(ResponseWriter.class);
+            ChannelHandlerContext ctx = mock(ChannelHandlerContext.class);
+
+            // when
+            actionHandler.processAction(request, responseWriter, ctx, new HashSet<>(), false, true);
+
+            // then - announced, so the writer can see the response end on a connection that stays open
+            verify(responseWriter, description(directExpectation.getAction().getType() + " is announced")).respondingDirectly(ctx);
+        }
+    }
+
+    @Test
+    public void shouldNotAnnounceResponsesWrittenThroughTheResponseWriter() {
+        // given
+        ResponseWriter responseWriter = mock(ResponseWriter.class);
+        ChannelHandlerContext ctx = mock(ChannelHandlerContext.class);
+
+        // when
+        actionHandler.processAction(request, responseWriter, ctx, new HashSet<>(), false, true);
+
+        // then
+        verify(responseWriter).writeResponse(request, this.response, false);
+        verify(responseWriter, never()).respondingDirectly(any());
     }
 
     @Test

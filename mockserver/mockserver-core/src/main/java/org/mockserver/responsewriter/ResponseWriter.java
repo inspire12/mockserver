@@ -1,5 +1,6 @@
 package org.mockserver.responsewriter;
 
+import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.cors.CORSHeaders;
@@ -132,6 +133,14 @@ public abstract class ResponseWriter {
     }
 
     public abstract void sendResponse(HttpRequest request, HttpResponse response);
+
+    /**
+     * Announces that this exchange's response is about to be written straight to {@code ctx} rather than
+     * through {@link #sendResponse}, as SSE, WebSocket, gRPC stream and raw-bytes error responses are, so a
+     * writer that tracks the exchange can watch the channel for the end of that response. Does nothing here.
+     */
+    public void respondingDirectly(ChannelHandlerContext ctx) {
+    }
 
     protected HttpResponse addConnectionHeader(final HttpRequest request, final HttpResponse response) {
         ConnectionOptions connectionOptions = response.getConnectionOptions();

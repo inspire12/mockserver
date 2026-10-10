@@ -3195,6 +3195,7 @@ mockserver.llmRequestTimeoutMillis=30000</code></pre>
 <button id="button_configuration_stop_drain_millis" class="accordion title"><strong>Graceful Shutdown Connection Drain</strong></button>
 <div class="panel title">
     <p>On shutdown (via <span class="inline_code">PUT /mockserver/stop</span> or <span class="inline_code">ClientAndServer.stop()</span>), MockServer stops accepting new connections and then waits up to this many milliseconds for in-flight requests that are already being processed to complete before tearing down the Netty event loops. If the timeout elapses before all in-flight requests finish, a <span class="inline_code">WARN</span> log entry is written with the number of requests still in progress, and shutdown proceeds anyway. Set to <span class="inline_code">0</span> to disable draining and stop immediately (the pre-7.2 behaviour).</p>
+    <p>A streamed response, such as server-sent events, counts as in flight until its last event has been written. A connection the client keeps open after its response, an open WebSocket session or an open CONNECT tunnel does not delay shutdown.</p>
     <p>Type: <span class="keyword">long</span> Default: <span class="this_value">15000</span></p>
     <p>Java Code:</p>
     <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.stopDrainMillis(long millis)</code></pre>

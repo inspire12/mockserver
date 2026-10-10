@@ -183,7 +183,7 @@ public class HttpActionHandler {
      * which case the relay takes over the channel; {@code false} otherwise so the caller falls back to normal HTTP
      * forwarding / matching. Only ever invoked with a live Netty {@code ctx} (never in WAR deployments).
      */
-    private boolean attemptWebSocketPassthrough(final HttpRequest request, final ChannelHandlerContext ctx,
+    private boolean attemptWebSocketPassthrough(final HttpRequest request, final ResponseWriter responseWriter, final ChannelHandlerContext ctx,
                                                 final String forwardHost, final Integer forwardPort, final Boolean forwardTls) {
         if (ctx == null || !WebSocketProxyRelayHandler.isWebSocketUpgrade(request)) {
             return false;
@@ -224,6 +224,7 @@ public class HttpActionHandler {
         if (isEmpty(host)) {
             return false;
         }
+        responseWriter.respondingDirectly(ctx);
         getWebSocketProxyRelayHandler().relay(request, ctx, host, port, tls);
         return true;
     }
@@ -400,7 +401,7 @@ public class HttpActionHandler {
             // relayed straight through to the real upstream server (101 handshake + bidirectional frame relay),
             // rather than being forwarded as a plain (broken) HTTP request. Falls back to normal forwarding when
             // the request is not a WS upgrade or no upstream address can be resolved.
-            if (attemptWebSocketPassthrough(request, ctx, null, null, null)) {
+            if (attemptWebSocketPassthrough(request, responseWriter, ctx, null, null, null)) {
                 return;
             }
             handleUnmatchedProxyForward(request, responseWriter, ctx, synchronous, potentiallyHttpProxy);
@@ -550,7 +551,7 @@ public class HttpActionHandler {
         // their normal handlers (documented boundary).
         if (action instanceof HttpForward && WebSocketProxyRelayHandler.isWebSocketUpgrade(request) && ctx != null) {
             HttpForward forward = (HttpForward) action;
-            if (attemptWebSocketPassthrough(request, ctx, forward.getHost(), forward.getPort(),
+            if (attemptWebSocketPassthrough(request, responseWriter, ctx, forward.getHost(), forward.getPort(),
                 forward.getScheme() == HttpForward.Scheme.HTTPS)) {
                 expectationPostProcessor.run();
                 return;
@@ -697,6 +698,7 @@ public class HttpActionHandler {
                                     .setMessageFormat("returning SSE response for request:{}for action:{}from expectation:{}")
                                     .setArguments(request, action, action.getExpectationId())
                             );
+                            responseWriter.respondingDirectly(ctx);
                             getHttpSseResponseActionHandler().handle((HttpSseResponse) action, ctx, request);
                         } catch (Throwable throwable) {
                             if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
@@ -776,6 +778,7 @@ public class HttpActionHandler {
                                     .withHeader("content-type", contentType)
                                     .withHeader("cache-control", "no-cache")
                                     .withEvents(sseEvents);
+                                responseWriter.respondingDirectly(ctx);
                                 getHttpSseResponseActionHandler().handle(sseResponse, ctx, request, streamingFormat);
                             } catch (Throwable throwable) {
                                 if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
@@ -856,6 +859,7 @@ public class HttpActionHandler {
                                     .setMessageFormat("returning WebSocket response for request:{}for action:{}from expectation:{}")
                                     .setArguments(request, action, action.getExpectationId())
                             );
+                            responseWriter.respondingDirectly(ctx);
                             getHttpWebSocketResponseActionHandler().handle((HttpWebSocketResponse) action, ctx, request);
                         } catch (Throwable throwable) {
                             if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
@@ -933,6 +937,7 @@ public class HttpActionHandler {
                                     .setMessageFormat("returning gRPC stream response for request:{}for action:{}from expectation:{}")
                                     .setArguments(request, action, action.getExpectationId())
                             );
+                            responseWriter.respondingDirectly(ctx);
                             getGrpcStreamResponseActionHandler().handle((GrpcStreamResponse) action, ctx, request);
                         } catch (Throwable throwable) {
                             if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
@@ -4062,6 +4067,7 @@ public class HttpActionHandler {
         if (httpError.getStreamError() != null && responseWriter instanceof StreamErrorWriter) {
             ((StreamErrorWriter) responseWriter).writeStreamError(httpError.getStreamError());
         } else {
+            responseWriter.respondingDirectly(ctx);
             getHttpErrorActionHandler().handle(httpError, request, ctx);
         }
         mockServerLogger.logEvent(

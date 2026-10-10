@@ -499,6 +499,8 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
                             .withStatusCode(PROXY_AUTHENTICATION_REQUIRED.code())
                             .withHeader(PROXY_AUTHENTICATE.toString(), "Basic realm=\"" + StringEscapeUtils.escapeJava(configuration.proxyAuthenticationRealm()) + "\", charset=\"UTF-8\"")
                             .withStreamId(request.getStreamId());
+                        // direct write, bypassing NettyResponseWriter, on a connection that stays open
+                        completeInFlight(inFlightRequest);
                         ctx.writeAndFlush(response);
                         if (mockServerLogger.isEnabledForInstance(Level.INFO)) {
                             mockServerLogger.logEvent(
@@ -534,6 +536,8 @@ public class HttpRequestHandler extends SimpleChannelInboundHandler<HttpRequest>
                         if (isNotBlank(connectHost)) {
                             server.getScheduler().submit(() -> configuration.addSubjectAlternativeName(connectHost));
                         }
+                        // the tunnel outlives this exchange, and each request through it is counted on its own
+                        completeInFlight(inFlightRequest);
                         ctx.pipeline().addLast(new HttpConnectHandler(configuration, server, mockServerLogger, connectHost, port));
                         ctx.pipeline().remove(this);
                         ctx.fireChannelRead(request);

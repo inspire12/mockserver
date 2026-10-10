@@ -818,6 +818,7 @@ This release delivers a sustained performance and memory programme alongside dat
   truncated body, and show it as base64, because a truncated body is kept as bytes.
 ### Fixed
 
+- **Stopping MockServer no longer waits out the whole shutdown drain after a server-sent events response on a connection the client keeps open.** A mocked SSE or streamed LLM response, a WebSocket mock, a raw-bytes `error()` response, a refused CONNECT and an open CONNECT tunnel each held the server's in-flight count until the connection closed, so `stop()` waited the full `stopDrainMillis` (15 seconds by default). Each now counts only until its response has been written, and a streamed response still being written is still waited for.
 - **Traffic rows can be opened from the keyboard.** Each row is now a button: Tab reaches the list, Enter or Space opens or closes the request, and the up and down arrow keys move between rows. Before, opening a request needed a mouse.
 - **The Request Filter header can be reached with Tab.** It is now a button that Enter or Space opens and closes, and it tells screen readers whether it is open; before, only Ctrl+Shift+F (Cmd+Shift+F) opened it from the keyboard.
 - **The Traffic header no longer shows a request count that stops at 100.** It counted the rows in the dashboard's live window, which holds at most 100 requests, so it read 100 however much traffic had run.

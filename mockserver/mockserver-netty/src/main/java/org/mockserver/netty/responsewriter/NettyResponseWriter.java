@@ -67,6 +67,13 @@ public class NettyResponseWriter extends ResponseWriter {
     }
 
     @Override
+    public void respondingDirectly(ChannelHandlerContext ctx) {
+        if (inFlightRequest != null) {
+            inFlightRequest.completeWhenResponseEnds(ctx);
+        }
+    }
+
+    @Override
     public void sendResponse(HttpRequest request, HttpResponse response) {
         if (startNanos >= 0) {
             double durationSeconds = (System.nanoTime() - startNanos) / 1_000_000_000.0;

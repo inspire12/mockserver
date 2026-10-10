@@ -119,7 +119,7 @@ A runtime change reaches enforcement only because every part of a server holds t
 | LLM metrics & budget | `llmMetricsEnabled`, `llmCostBudgetUsd`, `perExpectationMetricsEnabled` |
 | Recorded expectations | `deduplicateRecordedExpectations`, `redactSecretsInRecordedExpectations` |
 | Event log / dashboard | `redactSecretsInLog` |
-| Lifecycle | `stopDrainMillis` (maximum milliseconds the graceful shutdown waits for in-flight requests to drain before tearing down the event loops; default `15000`; `0` disables draining — the pre-7.2 stop-immediately behaviour; negative values are clamped to `0`. Also the default drain window a preemption simulation uses when `PUT /mockserver/preemption` omits `drainMillis`) |
+| Lifecycle | `stopDrainMillis` (maximum milliseconds the graceful shutdown waits for in-flight requests to drain before tearing down the event loops; default `15000`; `0` disables draining — the pre-7.2 stop-immediately behaviour; negative values are clamped to `0`. A request leaves the drain once its response has been written, including the responses action handlers write straight to the channel (SSE, streamed LLM, WebSocket handshake, gRPC stream, raw-bytes `error()`), which `ResponseWriter.respondingDirectly` hands to `InFlightRequest.completeWhenResponseEnds`; an open keep-alive connection, WebSocket session or CONNECT tunnel does not hold it. Also the default drain window a preemption simulation uses when `PUT /mockserver/preemption` omits `drainMillis`) |
 
 The example file documents the most commonly tuned properties (≈220 lines). For the complete list including newer subsystems, read `ConfigurationProperties.java` or the consumer reference page.
 

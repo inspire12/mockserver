@@ -1,10 +1,20 @@
 package org.mockserver.netty;
 
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelPromise;
+import io.netty.handler.codec.http.FullHttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpStatusClass;
+import io.netty.handler.codec.http.LastHttpContent;
+import org.mockserver.codec.StreamAddressedHttpContent;
 import org.mockserver.lifecycle.LifeCycle;
+import org.mockserver.responsewriter.HttpExchangeEndedEvent;
 
+import java.util.NoSuchElementException;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
 /**
@@ -16,9 +26,11 @@ import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
  * which is invoked from whichever of these fires first:</p>
  *
  * <ul>
- *   <li>the response funnel — {@code NettyResponseWriter.sendResponse(...)}, through which every
- *       data-plane response flows (normal, streaming, chunked, forward/proxy, error/exception,
+ *   <li>the response funnel — {@code NettyResponseWriter.sendResponse(...)}, through which most
+ *       data-plane responses flow (normal, streaming, chunked, forward/proxy, error/exception,
  *       breakpoint-modified); or</li>
+ *   <li>the end of a response an action handler writes straight to the channel (SSE, WebSocket, gRPC
+ *       stream, raw-bytes error), watched by {@link #completeWhenResponseEnds}; or</li>
  *   <li>the channel {@code closeFuture} safety net — covers requests that never produce a response
  *       (connection drop or pipeline-killing exception mid-processing).</li>
  * </ul>
@@ -107,6 +119,27 @@ public final class InFlightRequest implements ChannelFutureListener {
         future.addListener(this);
     }
 
+    /**
+     * Complete this token when the response an action handler writes straight to {@code ctx} ends, as
+     * the response funnel would: when its last part has been written ({@code LastHttpContent}, an
+     * end-of-stream frame, or a {@code 101} that hands the connection to WebSocket), or when the
+     * connection's exchange is ended with no response through the codec ({@link HttpExchangeEndedEvent}).
+     * Without this a keep-alive connection only releases the token when it closes, so {@code stop()}
+     * would wait out its whole drain budget. A watcher is added just before {@code ctx} and removes
+     * itself once it has seen that end; if the channel closes first, the close-future net completes the
+     * token and the watcher goes with the pipeline.
+     */
+    public void completeWhenResponseEnds(ChannelHandlerContext ctx) {
+        if (completed != 0 || ctx == null || ctx.isRemoved()) {
+            return;
+        }
+        try {
+            ctx.pipeline().addBefore(ctx.name(), null, new ResponseEndWatcher(this));
+        } catch (NoSuchElementException removedMeanwhile) {
+            // the handler left the pipeline as the watcher was added: the close-future net still applies
+        }
+    }
+
     @Override
     public void operationComplete(ChannelFuture future) {
         complete();
@@ -133,6 +166,52 @@ public final class InFlightRequest implements ChannelFutureListener {
                 // becomes unreachable once its callers drop it).
                 closeFuture = null;
             }
+        }
+    }
+
+    static final class ResponseEndWatcher extends ChannelDuplexHandler {
+
+        private final InFlightRequest inFlightRequest;
+
+        ResponseEndWatcher(InFlightRequest inFlightRequest) {
+            this.inFlightRequest = inFlightRequest;
+        }
+
+        @Override
+        public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
+            if (endsResponse(msg)) {
+                ChannelPromise written = promise.unvoid();
+                written.addListener(inFlightRequest);
+                ctx.write(msg, written);
+                stopWatching(ctx);
+            } else {
+                ctx.write(msg, promise);
+            }
+        }
+
+        @Override
+        public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+            ctx.fireUserEventTriggered(evt);
+            if (evt instanceof HttpExchangeEndedEvent) {
+                inFlightRequest.complete();
+                stopWatching(ctx);
+            }
+        }
+
+        private void stopWatching(ChannelHandlerContext ctx) {
+            if (!ctx.isRemoved()) {
+                ctx.pipeline().remove(this);
+            }
+        }
+
+        private static boolean endsResponse(Object msg) {
+            if (msg instanceof FullHttpResponse) {
+                // an interim response (100 Continue, 103 Early Hints) precedes the real one
+                HttpResponseStatus status = ((FullHttpResponse) msg).status();
+                return status.codeClass() != HttpStatusClass.INFORMATIONAL || status.code() == HttpResponseStatus.SWITCHING_PROTOCOLS.code();
+            }
+            return msg instanceof LastHttpContent
+                || msg instanceof StreamAddressedHttpContent && ((StreamAddressedHttpContent) msg).endStream();
         }
     }
 }
