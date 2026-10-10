@@ -283,6 +283,7 @@ public class ObjectMapperFactory {
             new MultipartBodyDTOSerializer(),
             new RegexBodySerializer(),
             new RegexBodyDTOSerializer(),
+            new ResponseMatchingBodySerializer(),
             new FuzzyBodySerializer(),
             new FuzzyBodyDTOSerializer(),
             new StringBodySerializer(serialiseDefaultValues),

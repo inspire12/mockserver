@@ -210,6 +210,22 @@ public class HttpResponse extends Action<HttpResponse> implements HttpMessage<Ht
         return this;
     }
 
+    /**
+     * Set the body to match when this response is a verification template, accepting every request body
+     * matcher, for example {@code response().withBodyMatching(regex("order-[0-9]+"))} or
+     * {@code response().withBodyMatching(jsonPath("$.id"))}. A body with a content type (string, JSON, XML,
+     * binary or file) is set exactly as by {@link #withBody(BodyWithContentType)}; any other body is only
+     * valid for matching and is rejected if this response is used as an expectation's response.
+     *
+     * @param body any body, including the request body matchers
+     */
+    public HttpResponse withBodyMatching(Body<?> body) {
+        if (body == null || body instanceof BodyWithContentType) {
+            return withBody((BodyWithContentType) body);
+        }
+        return withBody(new ResponseMatchingBody(body));
+    }
+
     public HttpResponse withBodyFromFile(String filePath) {
         this.body = new FileBody(filePath);
         this.hashCode = 0;

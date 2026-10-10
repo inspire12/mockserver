@@ -794,6 +794,7 @@ public class Expectation extends ObjectWithJsonToString {
 
     public Expectation thenRespond(List<HttpResponse> httpResponses) {
         if (httpResponses != null && !httpResponses.isEmpty()) {
+            httpResponses.forEach(Expectation::rejectResponseMatchingBody);
             this.httpResponses = new ArrayList<>(httpResponses);
             this.hashCode = 0;
         }
@@ -1515,10 +1516,17 @@ public class Expectation extends ObjectWithJsonToString {
 
     public Expectation thenRespond(HttpResponse httpResponse) {
         if (httpResponse != null) {
+            rejectResponseMatchingBody(httpResponse);
             this.httpResponse = httpResponse;
             this.hashCode = 0;
         }
         return this;
+    }
+
+    private static void rejectResponseMatchingBody(HttpResponse httpResponse) {
+        if (httpResponse != null && httpResponse.getBody() instanceof ResponseMatchingBody) {
+            throw new IllegalArgumentException("a " + httpResponse.getBody().getType() + " body can only match a response in a verification, it cannot be returned as a response");
+        }
     }
 
     public Expectation thenRespond(HttpTemplate httpTemplate) {

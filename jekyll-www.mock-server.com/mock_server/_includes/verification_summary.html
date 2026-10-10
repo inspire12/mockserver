@@ -1093,7 +1093,7 @@ $client-&gt;verify(
     <li><strong>Reason phrase</strong> — string or regex match. When the <code>matchExactCase</code> configuration property is enabled, this comparison is case-sensitive (matching the request-side behaviour for path and method).</li>
     <li><strong>Headers</strong> — same header matching as request matchers (subset match, multi-value, notted values supported).</li>
     <li><strong>Cookies</strong> — structured cookie matching (subset match, extra cookies allowed, notted values supported), the same as request cookie matching.</li>
-    <li><strong>Body</strong> — the same body matchers available for request bodies: JSON, JSON Schema, JSONPath, XML, XPath, regex, sub-string, binary, multipart, etc. An <code>optional</code> body template matches a response with no body.</li>
+    <li><strong>Body</strong> — the same body matchers available for request bodies: JSON, JSON Schema, JSONPath, XML, XML Schema, XPath, regex, sub-string, form parameters, multipart, binary, etc., with the same options (such as <code>not</code>, <code>subString</code> and <code>matchType</code>). An <code>optional</code> body template matches a response with no body. In Java, set any of these with <code>response().withBodyMatching(...)</code>, for example <code>response().withBodyMatching(regex("order-[0-9]+"))</code>; such a response can only be used to verify, not returned by an expectation.</li>
 </ul>
 
 <p>If both a request matcher and a response matcher are supplied, <strong>both must match the same recorded exchange</strong>. <code>VerificationTimes</code> (<code>atLeast</code>, <code>atMost</code>, <code>exactly</code>) applies to the count of matching pairs, exactly like request verification.</p>
@@ -1363,7 +1363,7 @@ $client-&gt;verifyResponse(
             .withPath("/api/users"),
         response()
             .withStatusCode(200)
-            .withBody(jsonSchema("{" +
+            .withBodyMatching(jsonSchema("{" +
                 "  \"type\": \"object\"," +
                 "  \"required\": [\"id\", \"name\"]," +
                 "  \"properties\": {" +

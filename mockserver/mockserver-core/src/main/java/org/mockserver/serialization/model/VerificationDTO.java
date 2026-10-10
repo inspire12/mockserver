@@ -1,9 +1,11 @@
 package org.mockserver.serialization.model;
 
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import org.mockserver.model.ExpectationId;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.ObjectWithJsonToString;
 import org.mockserver.model.OpenAPIDefinition;
+import org.mockserver.serialization.deserializers.body.VerificationHttpResponseDTODeserializer;
 import org.mockserver.verify.Disposition;
 import org.mockserver.verify.Verification;
 
@@ -65,6 +67,7 @@ public class VerificationDTO extends ObjectWithJsonToString implements DTO<Verif
         return httpResponse;
     }
 
+    @JsonDeserialize(using = VerificationHttpResponseDTODeserializer.class)
     public VerificationDTO setHttpResponse(HttpResponseDTO httpResponse) {
         this.httpResponse = httpResponse;
         return this;

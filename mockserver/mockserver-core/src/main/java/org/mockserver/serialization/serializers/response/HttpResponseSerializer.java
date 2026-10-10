@@ -55,6 +55,8 @@ public class HttpResponseSerializer extends StdSerializer<HttpResponse> {
                 jgen.writeObjectField("body", new FileBodyDTO((FileBody) body));
             } else if (body instanceof LogEntryBody) {
                 jgen.writeObjectField("body", body);
+            } else if (body instanceof ResponseMatchingBody) {
+                jgen.writeObjectField("body", body);
             }
         }
         if (httpResponse.getGenerateFromSchema() != null) {

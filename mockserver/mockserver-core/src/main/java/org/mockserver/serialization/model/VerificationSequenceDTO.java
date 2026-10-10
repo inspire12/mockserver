@@ -1,6 +1,8 @@
 package org.mockserver.serialization.model;
 
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import org.mockserver.model.*;
+import org.mockserver.serialization.deserializers.body.VerificationHttpResponseDTODeserializer;
 import org.mockserver.verify.VerificationSequence;
 
 import java.util.ArrayList;
@@ -67,6 +69,7 @@ public class VerificationSequenceDTO extends ObjectWithReflectiveEqualsHashCodeT
         return httpResponses;
     }
 
+    @JsonDeserialize(contentUsing = VerificationHttpResponseDTODeserializer.class)
     public VerificationSequenceDTO setHttpResponses(List<HttpResponseDTO> httpResponses) {
         this.httpResponses = httpResponses;
         return this;

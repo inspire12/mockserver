@@ -4,7 +4,9 @@ import org.apache.commons.lang3.StringUtils;
 import org.mockserver.codec.JsonSchemaBodyDecoder;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.model.Body;
 import org.mockserver.model.HttpResponse;
+import org.mockserver.model.ResponseMatchingBody;
 
 import static org.mockserver.matchers.MatchDifference.Field.BODY;
 import static org.mockserver.matchers.MatchDifference.Field.COOKIES;
@@ -64,10 +66,13 @@ public class HttpResponseMatcher {
             this.cookieMatcher = template.getCookies() != null && !template.getCookies().isEmpty()
                 ? new HashMapMatcher(mockServerLogger, template.getCookies(), false)
                 : null;
-            this.bodyMatcher = template.getBody() != null
-                ? BodyMatcherBuilder.buildBodyMatcher(configuration, mockServerLogger, template.getBody(), false)
+            Body<?> templateBody = template.getBody() instanceof ResponseMatchingBody
+                ? ((ResponseMatchingBody) template.getBody()).getValue()
+                : template.getBody();
+            this.bodyMatcher = templateBody != null
+                ? BodyMatcherBuilder.buildBodyMatcher(configuration, mockServerLogger, templateBody, false)
                 : null;
-            this.bodyOptional = template.getBody() != null ? template.getBody().getOptional() : null;
+            this.bodyOptional = templateBody != null ? templateBody.getOptional() : null;
             // No expectation / template request is available for a response match — they are used by
             // the parser only for a JSON-conversion failure log, which the response path reports as
             // null (it has no originating request to attribute the failure to).

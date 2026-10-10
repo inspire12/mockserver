@@ -16,10 +16,18 @@ public abstract class BodyWithContentTypeDTO extends BodyDTO {
         withOptional(body.getOptional());
     }
 
+    protected BodyWithContentTypeDTO(Body.Type type, Boolean not) {
+        super(type, not);
+        this.contentType = null;
+    }
+
     public static BodyWithContentTypeDTO createWithContentTypeDTO(BodyWithContentType<?> body) {
         BodyWithContentTypeDTO result = null;
 
-        if (body instanceof BinaryBody) {
+        if (body instanceof ResponseMatchingBody) {
+            BodyDTO matcher = BodyDTO.createDTO(((ResponseMatchingBody) body).getValue());
+            return matcher != null ? new ResponseMatchingBodyDTO(matcher) : null;
+        } else if (body instanceof BinaryBody) {
             BinaryBody binaryBody = (BinaryBody) body;
             result = new BinaryBodyDTO(binaryBody, binaryBody.getNot());
         } else if (body instanceof JsonBody) {

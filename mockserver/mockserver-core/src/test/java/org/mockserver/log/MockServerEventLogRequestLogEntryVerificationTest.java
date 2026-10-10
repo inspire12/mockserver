@@ -12,6 +12,8 @@ import org.mockserver.model.HttpResponse;
 import org.mockserver.model.LogEventRequestAndResponse;
 import org.mockserver.model.OpenAPIDefinition;
 import org.mockserver.scheduler.Scheduler;
+import org.mockserver.serialization.VerificationSequenceSerializer;
+import org.mockserver.serialization.VerificationSerializer;
 import org.mockserver.verify.Verification;
 import org.mockserver.verify.VerificationSequence;
 
@@ -858,6 +860,55 @@ public class MockServerEventLogRequestLogEntryVerificationTest {
         assertThat(result, containsString("Response not found"));
         assertThat(result, containsString("closest match diff:"));
         assertThat(result, containsString("body:"));
+    }
+
+    @Test
+    public void shouldApplyRegexResponseBodyMatcherFromRestJson() {
+        // given
+        mockServerEventLog.add(
+            new LogEntry()
+                .setHttpRequest(new HttpRequest().withPath("some_path"))
+                .setHttpResponse(new HttpResponse().withStatusCode(200).withBody("order-42"))
+                .setType(FORWARDED_REQUEST)
+        );
+        VerificationSerializer verificationSerializer = new VerificationSerializer(new MockServerLogger());
+
+        // then
+        assertThat(verify(verificationSerializer.deserialize(
+            "{\"httpResponse\":{\"body\":{\"type\":\"REGEX\",\"regex\":\"zzz-nothing\"}},\"times\":{\"atLeast\":1}}"
+        )), containsString("Response not found at least once, expected:<{" + NEW_LINE +
+            "  \"body\" : {" + NEW_LINE +
+            "    \"type\" : \"REGEX\"," + NEW_LINE +
+            "    \"regex\" : \"zzz-nothing\""));
+        assertThat(verify(verificationSerializer.deserialize(
+            "{\"httpResponse\":{\"body\":{\"type\":\"REGEX\",\"regex\":\"order-[0-9]+\"}},\"times\":{\"atLeast\":1}}"
+        )), is(""));
+    }
+
+    @Test
+    public void shouldApplyJsonPathResponseBodyMatcherInSequenceFromRestJson() {
+        // given
+        mockServerEventLog.add(
+            new LogEntry()
+                .setHttpRequest(new HttpRequest().withPath("first"))
+                .setHttpResponse(new HttpResponse().withBody("{\"one\":true}"))
+                .setType(FORWARDED_REQUEST)
+        );
+        mockServerEventLog.add(
+            new LogEntry()
+                .setHttpRequest(new HttpRequest().withPath("second"))
+                .setHttpResponse(new HttpResponse().withBody("{\"two\":true}"))
+                .setType(FORWARDED_REQUEST)
+        );
+        VerificationSequenceSerializer verificationSequenceSerializer = new VerificationSequenceSerializer(new MockServerLogger());
+
+        // then
+        assertThat(verify(verificationSequenceSerializer.deserialize(
+            "{\"httpResponses\":[{\"body\":{\"type\":\"JSON_PATH\",\"jsonPath\":\"$.one\"}},{\"body\":{\"type\":\"JSON_PATH\",\"jsonPath\":\"$.two\"}}]}"
+        )), is(""));
+        assertThat(verify(verificationSequenceSerializer.deserialize(
+            "{\"httpResponses\":[{\"body\":{\"type\":\"JSON_PATH\",\"jsonPath\":\"$.two\"}},{\"body\":{\"type\":\"JSON_PATH\",\"jsonPath\":\"$.one\"}}]}"
+        )), containsString("Response sequence not found"));
     }
 
     @Test

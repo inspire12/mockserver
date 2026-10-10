@@ -404,6 +404,7 @@ When both `statusCode` and `statusCodeRange` are set on the template, `statusCod
 **Body matching** — response body matching shares `BodyMatching` (`mockserver-core/src/main/java/org/mockserver/matchers/BodyMatching.java`) with request matching. This means:
 
 - All body matcher types are supported: string, regex, sub-string, JSON, JSON Schema, JSONPath, XML, XML Schema, GraphQL, JSON-RPC, binary, multipart.
+- The template body is read as a request body matcher: `VerificationDTO.httpResponse` and `VerificationSequenceDTO.httpResponses` are deserialised by `VerificationHttpResponseDTODeserializer`, which parses `body` with the request `BodyDTODeserializer` (so `subString`, `matchType`, `not` and every type survive). A matcher with no content type (regex, JSON path, ...) cannot be an `HttpResponse` body, so it travels wrapped in `ResponseMatchingBody` (`HttpResponse.withBodyMatching(...)` in Java), which `HttpResponseMatcher` unwraps and `Expectation.thenRespond` rejects. The response deserialiser used for expectation actions only knows string, JSON, XML, binary and file bodies, which is why verification must not use it.
 - `optional: true` body template matches a response with no body.
 - XML and form actual bodies are converted to JSON before JSON-family matching.
 - Binary matchers try the decompressed bytes; for response bodies (no compressed-original representation) only one byte array is tried.

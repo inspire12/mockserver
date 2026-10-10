@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import org.mockserver.model.Cookies;
 import org.mockserver.model.Headers;
 import org.mockserver.model.HttpResponse;
+import org.mockserver.model.Not;
 import org.mockserver.model.ObjectWithReflectiveEqualsHashCodeToString;
 
 /**
@@ -49,7 +50,7 @@ public class HttpResponseDTO extends ObjectWithReflectiveEqualsHashCodeToString 
             .withStatusCode(statusCode)
             .withStatusCodeRange(statusCodeRange)
             .withReasonPhrase(reasonPhrase)
-            .withBody(body != null ? body.buildObject() : null)
+            .withBody(body != null ? Not.not(body.buildObject(), body.getNot()) : null)
             .withGenerateFromSchema(generateFromSchema)
             .withHeaders(headers)
             .withTrailers(trailers)
