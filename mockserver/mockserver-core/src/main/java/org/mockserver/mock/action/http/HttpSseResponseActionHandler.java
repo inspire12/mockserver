@@ -3,6 +3,8 @@ package org.mockserver.mock.action.http;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.http.*;
+import io.netty.channel.ChannelFutureListener;
+import org.mockserver.closurecallback.websocketregistry.WebSocketClientRegistry;
 import org.mockserver.codec.StreamAddressedHttpContent;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.llm.StreamingFormat;
@@ -10,6 +12,13 @@ import org.mockserver.llm.codec.BedrockEventStreamEncoder;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.mappers.Http2StreamIds;
+import org.mockserver.mock.breakpoint.BreakpointMatcher;
+import org.mockserver.mock.breakpoint.BreakpointMatcherRegistry;
+import org.mockserver.mock.breakpoint.BreakpointPhase;
+import org.mockserver.mock.breakpoint.PausedStreamFrame;
+import org.mockserver.mock.breakpoint.StreamFrameBreakpointRegistry;
+import org.mockserver.mock.breakpoint.StreamFrameCallbackDispatcher;
+import org.mockserver.mock.breakpoint.StreamFrameDecision;
 import org.mockserver.model.Delay;
 import org.mockserver.model.HttpSseResponse;
 import org.mockserver.model.SseEvent;
@@ -18,6 +27,7 @@ import org.slf4j.event.Level;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 import static org.mockserver.exception.ExceptionHandling.causeDescription;
 import static org.mockserver.exception.ExceptionHandling.clientGoneException;
@@ -29,12 +39,22 @@ public class HttpSseResponseActionHandler {
     private final Scheduler scheduler;
     private final Configuration configuration;
     private final StreamTemplateRenderer templateRenderer;
+    private final WebSocketClientRegistry webSocketClientRegistry;
 
     public HttpSseResponseActionHandler(MockServerLogger mockServerLogger, Scheduler scheduler, Configuration configuration) {
+        this(mockServerLogger, scheduler, configuration, null);
+    }
+
+    /**
+     * @param webSocketClientRegistry the callback WebSocket registry that RESPONSE_STREAM breakpoints
+     *                                dispatch held events to; null disables stream-frame breakpoints
+     */
+    public HttpSseResponseActionHandler(MockServerLogger mockServerLogger, Scheduler scheduler, Configuration configuration, WebSocketClientRegistry webSocketClientRegistry) {
         this.mockServerLogger = mockServerLogger;
         this.scheduler = scheduler;
         this.configuration = configuration;
         this.templateRenderer = new StreamTemplateRenderer(mockServerLogger, configuration);
+        this.webSocketClientRegistry = webSocketClientRegistry;
     }
 
     public void handle(HttpSseResponse httpSseResponse, ChannelHandlerContext ctx, org.mockserver.model.HttpRequest request) {
@@ -91,17 +111,42 @@ public class HttpSseResponseActionHandler {
 
         ctx.writeAndFlush(initialResponse);
 
+        StreamBreakpoint streamBreakpoint = streamBreakpoint(ctx, request);
         List<SseEvent> events = httpSseResponse.getEvents();
         if (events != null && !events.isEmpty()) {
-            scheduleEvents(events, 0, ctx, httpSseResponse, request, format);
+            scheduleEvents(events, 0, ctx, httpSseResponse, request, format, streamBreakpoint);
         } else {
-            finishStream(ctx, httpSseResponse, request);
+            finishStream(ctx, httpSseResponse, request, streamBreakpoint);
         }
     }
 
-    private void scheduleEvents(List<SseEvent> events, int index, ChannelHandlerContext ctx, HttpSseResponse httpSseResponse, org.mockserver.model.HttpRequest request, StreamingFormat format) {
+    /**
+     * Resolves the RESPONSE_STREAM breakpoint for this response, or null when none applies, so the
+     * default-off path allocates nothing. If the client connection closes, held events are dropped
+     * (and their client told) and the stream's sequence counter is removed.
+     */
+    private StreamBreakpoint streamBreakpoint(ChannelHandlerContext ctx, org.mockserver.model.HttpRequest request) {
+        if (webSocketClientRegistry == null) {
+            return null;
+        }
+        BreakpointMatcher matcher = BreakpointMatcherRegistry.getInstance().findMatch(request, BreakpointPhase.RESPONSE_STREAM);
+        if (matcher == null || matcher.getClientId() == null) {
+            return null;
+        }
+        String streamId = (request.getLogCorrelationId() != null
+            ? request.getLogCorrelationId() : org.mockserver.uuid.UUIDService.getNonSecureUUID()) + "-stream";
+        ChannelFutureListener releaseOnClose = future -> {
+            StreamFrameCallbackDispatcher.getInstance().releaseStream(streamId);
+            // a client that leaves during an event's delay never reaches finishStream
+            StreamFrameBreakpointRegistry.getInstance().evictStream(streamId);
+        };
+        ctx.channel().closeFuture().addListener(releaseOnClose);
+        return new StreamBreakpoint(matcher, streamId, releaseOnClose);
+    }
+
+    private void scheduleEvents(List<SseEvent> events, int index, ChannelHandlerContext ctx, HttpSseResponse httpSseResponse, org.mockserver.model.HttpRequest request, StreamingFormat format, StreamBreakpoint streamBreakpoint) {
         if (index >= events.size() || !ctx.channel().isActive()) {
-            finishStream(ctx, httpSseResponse, request);
+            finishStream(ctx, httpSseResponse, request, streamBreakpoint);
             return;
         }
 
@@ -114,56 +159,23 @@ public class HttpSseResponseActionHandler {
                     return;
                 }
                 byte[] chunkBytes = formatChunkBytes(renderEvent(event, httpSseResponse, request), format);
-                // On HTTP/2 (streamId != null) address the chunk to the request's own stream so the
-                // shared HttpToHttp2ConnectionHandler does not route it onto whichever stream last
-                // wrote a head - which, with concurrent streams in flight, would mis-route this chunk
-                // onto a sibling (possibly already-closed) stream and hang this client (#2667). On
-                // HTTP/1.1 (streamId == null) write a plain content chunk exactly as before.
-                HttpContent content = request.getStreamId() != null
-                    ? new StreamAddressedHttpContent(Unpooled.wrappedBuffer(chunkBytes), request.getStreamId(), false)
-                    : new DefaultHttpContent(Unpooled.wrappedBuffer(chunkBytes));
-                ctx.writeAndFlush(content).addListener(future -> {
-                    if (future.isSuccess()) {
-                        if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
-                            mockServerLogger.logEvent(
-                                new LogEntry()
-                                    .setType(EXPECTATION_RESPONSE)
-                                    .setLogLevel(Level.DEBUG)
-                                    .setCorrelationId(request.getLogCorrelationId())
-                                    .setHttpRequest(request)
-                                    .setMessageFormat("sent streaming chunk {} of {} for request:{}")
-                                    .setArguments(index + 1, events.size(), request)
-                            );
-                        }
-                        scheduleEvents(events, index + 1, ctx, httpSseResponse, request, format);
-                    } else if (clientGoneException(future.cause())) {
-                        // a client that has gone is an ordinary end of the response
-                        if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
-                            mockServerLogger.logEvent(
-                                new LogEntry()
-                                    .setLogLevel(Level.DEBUG)
-                                    .setCorrelationId(request.getLogCorrelationId())
-                                    .setHttpRequest(request)
-                                    .setMessageFormat("client left before streaming chunk {} was sent:{}for request:{}")
-                                    .setArguments(index + 1, causeDescription(future.cause()), request)
-                            );
-                        }
-                        finishStream(ctx, httpSseResponse, request);
-                    } else {
-                        if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
-                            mockServerLogger.logEvent(
-                                new LogEntry()
-                                    .setLogLevel(Level.WARN)
-                                    .setCorrelationId(request.getLogCorrelationId())
-                                    .setHttpRequest(request)
-                                    .setMessageFormat("async write failure for streaming chunk {} for request:{}")
-                                    .setArguments(index + 1, request)
-                                    .setThrowable(future.cause())
-                            );
-                        }
-                        finishStream(ctx, httpSseResponse, request);
-                    }
-                });
+                CompletableFuture<StreamFrameDecision> decisionFuture = streamBreakpoint != null
+                    ? StreamFrameCallbackDispatcher.getInstance().tryWsDispatch(
+                        streamBreakpoint.matcher, streamBreakpoint.streamId,
+                        StreamFrameBreakpointRegistry.getInstance().nextSequenceNumber(streamBreakpoint.streamId),
+                        PausedStreamFrame.Direction.OUTBOUND, BreakpointPhase.RESPONSE_STREAM, chunkBytes,
+                        request.getMethod() != null ? request.getMethod().getValue() : null,
+                        request.getPath() != null ? request.getPath().getValue() : null,
+                        request.getReceivedTimestamp(), configuration, mockServerLogger, webSocketClientRegistry)
+                    : null;
+                if (decisionFuture == null) {
+                    writeChunk(chunkBytes, null, events, index, ctx, httpSseResponse, request, format, streamBreakpoint);
+                } else {
+                    // the next event is scheduled only once this one is decided and written, so the
+                    // end of the stream waits for every held event
+                    decisionFuture.thenAccept(decision -> ctx.channel().eventLoop().execute(() ->
+                        applyDecision(decision, chunkBytes, events, index, ctx, httpSseResponse, request, format, streamBreakpoint)));
+                }
             } catch (Exception e) {
                 if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
                     mockServerLogger.logEvent(
@@ -176,7 +188,7 @@ public class HttpSseResponseActionHandler {
                             .setThrowable(e)
                     );
                 }
-                finishStream(ctx, httpSseResponse, request);
+                finishStream(ctx, httpSseResponse, request, streamBreakpoint);
             }
         };
 
@@ -184,6 +196,109 @@ public class HttpSseResponseActionHandler {
             scheduler.schedule(writeEvent, false, delay);
         } else {
             writeEvent.run();
+        }
+    }
+
+    private void applyDecision(StreamFrameDecision decision, byte[] chunkBytes, List<SseEvent> events, int index, ChannelHandlerContext ctx,
+                               HttpSseResponse httpSseResponse, org.mockserver.model.HttpRequest request, StreamingFormat format, StreamBreakpoint streamBreakpoint) {
+        if (!ctx.channel().isActive()) {
+            finishStream(ctx, httpSseResponse, request, streamBreakpoint);
+            return;
+        }
+        switch (decision.getAction()) {
+            case MODIFY:
+                writeChunk(decision.getReplacementBody(), null, events, index, ctx, httpSseResponse, request, format, streamBreakpoint);
+                break;
+            case DROP:
+                scheduleEvents(events, index + 1, ctx, httpSseResponse, request, format, streamBreakpoint);
+                break;
+            case INJECT:
+                writeChunk(chunkBytes, decision.getInjectedBody(), events, index, ctx, httpSseResponse, request, format, streamBreakpoint);
+                break;
+            case CLOSE:
+                finishStream(ctx, httpSseResponse, request, streamBreakpoint);
+                break;
+            case CONTINUE:
+            default:
+                writeChunk(chunkBytes, null, events, index, ctx, httpSseResponse, request, format, streamBreakpoint);
+                break;
+        }
+    }
+
+    /**
+     * On HTTP/2 (streamId != null) address the chunk to the request's own stream so the shared
+     * HttpToHttp2ConnectionHandler does not route it onto whichever stream last wrote a head - which,
+     * with concurrent streams in flight, would mis-route this chunk onto a sibling (possibly
+     * already-closed) stream and hang this client (#2667). On HTTP/1.1 write a plain content chunk.
+     */
+    private static HttpContent chunkContent(byte[] chunkBytes, org.mockserver.model.HttpRequest request) {
+        return request.getStreamId() != null
+            ? new StreamAddressedHttpContent(Unpooled.wrappedBuffer(chunkBytes), request.getStreamId(), false)
+            : new DefaultHttpContent(Unpooled.wrappedBuffer(chunkBytes));
+    }
+
+    private void writeChunk(byte[] chunkBytes, byte[] injectedBytes, List<SseEvent> events, int index, ChannelHandlerContext ctx,
+                            HttpSseResponse httpSseResponse, org.mockserver.model.HttpRequest request, StreamingFormat format, StreamBreakpoint streamBreakpoint) {
+        try {
+            if (injectedBytes != null) {
+                ctx.write(chunkContent(chunkBytes, request));
+            }
+            HttpContent content = chunkContent(injectedBytes != null ? injectedBytes : chunkBytes, request);
+            ctx.writeAndFlush(content).addListener(future -> {
+                if (future.isSuccess()) {
+                    if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+                        mockServerLogger.logEvent(
+                            new LogEntry()
+                                .setType(EXPECTATION_RESPONSE)
+                                .setLogLevel(Level.DEBUG)
+                                .setCorrelationId(request.getLogCorrelationId())
+                                .setHttpRequest(request)
+                                .setMessageFormat("sent streaming chunk {} of {} for request:{}")
+                                .setArguments(index + 1, events.size(), request)
+                        );
+                    }
+                    scheduleEvents(events, index + 1, ctx, httpSseResponse, request, format, streamBreakpoint);
+                } else if (clientGoneException(future.cause())) {
+                    // a client that has gone is an ordinary end of the response
+                    if (mockServerLogger.isEnabledForInstance(Level.DEBUG)) {
+                        mockServerLogger.logEvent(
+                            new LogEntry()
+                                .setLogLevel(Level.DEBUG)
+                                .setCorrelationId(request.getLogCorrelationId())
+                                .setHttpRequest(request)
+                                .setMessageFormat("client left before streaming chunk {} was sent:{}for request:{}")
+                                .setArguments(index + 1, causeDescription(future.cause()), request)
+                        );
+                    }
+                    finishStream(ctx, httpSseResponse, request, streamBreakpoint);
+                } else {
+                    if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                        mockServerLogger.logEvent(
+                            new LogEntry()
+                                .setLogLevel(Level.WARN)
+                                .setCorrelationId(request.getLogCorrelationId())
+                                .setHttpRequest(request)
+                                .setMessageFormat("async write failure for streaming chunk {} for request:{}")
+                                .setArguments(index + 1, request)
+                                .setThrowable(future.cause())
+                        );
+                    }
+                    finishStream(ctx, httpSseResponse, request, streamBreakpoint);
+                }
+            });
+        } catch (Exception e) {
+            if (mockServerLogger.isEnabledForInstance(Level.WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(Level.WARN)
+                        .setCorrelationId(request.getLogCorrelationId())
+                        .setHttpRequest(request)
+                        .setMessageFormat("exception sending streaming chunk {} for request:{}")
+                        .setArguments(index + 1, request)
+                        .setThrowable(e)
+                );
+            }
+            finishStream(ctx, httpSseResponse, request, streamBreakpoint);
         }
     }
 
@@ -206,7 +321,11 @@ public class HttpSseResponseActionHandler {
             .withRetry(event.getRetry());
     }
 
-    private void finishStream(ChannelHandlerContext ctx, HttpSseResponse httpSseResponse, org.mockserver.model.HttpRequest request) {
+    private void finishStream(ChannelHandlerContext ctx, HttpSseResponse httpSseResponse, org.mockserver.model.HttpRequest request, StreamBreakpoint streamBreakpoint) {
+        if (streamBreakpoint != null) {
+            ctx.channel().closeFuture().removeListener(streamBreakpoint.releaseOnClose);
+            StreamFrameBreakpointRegistry.getInstance().evictStream(streamBreakpoint.streamId);
+        }
         if (ctx.channel().isActive()) {
             // HTTP/2: end the response with an END_STREAM DATA frame. Every stream has its own
             // Http2MultiplexHandler child channel, so this write lands on the stream's own channel and
@@ -348,5 +467,17 @@ public class HttpSseResponseActionHandler {
         }
         sb.append("\n");
         return sb.toString();
+    }
+
+    private static final class StreamBreakpoint {
+        private final BreakpointMatcher matcher;
+        private final String streamId;
+        private final ChannelFutureListener releaseOnClose;
+
+        private StreamBreakpoint(BreakpointMatcher matcher, String streamId, ChannelFutureListener releaseOnClose) {
+            this.matcher = matcher;
+            this.streamId = streamId;
+            this.releaseOnClose = releaseOnClose;
+        }
     }
 }

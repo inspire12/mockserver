@@ -14,6 +14,7 @@ import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpRequestAndHttpResponse;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.serialization.WebSocketMessageSerializer;
+import org.mockserver.serialization.model.BreakpointReleasedDTO;
 import org.mockserver.serialization.model.PausedStreamFrameDTO;
 import org.mockserver.serialization.model.StreamFrameDecisionDTO;
 import org.mockserver.serialization.model.WebSocketClientIdDTO;
@@ -22,6 +23,8 @@ import org.mockserver.serialization.model.WebSocketErrorDTO;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.mockserver.metrics.Metrics.Name.*;
 import static org.mockserver.metrics.Metrics.clearWebSocketMetrics;
@@ -58,6 +61,7 @@ public class WebSocketClientRegistry {
     private final MockServerLogger mockServerLogger;
     private final WebSocketMessageSerializer webSocketMessageSerializer;
     private final Map<String, Channel> clientRegistry;
+    private final Set<String> breakpointReleasedClients = ConcurrentHashMap.newKeySet();
     private final Map<String, WebSocketResponseCallback> responseCallbackRegistry;
     private final Map<String, WebSocketRequestCallback> forwardCallbackRegistry;
     private final Map<String, StreamFrameDecisionCallback> streamFrameCallbackRegistry;
@@ -160,6 +164,19 @@ public class WebSocketClientRegistry {
     }
 
     public void registerClient(String clientId, ChannelHandlerContext ctx) {
+        registerClient(clientId, ctx, false);
+    }
+
+    /**
+     * @param acceptsBreakpointReleased whether the client asked to be sent {@link BreakpointReleasedDTO}
+     *                                  notices; clients that did not are never sent one
+     */
+    public void registerClient(String clientId, ChannelHandlerContext ctx, boolean acceptsBreakpointReleased) {
+        if (acceptsBreakpointReleased) {
+            breakpointReleasedClients.add(clientId);
+        } else {
+            breakpointReleasedClients.remove(clientId);
+        }
         try {
             ctx.channel().writeAndFlush(new TextWebSocketFrame(webSocketMessageSerializer.serialize(new WebSocketClientIdDTO().setClientId(clientId))));
         } catch (Exception e) {
@@ -178,6 +195,7 @@ public class WebSocketClientRegistry {
 
     public void unregisterClient(String clientId) {
         LocalCallbackRegistry.unregisterCallback(clientId);
+        breakpointReleasedClients.remove(clientId);
         Channel removeChannel = clientRegistry.remove(clientId);
         if (removeChannel != null && removeChannel.isOpen()) {
             removeChannel.close();
@@ -303,6 +321,36 @@ public class WebSocketClientRegistry {
         }
     }
 
+    /**
+     * Tell a client that MockServer resolved one of its paused breakpoint items itself
+     * (for example after the breakpoint timeout). Sent only to a client that registered with
+     * that capability. Never throws: it is called from timeout and stream-completion paths
+     * that must carry on regardless.
+     *
+     * @return true if the client accepts the notice, was connected, and the notice was written
+     */
+    public boolean sendBreakpointReleased(String clientId, BreakpointReleasedDTO releasedDTO) {
+        Channel channel = clientId != null && breakpointReleasedClients.contains(clientId) ? clientRegistry.get(clientId) : null;
+        if (channel == null) {
+            return false;
+        }
+        try {
+            channel.writeAndFlush(new TextWebSocketFrame(webSocketMessageSerializer.serialize(releasedDTO)));
+            return true;
+        } catch (Exception e) {
+            if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(WARN)) {
+                mockServerLogger.logEvent(
+                    new LogEntry()
+                        .setLogLevel(WARN)
+                        .setMessageFormat("exception sending breakpoint released notice{}to client{}")
+                        .setArguments(releasedDTO, clientId)
+                        .setThrowable(e)
+                );
+            }
+            return false;
+        }
+    }
+
     public boolean sendClientMessage(String clientId, HttpRequest httpRequest, HttpResponse httpResponse) {
         try {
             if (clientRegistry.containsKey(clientId)) {
@@ -354,6 +402,7 @@ public class WebSocketClientRegistry {
         forwardCallbackRegistry.clear();
         responseCallbackRegistry.clear();
         streamFrameCallbackRegistry.clear();
+        breakpointReleasedClients.clear();
         // copied and cleared under the map's own monitor, which registerClient/unregisterClient mutate it
         // under; closed after, because a channel on this thread's event loop closes at once and its close
         // listener unregisters the client from the map

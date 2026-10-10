@@ -5,6 +5,8 @@ import {
   type PausedItem,
   type CallbackClientState,
   type WsEnvelope,
+  type BreakpointReleaseNotice,
+  type StoredPausedItem,
 } from '../lib/breakpointCallbackClient';
 
 // ---------------------------------------------------------------------------
@@ -79,7 +81,7 @@ describe('BreakpointCallbackClient', () => {
     client.connect(params);
 
     expect(MockWebSocket.instances).toHaveLength(1);
-    expect(MockWebSocket.instances[0]!.url).toBe('ws://127.0.0.1:1080/_mockserver_callback_websocket');
+    expect(MockWebSocket.instances[0]!.url).toBe('ws://127.0.0.1:1080/_mockserver_callback_websocket?capabilities=breakpointReleased');
     client.disconnect();
   });
 
@@ -87,7 +89,7 @@ describe('BreakpointCallbackClient', () => {
     const client = new BreakpointCallbackClient();
     client.connect({ ...params, secure: true });
 
-    expect(MockWebSocket.instances[0]!.url).toBe('wss://127.0.0.1:1080/_mockserver_callback_websocket');
+    expect(MockWebSocket.instances[0]!.url).toBe('wss://127.0.0.1:1080/_mockserver_callback_websocket?capabilities=breakpointReleased');
     client.disconnect();
   });
 
@@ -95,7 +97,7 @@ describe('BreakpointCallbackClient', () => {
     const client = new BreakpointCallbackClient();
     client.connect({ ...params, basePath: '/prefix' });
 
-    expect(MockWebSocket.instances[0]!.url).toBe('ws://127.0.0.1:1080/prefix/_mockserver_callback_websocket');
+    expect(MockWebSocket.instances[0]!.url).toBe('ws://127.0.0.1:1080/prefix/_mockserver_callback_websocket?capabilities=breakpointReleased');
     client.disconnect();
   });
 
@@ -657,5 +659,101 @@ describe('BreakpointCallbackClient', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('BreakpointCallbackClient release notices', () => {
+  const RELEASED = 'org.mockserver.serialization.model.BreakpointReleasedDTO';
+
+  function connectedClient() {
+    const client = new BreakpointCallbackClient();
+    client.connect(params);
+    const ws = MockWebSocket.instances[0]!;
+    ws.simulateOpen();
+    ws.simulateMessage({
+      type: 'org.mockserver.serialization.model.WebSocketClientIdDTO',
+      value: JSON.stringify({ clientId: 'c1' }),
+    });
+    return { client, ws };
+  }
+
+  function pauseRequest(ws: MockWebSocket, correlationId: string) {
+    ws.simulateMessage({
+      type: 'org.mockserver.model.HttpRequest',
+      value: JSON.stringify({ method: 'GET', path: '/bp', headers: { WebSocketCorrelationId: [correlationId] } }),
+    });
+  }
+
+  function release(ws: MockWebSocket, correlationId: string, reason = 'TIMEOUT') {
+    ws.simulateMessage({
+      type: RELEASED,
+      value: JSON.stringify({ correlationId, reason, message: 'continued after the timeout' }),
+    });
+  }
+
+  it('drops a paused request the server released and tells listeners', () => {
+    const { client, ws } = connectedClient();
+    const notices: BreakpointReleaseNotice[] = [];
+    let items: StoredPausedItem[] = [];
+    client.subscribeReleaseNotices((n) => notices.push(n));
+    client.subscribePausedItems((i) => { items = i; });
+    pauseRequest(ws, 'corr-1');
+    pauseRequest(ws, 'corr-2');
+
+    release(ws, 'corr-1');
+
+    expect(items.map((i) => (i.phase === 'REQUEST' ? i.correlationId : ''))).toEqual(['corr-2']);
+    expect(client.isPaused('corr-1')).toBe(false);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.actionIgnored).toBe(false);
+    expect(notices[0]!.reason).toBe('TIMEOUT');
+    expect(notices[0]!.message).toBe('continued after the timeout');
+    expect(notices[0]!.item?.phase).toBe('REQUEST');
+    client.disconnect();
+  });
+
+  it('drops a paused stream frame the server released', () => {
+    const { client, ws } = connectedClient();
+    const notices: BreakpointReleaseNotice[] = [];
+    client.subscribeReleaseNotices((n) => notices.push(n));
+    ws.simulateMessage({
+      type: 'org.mockserver.serialization.model.PausedStreamFrameDTO',
+      value: JSON.stringify({ correlationId: 'frame-1', streamId: 's', sequenceNumber: 0, direction: 'OUTBOUND', phase: 'RESPONSE_STREAM', body: 'YQ==' }),
+    });
+    expect(client.isPaused('frame-1')).toBe(true);
+
+    release(ws, 'frame-1', 'STREAM_ENDED');
+
+    expect(client.getPausedItems()).toHaveLength(0);
+    expect(notices[0]!.reason).toBe('STREAM_ENDED');
+    client.disconnect();
+  });
+
+  it('reports a decision the user sent after the server had already released the item', () => {
+    const { client, ws } = connectedClient();
+    const notices: BreakpointReleaseNotice[] = [];
+    client.subscribeReleaseNotices((n) => notices.push(n));
+    pauseRequest(ws, 'corr-late');
+    const [item] = client.getPausedItems();
+    client.resolveRequest('corr-late', { method: 'GET', path: '/bp' });
+    client.removePausedItem(item!.key);
+
+    release(ws, 'corr-late');
+
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.actionIgnored).toBe(true);
+    expect(notices[0]!.item).toBeNull();
+    client.disconnect();
+  });
+
+  it('ignores a release notice for an item it never held or resolved', () => {
+    const { client, ws } = connectedClient();
+    const notices: BreakpointReleaseNotice[] = [];
+    client.subscribeReleaseNotices((n) => notices.push(n));
+
+    release(ws, 'unknown');
+
+    expect(notices).toHaveLength(0);
+    client.disconnect();
   });
 });

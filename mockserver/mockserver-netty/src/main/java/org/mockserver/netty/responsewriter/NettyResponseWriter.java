@@ -281,6 +281,60 @@ public class NettyResponseWriter extends ResponseWriter {
             wsRegistry = null;
         }
 
+        // With stream breakpoints active, every frame write (and the end of the stream) is chained
+        // behind the previous frame's decision, so frames reach the client in order and a frame
+        // still held when the source completes is delivered before the terminating chunk.
+        final java.util.concurrent.atomic.AtomicReference<java.util.concurrent.CompletableFuture<Void>> frameTail =
+            streamBreakpointsActive ? new java.util.concurrent.atomic.AtomicReference<>(java.util.concurrent.CompletableFuture.completedFuture(null)) : null;
+        final java.util.concurrent.atomic.AtomicBoolean closedByBreakpoint = new java.util.concurrent.atomic.AtomicBoolean();
+        final ChannelFutureListener releaseHeldFramesOnClose = streamBreakpointsActive
+            ? future -> org.mockserver.mock.breakpoint.StreamFrameCallbackDispatcher.getInstance().releaseStream(streamId)
+            : null;
+        if (releaseHeldFramesOnClose != null) {
+            ctx.channel().closeFuture().addListener(releaseHeldFramesOnClose);
+        }
+
+        Runnable finishStream = () -> {
+            if (ctx.channel().isActive()) {
+                // The terminating LastHttpContent is the terminal write of a streaming response —
+                // release the in-flight token when it flushes so the drain waits for the full
+                // stream to reach the wire (on a keep-alive connection the channel is NOT closed
+                // here, so the close-future net would otherwise not release it until much later).
+                ChannelFuture lastFuture = ctx.writeAndFlush(lastContentWithTrailers(response));
+                lastFuture.addListener(future -> {
+                    boolean closeChannel;
+                    ConnectionOptions connectionOptions = response.getConnectionOptions();
+                    if (connectionOptions != null && connectionOptions.getCloseSocket() != null) {
+                        closeChannel = connectionOptions.getCloseSocket();
+                    } else {
+                        closeChannel = !(request.isKeepAlive() != null && request.isKeepAlive());
+                    }
+                    if (closeChannel || configuration.alwaysCloseSocketConnections()) {
+                        ctx.close();
+                    }
+                });
+                completeInFlightOnFlush(lastFuture);
+            } else {
+                // Stream completed but the channel is already gone — nothing left to flush.
+                completeInFlightOnFlush(null);
+            }
+        };
+
+        java.util.function.Consumer<Throwable> failStream = error -> {
+            if (error instanceof StreamingBody.StreamAbortedException) {
+                // no terminating chunk, so the client sees an incomplete response (HTTP/2: a reset stream);
+                // closing fails and releases the writes still queued
+                completeInFlightOnFlush(ctx.close());
+            } else if (ctx.channel().isActive()) {
+                // Error terminates the stream: the LastHttpContent + close is the terminal write.
+                ChannelFuture errorFuture = ctx.writeAndFlush(LastHttpContent.EMPTY_LAST_CONTENT);
+                errorFuture.addListener(future -> ctx.close());
+                completeInFlightOnFlush(errorFuture);
+            } else {
+                completeInFlightOnFlush(null);
+            }
+        };
+
         // Subscribe to the streaming body to forward chunks as they arrive.
         // After each chunk write completes, call streamingBody.chunkWritten(bytes), which
         // requests the next upstream read once the backlog has drained — this implements
@@ -304,12 +358,10 @@ public class NettyResponseWriter extends ResponseWriter {
                 }
 
                 // --- Stream-frame breakpoint path ---
-                // Copy the chunk bytes for the registry (the ByteBuf is owned by the caller)
+                // Copy the chunk bytes (the ByteBuf is owned by StreamingBody and released after onChunk returns)
                 byte[] chunkBytes = new byte[chunk.readableBytes()];
                 chunk.getBytes(chunk.readerIndex(), chunkBytes);
 
-                // WS-callback dispatch (clientId is always present — required since 7b)
-                final java.util.concurrent.CompletableFuture<StreamFrameDecision> decisionFuture;
                 int seq = StreamFrameBreakpointRegistry.getInstance()
                     .nextSequenceNumber(streamId);
                 java.util.concurrent.CompletableFuture<StreamFrameDecision> wsFuture =
@@ -321,148 +373,132 @@ public class NettyResponseWriter extends ResponseWriter {
                         wsRegistry,
                         configuration, mockServerLogger
                     );
-                if (wsFuture == null) {
-                    // Cap reached or client not connected — write immediately
-                    DefaultHttpContent content = new DefaultHttpContent(Unpooled.copiedBuffer(chunk));
-                    ctx.writeAndFlush(content).addListener(future -> streamingBody.chunkWritten(chunkSize));
-                    return;
-                }
-                decisionFuture = wsFuture;
+                // Cap reached or client not connected: the frame is not held, but is still
+                // written in order behind any frame that is
+                final java.util.concurrent.CompletableFuture<StreamFrameDecision> decisionFuture = wsFuture != null
+                    ? wsFuture
+                    : java.util.concurrent.CompletableFuture.completedFuture(StreamFrameDecision.continueFrame());
 
-                // Frame is parked (either in registry or dispatched via WS). The original
-                // chunk ByteBuf is NOT retained — we copied the bytes above. The chunk will
-                // be released by StreamingBody after onChunk returns.
-                // We do NOT call streamingBody.chunkWritten(chunkSize) — this stops the upstream from
-                // sending more chunks (backpressure). We will call it after the frame is resolved.
-
-                // When the decision future completes (from control-plane API, WS reply, or timeout),
-                // execute the action on the channel's event loop to ensure thread safety.
-                decisionFuture.thenAccept(decision -> {
-                    // Marshal onto the channel's event loop
-                    ctx.channel().eventLoop().execute(() -> {
-                        if (!ctx.channel().isActive()) {
-                            streamingBody.closeUpstream();
-                            streamingBody.chunkWritten(chunkSize);
-                            return;
+                // We do NOT call streamingBody.chunkWritten(chunkSize) until the frame is written
+                // or discarded — this stops the upstream from sending more chunks (backpressure).
+                final java.util.concurrent.CompletableFuture<Void> written = new java.util.concurrent.CompletableFuture<>();
+                frameTail.getAndSet(written)
+                    .thenCombine(decisionFuture, (previousWritten, decision) -> decision)
+                    .thenAccept(decision -> ctx.channel().eventLoop().execute(() -> {
+                        try {
+                            applyStreamFrameDecision(ctx, streamingBody, decision, chunkBytes, chunkSize, closedByBreakpoint);
+                        } finally {
+                            written.complete(null);
                         }
-                        switch (decision.getAction()) {
-                            case CONTINUE: {
-                                DefaultHttpContent content = new DefaultHttpContent(
-                                    Unpooled.wrappedBuffer(chunkBytes));
-                                ctx.writeAndFlush(content).addListener(future -> streamingBody.chunkWritten(chunkSize));
-                                break;
-                            }
-                            case MODIFY: {
-                                DefaultHttpContent content = new DefaultHttpContent(
-                                    Unpooled.wrappedBuffer(decision.getReplacementBody()));
-                                ctx.writeAndFlush(content).addListener(future -> streamingBody.chunkWritten(chunkSize));
-                                break;
-                            }
-                            case DROP: {
-                                // Discard the frame — do not write anything to the client
-                                streamingBody.chunkWritten(chunkSize);
-                                break;
-                            }
-                            case INJECT: {
-                                // Write the original frame, then inject an additional frame
-                                DefaultHttpContent originalContent = new DefaultHttpContent(
-                                    Unpooled.wrappedBuffer(chunkBytes));
-                                ctx.writeAndFlush(originalContent).addListener(future -> {
-                                    if (ctx.channel().isActive()) {
-                                        DefaultHttpContent injectedContent = new DefaultHttpContent(
-                                            Unpooled.wrappedBuffer(decision.getInjectedBody()));
-                                        ctx.writeAndFlush(injectedContent).addListener(f2 -> streamingBody.chunkWritten(chunkSize));
-                                    } else {
-                                        streamingBody.chunkWritten(chunkSize);
-                                    }
-                                });
-                                break;
-                            }
-                            case CLOSE: {
-                                // End the stream: send LastHttpContent and close. This breakpoint
-                                // action terminates the stream without going through onComplete (it
-                                // never calls chunkWritten), so this LastHttpContent write is the
-                                // terminal write — release the in-flight token once it flushes. The
-                                // upstream is closed once it has: nothing will take the rest of the
-                                // stream, and closing it first would abort the body before this flush.
-                                ChannelFuture closeFrameFuture = ctx.writeAndFlush(LastHttpContent.EMPTY_LAST_CONTENT);
-                                closeFrameFuture.addListener(future -> {
-                                    ctx.close();
-                                    streamingBody.closeUpstream();
-                                    // Do NOT request more — stream is ended
-                                });
-                                completeInFlightOnFlush(closeFrameFuture);
-                                break;
-                            }
-                            default: {
-                                // Unrecognised action — log a warning and request more to avoid
-                                // hanging the stream if a future action type is added without
-                                // updating this switch.
-                                if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(WARN)) {
-                                    mockServerLogger.logEvent(new LogEntry()
-                                        .setLogLevel(WARN)
-                                        .setMessageFormat("unrecognised stream frame breakpoint action: " + decision.getAction())
-                                    );
-                                }
-                                streamingBody.chunkWritten(chunkSize);
-                                break;
-                            }
-                        }
-                    });
-                });
+                    }));
             },
             // onComplete
             () -> {
                 ctx.channel().closeFuture().removeListener(closeUpstreamIfIncomplete);
                 if (streamBreakpointsActive) {
-                    // Evict any remaining held frames for this stream (prevents leaks)
-                    StreamFrameBreakpointRegistry.getInstance().evictStream(streamId);
-                }
-                if (ctx.channel().isActive()) {
-                    // The terminating LastHttpContent is the terminal write of a streaming response —
-                    // release the in-flight token when it flushes so the drain waits for the full
-                    // stream to reach the wire (on a keep-alive connection the channel is NOT closed
-                    // here, so the close-future net would otherwise not release it until much later).
-                    ChannelFuture lastFuture = ctx.writeAndFlush(lastContentWithTrailers(response));
-                    lastFuture.addListener(future -> {
-                        boolean closeChannel;
-                        ConnectionOptions connectionOptions = response.getConnectionOptions();
-                        if (connectionOptions != null && connectionOptions.getCloseSocket() != null) {
-                            closeChannel = connectionOptions.getCloseSocket();
-                        } else {
-                            closeChannel = !(request.isKeepAlive() != null && request.isKeepAlive());
+                    frameTail.get().whenComplete((ignored, throwable) -> ctx.channel().eventLoop().execute(() -> {
+                        ctx.channel().closeFuture().removeListener(releaseHeldFramesOnClose);
+                        StreamFrameBreakpointRegistry.getInstance().evictStream(streamId);
+                        if (closedByBreakpoint.get()) {
+                            // the CLOSE decision already ended the response
+                            return;
                         }
-                        if (closeChannel || configuration.alwaysCloseSocketConnections()) {
-                            ctx.close();
-                        }
-                    });
-                    completeInFlightOnFlush(lastFuture);
+                        finishStream.run();
+                    }));
                 } else {
-                    // Stream completed but the channel is already gone — nothing left to flush.
-                    completeInFlightOnFlush(null);
+                    finishStream.run();
                 }
             },
             // onError
             error -> {
                 ctx.channel().closeFuture().removeListener(closeUpstreamIfIncomplete);
                 if (streamBreakpointsActive) {
-                    // Evict any remaining held frames for this stream (prevents leaks)
-                    StreamFrameBreakpointRegistry.getInstance().evictStream(streamId);
-                }
-                if (error instanceof StreamingBody.StreamAbortedException) {
-                    // no terminating chunk, so the client sees an incomplete response (HTTP/2: a reset stream);
-                    // closing fails and releases the writes still queued
-                    completeInFlightOnFlush(ctx.close());
-                } else if (ctx.channel().isActive()) {
-                    // Error terminates the stream: the LastHttpContent + close is the terminal write.
-                    ChannelFuture errorFuture = ctx.writeAndFlush(LastHttpContent.EMPTY_LAST_CONTENT);
-                    errorFuture.addListener(future -> ctx.close());
-                    completeInFlightOnFlush(errorFuture);
+                    // the response cannot be completed, so frames still held can never be delivered
+                    org.mockserver.mock.breakpoint.StreamFrameCallbackDispatcher.getInstance().releaseStream(streamId);
+                    frameTail.get().whenComplete((ignored, throwable) -> ctx.channel().eventLoop().execute(() -> {
+                        ctx.channel().closeFuture().removeListener(releaseHeldFramesOnClose);
+                        StreamFrameBreakpointRegistry.getInstance().evictStream(streamId);
+                        if (closedByBreakpoint.get()) {
+                            return;
+                        }
+                        failStream.accept(error);
+                    }));
                 } else {
-                    completeInFlightOnFlush(null);
+                    failStream.accept(error);
                 }
             }
         );
+    }
+
+    /**
+     * Applies a stream-frame breakpoint decision on the client channel's event loop. Every
+     * route reports the frame's bytes written (or discarded) to the streaming body, except
+     * CLOSE, which ends the response and closes the upstream.
+     */
+    private void applyStreamFrameDecision(ChannelHandlerContext ctx, StreamingBody streamingBody, StreamFrameDecision decision,
+                                          byte[] chunkBytes, int chunkSize, java.util.concurrent.atomic.AtomicBoolean closedByBreakpoint) {
+        if (closedByBreakpoint.get()) {
+            streamingBody.chunkWritten(chunkSize);
+            return;
+        }
+        if (!ctx.channel().isActive()) {
+            streamingBody.closeUpstream();
+            streamingBody.chunkWritten(chunkSize);
+            return;
+        }
+        switch (decision.getAction()) {
+            case CONTINUE: {
+                DefaultHttpContent content = new DefaultHttpContent(Unpooled.wrappedBuffer(chunkBytes));
+                ctx.writeAndFlush(content).addListener(future -> streamingBody.chunkWritten(chunkSize));
+                break;
+            }
+            case MODIFY: {
+                DefaultHttpContent content = new DefaultHttpContent(Unpooled.wrappedBuffer(decision.getReplacementBody()));
+                ctx.writeAndFlush(content).addListener(future -> streamingBody.chunkWritten(chunkSize));
+                break;
+            }
+            case DROP: {
+                // Discard the frame — do not write anything to the client
+                streamingBody.chunkWritten(chunkSize);
+                break;
+            }
+            case INJECT: {
+                // Write the original frame, then the injected one, both before the next frame
+                ctx.write(new DefaultHttpContent(Unpooled.wrappedBuffer(chunkBytes)));
+                ctx.writeAndFlush(new DefaultHttpContent(Unpooled.wrappedBuffer(decision.getInjectedBody())))
+                    .addListener(future -> streamingBody.chunkWritten(chunkSize));
+                break;
+            }
+            case CLOSE: {
+                // End the stream: send LastHttpContent and close. This is the terminal write of
+                // the response — release the in-flight token once it flushes. The upstream is
+                // closed once it has: nothing will take the rest of the stream, and closing it
+                // first would abort the body before this flush.
+                closedByBreakpoint.set(true);
+                ChannelFuture closeFrameFuture = ctx.writeAndFlush(LastHttpContent.EMPTY_LAST_CONTENT);
+                closeFrameFuture.addListener(future -> {
+                    ctx.close();
+                    streamingBody.closeUpstream();
+                    // Do NOT request more — stream is ended
+                });
+                completeInFlightOnFlush(closeFrameFuture);
+                break;
+            }
+            default: {
+                // Unrecognised action — log a warning and request more to avoid
+                // hanging the stream if a future action type is added without
+                // updating this switch.
+                if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(WARN)) {
+                    mockServerLogger.logEvent(new LogEntry()
+                        .setLogLevel(WARN)
+                        .setMessageFormat("unrecognised stream frame breakpoint action:{}")
+                        .setArguments(decision.getAction())
+                    );
+                }
+                streamingBody.chunkWritten(chunkSize);
+                break;
+            }
+        }
     }
 
     private void writeAndCloseSocket(final ChannelHandlerContext ctx, final HttpRequest request, HttpResponse response) {

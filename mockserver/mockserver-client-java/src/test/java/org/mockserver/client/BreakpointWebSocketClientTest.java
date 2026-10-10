@@ -811,4 +811,76 @@ public class BreakpointWebSocketClientTest {
 
         ch.close();
     }
+
+    @Test
+    public void handshakeUsesTheBareCallbackUriAndAsksForReleasedNoticesWithAHeader() throws Exception {
+        // servers up to 8.0.0 open the callback WebSocket only when the URI is exactly the bare path
+        EmbeddedChannel ch = new EmbeddedChannel(new io.netty.handler.codec.http.HttpClientCodec());
+        ch.pipeline().addLast(new BreakpointWebSocketClient.BreakpointWebSocketClientHandler(
+            LOGGER, "test-client-id", new java.net.InetSocketAddress("localhost", 1080), "", null, false));
+        ch.pipeline().fireChannelActive();
+
+        StringBuilder written = new StringBuilder();
+        Object outbound;
+        while ((outbound = ch.readOutbound()) != null) {
+            written.append(((io.netty.buffer.ByteBuf) outbound).toString(java.nio.charset.StandardCharsets.US_ASCII));
+            ((io.netty.buffer.ByteBuf) outbound).release();
+        }
+        String[] lines = written.toString().split("\r\n");
+        assertThat(lines[0], is("GET /_mockserver_callback_websocket HTTP/1.1"));
+        assertThat(java.util.Arrays.stream(lines).anyMatch(line -> line.equalsIgnoreCase("X-MockServer-Capabilities: breakpointReleased")), is(true));
+        assertThat(java.util.Arrays.stream(lines).anyMatch(line -> line.equalsIgnoreCase("X-CLIENT-REGISTRATION-ID: test-client-id")), is(true));
+        ch.finishAndReleaseAll();
+    }
+
+    @Test
+    public void aMessageTypeFromANewerServerIsIgnoredWithoutAReplyOrAnError() throws Exception {
+        MockServerLogger logger = org.mockito.Mockito.mock(MockServerLogger.class);
+        org.mockito.Mockito.when(logger.isEnabledForInstance(org.mockito.ArgumentMatchers.any())).thenReturn(true);
+        EmbeddedChannel ch = new EmbeddedChannel();
+        BreakpointWebSocketClient client = new BreakpointWebSocketClient(
+            ch.eventLoop().parent(), "test-client-id", logger, () -> {
+                throw new AssertionError("no TLS connection is made");
+            });
+        Field channelField = BreakpointWebSocketClient.class.getDeclaredField("channel");
+        channelField.setAccessible(true);
+        channelField.set(client, ch);
+
+        client.receivedTextWebSocketFrame(new TextWebSocketFrame(
+            "{\"type\":\"org.mockserver.serialization.model.SomeFutureNoticeDTO\",\"value\":\"{\\\"correlationId\\\":\\\"c\\\"}\"}"));
+
+        assertThat(ch.readOutbound(), is(nullValue()));
+        org.mockito.Mockito.verify(logger, org.mockito.Mockito.never()).logEvent(org.mockito.ArgumentMatchers.argThat(
+            entry -> entry.getLogLevel() == org.slf4j.event.Level.WARN || entry.getLogLevel() == org.slf4j.event.Level.ERROR));
+        org.mockito.Mockito.verify(logger).logEvent(org.mockito.ArgumentMatchers.argThat(
+            entry -> entry.getLogLevel() == org.slf4j.event.Level.DEBUG));
+        ch.close();
+    }
+
+    @Test
+    public void releasedNoticeNeedsNoReplyAndIsNotReportedAsUnsupported() throws Exception {
+        // given -- a logger that records every event it is asked to log
+        MockServerLogger logger = org.mockito.Mockito.mock(MockServerLogger.class);
+        org.mockito.Mockito.when(logger.isEnabledForInstance(org.mockito.ArgumentMatchers.any())).thenReturn(true);
+        EmbeddedChannel ch = new EmbeddedChannel();
+        BreakpointWebSocketClient client = new BreakpointWebSocketClient(
+            ch.eventLoop().parent(), "test-client-id", logger, () -> {
+                throw new AssertionError("no TLS connection is made");
+            });
+        Field channelField = BreakpointWebSocketClient.class.getDeclaredField("channel");
+        channelField.setAccessible(true);
+        channelField.set(client, ch);
+
+        // when -- the server says it continued a paused request itself
+        client.receivedTextWebSocketFrame(new TextWebSocketFrame(serializer.serialize(
+            new org.mockserver.serialization.model.BreakpointReleasedDTO()
+                .setCorrelationId("corr-released")
+                .setReason(org.mockserver.serialization.model.BreakpointReleasedDTO.REASON_TIMEOUT))));
+
+        // then -- nothing is sent back and nothing is logged as a warning or error
+        assertThat(ch.readOutbound(), is(nullValue()));
+        org.mockito.Mockito.verify(logger, org.mockito.Mockito.never()).logEvent(org.mockito.ArgumentMatchers.argThat(
+            entry -> entry.getLogLevel() == org.slf4j.event.Level.WARN || entry.getLogLevel() == org.slf4j.event.Level.ERROR));
+        ch.close();
+    }
 }

@@ -87,6 +87,9 @@ completed when the client replies or the timeout fires. No thread is blocked.
   - `NettyResponseWriter.writeStreamingResponse` — SSE/chunked forwarded and mock
     responses (A1c). The `StreamingBody.subscribe()` onChunk callback intercepts
     each chunk before writing as a `DefaultHttpContent`.
+  - `HttpSseResponseActionHandler.scheduleEvents` — `httpSseResponse` mocks and the
+    LLM streams written through it (SSE, NDJSON, AWS event stream). Each event is held
+    before it is written; the next event is scheduled only once it is decided.
   - `GrpcStreamResponseActionHandler.scheduleMessages` — gRPC server-streaming mock
     responses (A1d). Each gRPC message frame is intercepted before `ctx.writeAndFlush`.
   - `HttpWebSocketResponseActionHandler.scheduleMessages` — WebSocket eager/scripted
@@ -117,12 +120,19 @@ completed when the client replies or the timeout fires. No thread is blocked.
   sequence), which means they can hit `breakpointMaxHeld` under high
   throughput. There is no inherent backpressure in these paths because the
   frame sender is invoked per inbound event rather than chained sequentially.
-- **Stream-close eviction:** when a stream completes, errors, or is explicitly
-  closed, all held frames for that stream are auto-continued/dropped (preventing
-  leaks and hanging futures).
+- **Stream completion:** in `NettyResponseWriter` every frame write, and the
+  terminating `LastHttpContent`, is chained behind the previous frame's decision
+  (a `CompletableFuture` tail). A frame still held when the source completes is
+  therefore delivered once decided, and only then does the response end. The SSE
+  mock handler gets the same guarantee from its one-event-at-a-time schedule.
+- **Stream failure and client loss:** when a forwarded stream errors, or the
+  client channel closes, `StreamFrameCallbackDispatcher.releaseStream(streamId)`
+  completes every held frame of that stream with DROP and sends its client a
+  `BreakpointReleasedDTO` (`STREAM_ENDED`), so the dashboard stops listing it.
 - **Frame ordering:** frames within a stream are assigned monotonic sequence
-  numbers. The registry enforces that frames are resolved in order — attempting
-  to resolve a frame whose predecessor is still held is rejected.
+  numbers. On SSE/chunked streams a decision on a later frame takes effect only
+  after the frames before it are decided and written, so the client always sees
+  stream order.
 - **ByteBuf discipline:** frame bytes are copied into a `byte[]` at park time.
   For SSE/chunked, the original ByteBuf (owned by StreamingBody) is released
   normally by the caller. For gRPC, frames are already `byte[]` from
@@ -211,7 +221,9 @@ completed when the client replies or the timeout fires. No thread is blocked.
 ## Safety rails
 
 - **Timeout auto-continue:** each paused exchange or frame auto-continues if not
-  resolved within `breakpointTimeoutMillis` (default 30 seconds).
+  resolved within `breakpointTimeoutMillis` (default 30 seconds), and its owning
+  client is sent a `BreakpointReleasedDTO` (`TIMEOUT`) so it stops offering the
+  item; a reply that arrives afterwards is ignored.
 - **Max-held cap:** when `breakpointMaxHeld` (default 50) exchanges/frames are
   held (request/response breakpoints and stream frames use separate registries
   but both check the same cap), new intercepts are skipped.
@@ -450,10 +462,36 @@ The client's reply carrying the resolution decision.
 | `INJECT` | Write the original frame AND an additional frame with `body` bytes |
 | `CLOSE` | End the stream (drop frame, send stream-end signal, evict remaining; a forwarded stream's upstream is closed) |
 
+#### Server-to-client: `BreakpointReleasedDTO`
+
+Sent when MockServer resolves a paused request, response or frame itself, for
+every phase -- but only to a client that asked for it on the WebSocket upgrade,
+with an `X-MockServer-Capabilities: breakpointReleased` header (language clients;
+the Java client sends it) or a `?capabilities=breakpointReleased` query parameter
+(the dashboard, as a browser cannot set headers). `CallbackWebSocketServerHandler`
+matches the upgrade on the decoded path, so a query string is accepted, and
+records the capability with `WebSocketClientRegistry.registerClient(clientId,
+ctx, true)`. Clients must keep the bare URI unless they only target this version:
+servers up to 8.0.0 open the callback WebSocket only when the URI is exactly
+`/_mockserver_callback_websocket`. Older clients never receive the notice (an
+8.0.0 Java client logs an unknown message type as an ERROR). The Java client
+logs the notice at TRACE and now ignores any unknown message type at DEBUG.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `correlationId` | String | The paused item's correlation id (`WebSocketCorrelationId` header, or `PausedStreamFrameDTO.correlationId`) |
+| `reason` | String | `TIMEOUT` (auto-continued after `breakpointTimeoutMillis`) or `STREAM_ENDED` (frame dropped because its stream failed or its client went away) |
+| `message` | String | Human-readable explanation |
+
+The dashboard also remembers the correlation ids it has replied to, so a notice
+that crosses its own reply on the wire is reported as "your decision was not
+applied" rather than silently swallowed.
+
 #### Safety rails
 
 - **Timeout auto-continue:** if the client does not reply within
-  `breakpointTimeoutMillis`, the frame auto-continues with the original bytes.
+  `breakpointTimeoutMillis`, the frame auto-continues with the original bytes
+  and the client is sent a `BreakpointReleasedDTO`.
 - **Max-held cap:** WS stream-frame dispatches share the `breakpointMaxHeld`
   cap with all other breakpoint registries and dispatchers. When the cap is
   reached, new frames are written immediately (no breakpoint).
@@ -523,6 +561,7 @@ The dashboard is also a full callback WebSocket client: it connects to `/_mockse
 - `StreamFrameCallbackDispatcher` — process-wide singleton for per-frame WS-callback dispatch; dispatches `PausedStreamFrameDTO` to owning client, receives `StreamFrameDecisionDTO` replies, manages in-flight tracking, timeouts, and disconnect cleanup
 - `PausedStreamFrameDTO` — server-to-client WS message: correlationId, streamId, sequenceNumber, direction, phase, body (Base64), requestMethod, requestPath
 - `StreamFrameDecisionDTO` — client-to-server WS reply: correlationId, action (CONTINUE/MODIFY/DROP/INJECT/CLOSE), optional body (Base64)
+- `BreakpointReleasedDTO` — server-to-client WS notice that a paused item was resolved by the server (TIMEOUT / STREAM_ENDED); sent via `WebSocketClientRegistry.sendBreakpointReleased`
 - `WebSocketClientRegistry.sendStreamFrameMessage` — sends a `PausedStreamFrameDTO` to a client
 - `WebSocketClientRegistry.registerStreamFrameCallbackHandler` — registers a callback for `StreamFrameDecisionDTO` replies by correlationId
 
@@ -531,6 +570,7 @@ The dashboard is also a full callback WebSocket client: it connects to `/_mockse
 - `StreamFrameDecision` — CONTINUE / MODIFY / DROP / INJECT / CLOSE resolution
 - `StreamFrameBreakpointRegistry` — process-wide singleton managing per-stream sequence counters and stream eviction
 - `NettyResponseWriter.writeStreamingResponse` — hold point for SSE/chunked streams (forwarded + mock)
+- `HttpSseResponseActionHandler.scheduleEvents` — hold point for `httpSseResponse` mock events
 - `GrpcStreamResponseActionHandler.scheduleMessages` — hold point for gRPC server-streaming mock responses
 - `HttpWebSocketResponseActionHandler.scheduleMessages` — hold point for WebSocket eager/scripted messages
 - `HttpWebSocketResponseActionHandler.installBidirectionalHandler` — hold point for WebSocket bidi responses
@@ -575,7 +615,8 @@ The Breakpoints panel has three tabs:
 - A **matcher-builder form** to register a breakpoint matcher with method, path
   (regex), phase checkboxes (Request, Response, Response stream frames,
   Inbound stream frames), and an optional **Skip count** field (Nth-hit /
-  conditional breakpoint). On submit, calls
+  conditional breakpoint). A form with no request fields would register a
+  catch-all `.*` matcher, so it asks for confirmation first. On submit, calls
   `PUT /mockserver/breakpoint/matcher {httpRequest, phases, clientId, skipCount?}`
   with the dashboard's assigned `clientId`.
 - Lists all registered matchers (`GET /mockserver/breakpoint/matchers`) with
@@ -590,6 +631,8 @@ The Breakpoints panel has three tabs:
   (edit the JSON in a dialog, send modified), or **Abort** (REQUEST phase only;
   sends an `HttpResponse` with status 503 to skip forwarding).
 - The WS reply IS the resolution -- no REST endpoint is called.
+- A `BreakpointReleasedDTO` removes the item and shows a notice; an open Modify
+  dialog for it shows an error and no longer sends.
 
 ### Live Streams tab
 

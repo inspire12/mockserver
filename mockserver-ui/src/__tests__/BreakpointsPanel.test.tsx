@@ -1252,3 +1252,126 @@ describe('BreakpointsPanel — quick scope', () => {
     expect(captured.body!.httpRequest).toEqual({ path: '/api/(orders|carts)' });
   });
 });
+
+describe('BreakpointsPanel — items MockServer releases itself', () => {
+  async function renderConnected(): Promise<MockWebSocket> {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, status: 200, json: async () => emptyMatchers,
+    })));
+    renderPanel();
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+    });
+    return connectCallbackWs();
+  }
+
+  function pauseRequest(ws: MockWebSocket, correlationId: string) {
+    ws.simulateMessage({
+      type: 'org.mockserver.model.HttpRequest',
+      value: JSON.stringify({ method: 'GET', path: '/bp', headers: { WebSocketCorrelationId: [correlationId] } }),
+    });
+  }
+
+  function release(ws: MockWebSocket, correlationId: string) {
+    ws.simulateMessage({
+      type: 'org.mockserver.serialization.model.BreakpointReleasedDTO',
+      value: JSON.stringify({
+        correlationId,
+        reason: 'TIMEOUT',
+        message: 'The paused request was not resolved within the breakpoint timeout (2000 ms), so MockServer continued it unchanged.',
+      }),
+    });
+  }
+
+  async function switchToExchangesTab() {
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('tab', { name: /Live Exchanges/ }));
+  }
+
+  it('removes a timed-out exchange from Live Exchanges and says why', async () => {
+    const ws = await renderConnected();
+    pauseRequest(ws, 'corr-timeout');
+    await switchToExchangesTab();
+    await waitFor(() => expect(screen.getByText('1 paused')).toBeInTheDocument());
+
+    release(ws, 'corr-timeout');
+
+    await waitFor(() => expect(screen.queryByText('1 paused')).not.toBeInTheDocument());
+    expect(screen.getByTestId('breakpoint-release-notice')).toHaveTextContent(
+      'Request GET /bp is no longer paused. The paused request was not resolved within the breakpoint timeout (2000 ms)',
+    );
+    expect(screen.queryByRole('button', { name: /^Continue/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps an open Modify dialog from sending once its exchange is released', async () => {
+    const user = userEvent.setup();
+    const ws = await renderConnected();
+    pauseRequest(ws, 'corr-modify');
+    await switchToExchangesTab();
+    const modifyBtn = await waitFor(() => {
+      const button = screen.getAllByRole('button').find((b) => b.getAttribute('aria-label')?.startsWith('Modify'));
+      expect(button).toBeDefined();
+      return button!;
+    });
+    await user.click(modifyBtn);
+    await waitFor(() => expect(screen.getByText('Modify Request')).toBeInTheDocument());
+
+    release(ws, 'corr-modify');
+    await waitFor(() => expect(screen.getByText(/This item is no longer paused/)).toBeInTheDocument());
+    const sentBefore = ws.sentMessages.length;
+    await user.click(screen.getByRole('button', { name: /Send Modified/ }));
+
+    expect(ws.sentMessages.length).toBe(sentBefore);
+    expect(screen.getByText('Modify Request')).toBeInTheDocument();
+  });
+
+  it('says a decision was not applied when the release crossed it on the wire', async () => {
+    const user = userEvent.setup();
+    const ws = await renderConnected();
+    pauseRequest(ws, 'corr-late');
+    await switchToExchangesTab();
+    const continueBtn = await waitFor(() => {
+      const button = screen.getAllByRole('button').find((b) => b.getAttribute('aria-label')?.startsWith('Continue'));
+      expect(button).toBeDefined();
+      return button!;
+    });
+    await user.click(continueBtn);
+
+    release(ws, 'corr-late');
+
+    await waitFor(() => expect(screen.getByTestId('breakpoint-release-notice')).toHaveTextContent(
+      'Your decision was not applied: The paused request was not resolved within the breakpoint timeout',
+    ));
+  });
+});
+
+describe('BreakpointsPanel — catch-all matcher confirmation', () => {
+  it('asks before registering a matcher with no request fields, and registers .* only when confirmed', async () => {
+    const user = userEvent.setup();
+    const registerBodies: Record<string, unknown>[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/mockserver/breakpoint/matcher') && init?.method === 'PUT') {
+        registerBodies.push(JSON.parse(init.body as string) as Record<string, unknown>);
+        return { ok: true, status: 200, json: async () => ({ id: 'all-1', phases: ['REQUEST'] }) };
+      }
+      return { ok: true, status: 200, json: async () => emptyMatchers };
+    }));
+    renderPanel();
+    await waitFor(() => {
+      expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+    });
+    connectCallbackWs();
+
+    await user.click(screen.getByRole('button', { name: /Register Matcher/ }));
+    expect(await screen.findByText('Pause every request?')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByText('Pause every request?')).not.toBeInTheDocument());
+    expect(registerBodies).toHaveLength(0);
+
+    await user.click(screen.getByRole('button', { name: /Register Matcher/ }));
+    await user.click(await screen.findByRole('button', { name: 'Pause every request' }));
+
+    await waitFor(() => expect(registerBodies).toHaveLength(1));
+    expect((registerBodies[0]!.httpRequest as Record<string, unknown>).path).toBe('.*');
+  });
+});

@@ -10,12 +10,15 @@ import org.mockserver.closurecallback.websocketregistry.WebSocketClientRegistry;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.serialization.WebSocketMessageSerializer;
+import org.mockserver.serialization.model.BreakpointReleasedDTO;
 import org.mockserver.serialization.model.PausedStreamFrameDTO;
 import org.mockserver.serialization.model.StreamFrameDecisionDTO;
 
 import java.util.Base64;
 import java.util.EnumSet;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -72,7 +75,7 @@ public class StreamFrameCallbackDispatcherTest {
         clientChannel = new EmbeddedChannel();
         ChannelHandlerContext ctx = mock(ChannelHandlerContext.class);
         when(ctx.channel()).thenReturn(clientChannel);
-        webSocketClientRegistry.registerClient(CLIENT_ID, ctx);
+        webSocketClientRegistry.registerClient(CLIENT_ID, ctx, true);
 
         // Drain the registration confirmation message
         clientChannel.readOutbound();
@@ -305,6 +308,104 @@ public class StreamFrameCallbackDispatcherTest {
         // Don't reply — let it timeout
         StreamFrameDecision decision = future.get(5, TimeUnit.SECONDS);
         assertThat(decision.getAction(), is(StreamFrameDecision.Action.CONTINUE));
+    }
+
+    @Test
+    public void timeoutTellsTheOwningClientTheFrameWasContinued() throws Exception {
+        BlockingQueue<Object> sent = new LinkedBlockingQueue<>();
+        registerCapturingClient("released-frame-client", sent);
+        Configuration shortTimeoutConfig = Configuration.configuration().breakpointTimeoutMillis(200L);
+
+        CompletableFuture<StreamFrameDecision> future = dispatcher.dispatchFrame(
+            "released-frame-client", "stream-timeout", 0,
+            PausedStreamFrame.Direction.OUTBOUND, BreakpointPhase.RESPONSE_STREAM,
+            "timeout me".getBytes(), "GET", "/api/test",
+            webSocketClientRegistry, shortTimeoutConfig, logger
+        );
+        PausedStreamFrameDTO paused = (PausedStreamFrameDTO) serializer.deserialize(((TextWebSocketFrame) sent.poll(5, TimeUnit.SECONDS)).text());
+
+        assertThat(future.get(5, TimeUnit.SECONDS).getAction(), is(StreamFrameDecision.Action.CONTINUE));
+        BreakpointReleasedDTO released = awaitReleased(sent);
+        assertThat(released.getCorrelationId(), is(paused.getCorrelationId()));
+        assertThat(released.getReason(), is(BreakpointReleasedDTO.REASON_TIMEOUT));
+    }
+
+    @Test
+    public void releaseStreamDropsOnlyThatStreamsHeldFramesAndTellsTheClient() throws Exception {
+        CompletableFuture<StreamFrameDecision> ended = dispatcher.dispatchFrame(
+            CLIENT_ID, "stream-ended", 0, PausedStreamFrame.Direction.OUTBOUND, BreakpointPhase.RESPONSE_STREAM,
+            "a".getBytes(), "GET", "/a", webSocketClientRegistry, configuration, logger);
+        PausedStreamFrameDTO endedFrame = readPausedFrame();
+        CompletableFuture<StreamFrameDecision> other = dispatcher.dispatchFrame(
+            CLIENT_ID, "stream-other", 0, PausedStreamFrame.Direction.OUTBOUND, BreakpointPhase.RESPONSE_STREAM,
+            "b".getBytes(), "GET", "/b", webSocketClientRegistry, configuration, logger);
+        readPausedFrame();
+
+        assertThat(dispatcher.releaseStream("stream-ended"), is(1));
+
+        assertThat(ended.getNow(null).getAction(), is(StreamFrameDecision.Action.DROP));
+        assertThat("a frame of another stream stays held", other.isDone(), is(false));
+        TextWebSocketFrame frame = clientChannel.readOutbound();
+        assertThat("the owning client is told the frame was dropped", frame, is(notNullValue()));
+        BreakpointReleasedDTO released = (BreakpointReleasedDTO) serializer.deserialize(frame.text());
+        frame.release();
+        assertThat(released.getCorrelationId(), is(endedFrame.getCorrelationId()));
+        assertThat(released.getReason(), is(BreakpointReleasedDTO.REASON_STREAM_ENDED));
+        assertThat("nothing is sent for the frame that stays held", clientChannel.readOutbound(), is(nullValue()));
+        assertThat("a released stream has nothing left to release", dispatcher.releaseStream("stream-ended"), is(0));
+    }
+
+    @Test
+    public void aClientThatDidNotAskForReleasedNoticesIsNeverSentOne() throws Exception {
+        // registered as an 8.0.0 client does: no breakpointReleased capability
+        EmbeddedChannel oldClientChannel = new EmbeddedChannel();
+        ChannelHandlerContext oldCtx = mock(ChannelHandlerContext.class);
+        when(oldCtx.channel()).thenReturn(oldClientChannel);
+        webSocketClientRegistry.registerClient("old-client", oldCtx);
+        ((TextWebSocketFrame) oldClientChannel.readOutbound()).release();
+        CompletableFuture<StreamFrameDecision> held = dispatcher.dispatchFrame(
+            "old-client", "stream-old", 0, PausedStreamFrame.Direction.OUTBOUND, BreakpointPhase.RESPONSE_STREAM,
+            "a".getBytes(), "GET", "/a", webSocketClientRegistry, configuration, logger);
+        ((TextWebSocketFrame) oldClientChannel.readOutbound()).release();
+
+        assertThat(dispatcher.releaseStream("stream-old"), is(1));
+
+        assertThat(held.getNow(null).getAction(), is(StreamFrameDecision.Action.DROP));
+        assertThat("an old client is sent nothing it cannot read", oldClientChannel.readOutbound(), is(nullValue()));
+        assertThat(webSocketClientRegistry.sendBreakpointReleased("old-client", new BreakpointReleasedDTO().setCorrelationId("x")), is(false));
+        oldClientChannel.close();
+    }
+
+    private PausedStreamFrameDTO readPausedFrame() throws Exception {
+        TextWebSocketFrame frame = clientChannel.readOutbound();
+        assertThat(frame, is(notNullValue()));
+        PausedStreamFrameDTO paused = (PausedStreamFrameDTO) serializer.deserialize(frame.text());
+        frame.release();
+        return paused;
+    }
+
+    /**
+     * Registers a client whose channel records every message written to it in a thread-safe queue,
+     * because the timeout notice is written from the timeout scheduler's thread.
+     */
+    private void registerCapturingClient(String clientId, BlockingQueue<Object> sent) {
+        io.netty.channel.Channel channel = mock(io.netty.channel.Channel.class);
+        when(channel.writeAndFlush(org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> {
+            sent.add(invocation.getArgument(0));
+            return null;
+        });
+        ChannelHandlerContext ctx = mock(ChannelHandlerContext.class);
+        when(ctx.channel()).thenReturn(channel);
+        webSocketClientRegistry.registerClient(clientId, ctx, true);
+        sent.clear();
+    }
+
+    private BreakpointReleasedDTO awaitReleased(BlockingQueue<Object> sent) throws Exception {
+        TextWebSocketFrame frame = (TextWebSocketFrame) sent.poll(5, TimeUnit.SECONDS);
+        assertThat("a released notice must be sent to the owning client", frame, is(notNullValue()));
+        Object message = serializer.deserialize(frame.text());
+        assertThat(message, instanceOf(BreakpointReleasedDTO.class));
+        return (BreakpointReleasedDTO) message;
     }
 
     // ---- Client not connected ----

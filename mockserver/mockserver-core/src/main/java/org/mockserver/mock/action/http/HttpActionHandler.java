@@ -4024,7 +4024,7 @@ public class HttpActionHandler {
 
     private HttpSseResponseActionHandler getHttpSseResponseActionHandler() {
         if (httpSseResponseActionHandler == null) {
-            httpSseResponseActionHandler = new HttpSseResponseActionHandler(mockServerLogger, scheduler, configuration);
+            httpSseResponseActionHandler = new HttpSseResponseActionHandler(mockServerLogger, scheduler, configuration, httpStateHandler.getWebSocketClientRegistry());
         }
         return httpSseResponseActionHandler;
     }

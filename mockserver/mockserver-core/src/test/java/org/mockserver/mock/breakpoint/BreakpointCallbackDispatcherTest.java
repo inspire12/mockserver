@@ -10,11 +10,15 @@ import org.mockserver.closurecallback.websocketregistry.WebSocketClientRegistry;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
+import org.mockserver.model.HttpRequestAndHttpResponse;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.serialization.WebSocketMessageSerializer;
+import org.mockserver.serialization.model.BreakpointReleasedDTO;
 
 import java.util.EnumSet;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -263,6 +267,66 @@ public class BreakpointCallbackDispatcherTest {
         // Don't send any reply — let it timeout
         BreakpointDecision decision = future.get(5, TimeUnit.SECONDS);
         assertThat(decision.getAction(), is(BreakpointDecision.Action.CONTINUE));
+    }
+
+    @Test
+    public void requestTimeoutTellsTheOwningClientTheRequestWasContinued() throws Exception {
+        BlockingQueue<Object> sent = new LinkedBlockingQueue<>();
+        registerCapturingClient("released-request-client", sent);
+        Configuration shortTimeoutConfig = Configuration.configuration().breakpointTimeoutMillis(200L);
+
+        CompletableFuture<BreakpointDecision> future = dispatcher.dispatchRequest(
+            "released-request-client", request().withPath("/api/released"), webSocketClientRegistry, shortTimeoutConfig, logger
+        );
+        HttpRequest paused = (HttpRequest) serializer.deserialize(((TextWebSocketFrame) sent.poll(5, TimeUnit.SECONDS)).text());
+
+        assertThat(future.get(5, TimeUnit.SECONDS).getAction(), is(BreakpointDecision.Action.CONTINUE));
+        BreakpointReleasedDTO released = awaitReleased(sent);
+        assertThat(released.getCorrelationId(), is(paused.getFirstHeader(WEB_SOCKET_CORRELATION_ID_HEADER_NAME)));
+        assertThat(released.getReason(), is(BreakpointReleasedDTO.REASON_TIMEOUT));
+        assertThat(released.getMessage(), containsString("200 ms"));
+    }
+
+    @Test
+    public void responseTimeoutTellsTheOwningClientTheResponseWasContinued() throws Exception {
+        BlockingQueue<Object> sent = new LinkedBlockingQueue<>();
+        registerCapturingClient("released-response-client", sent);
+        Configuration shortTimeoutConfig = Configuration.configuration().breakpointTimeoutMillis(200L);
+
+        CompletableFuture<BreakpointDecision> future = dispatcher.dispatchResponse(
+            "released-response-client", request().withPath("/api/released"), response().withBody("original"),
+            webSocketClientRegistry, shortTimeoutConfig, logger
+        );
+        HttpRequestAndHttpResponse paused = (HttpRequestAndHttpResponse) serializer.deserialize(((TextWebSocketFrame) sent.poll(5, TimeUnit.SECONDS)).text());
+
+        assertThat(future.get(5, TimeUnit.SECONDS).getAction(), is(BreakpointDecision.Action.CONTINUE));
+        BreakpointReleasedDTO released = awaitReleased(sent);
+        assertThat(released.getCorrelationId(), is(paused.getHttpRequest().getFirstHeader(WEB_SOCKET_CORRELATION_ID_HEADER_NAME)));
+        assertThat(released.getReason(), is(BreakpointReleasedDTO.REASON_TIMEOUT));
+    }
+
+    /**
+     * Registers a client whose channel records every message written to it in a thread-safe queue,
+     * because the timeout notice is written from the timeout scheduler's thread.
+     */
+    private void registerCapturingClient(String clientId, BlockingQueue<Object> sent) {
+        io.netty.channel.Channel channel = mock(io.netty.channel.Channel.class);
+        when(channel.writeAndFlush(org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> {
+            sent.add(invocation.getArgument(0));
+            return null;
+        });
+        ChannelHandlerContext ctx = mock(ChannelHandlerContext.class);
+        when(ctx.channel()).thenReturn(channel);
+        webSocketClientRegistry.registerClient(clientId, ctx, true);
+        sent.clear();
+    }
+
+    private BreakpointReleasedDTO awaitReleased(BlockingQueue<Object> sent) throws Exception {
+        TextWebSocketFrame frame = (TextWebSocketFrame) sent.poll(5, TimeUnit.SECONDS);
+        assertThat("a released notice must be sent to the owning client", frame, is(notNullValue()));
+        Object message = serializer.deserialize(frame.text());
+        assertThat(message, instanceOf(BreakpointReleasedDTO.class));
+        return (BreakpointReleasedDTO) message;
     }
 
     // ---- Client not connected ----

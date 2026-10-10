@@ -854,6 +854,10 @@ The matcher list loads on mount and via a manual Refresh button (no interval).
 
 Held items are bounded client-side and cleared when the callback WebSocket disconnects (a reconnect issues a new `clientId`, so older paused items can no longer be resolved).
 
+**Items MockServer resolves itself** — when the breakpoint timeout continues a paused item, or a stream ends before a held frame can be delivered, the server sends a `BreakpointReleasedDTO` (the dashboard asks for these by connecting with `?capabilities=breakpointReleased`). The client removes the item from its store and tells subscribers (`subscribeReleaseNotices`); the panel shows the message in a dismissible notice (`data-testid="breakpoint-release-notice"`), and an open Modify / Inject dialog for that item shows an error and no longer sends. The client remembers the correlation ids it has replied to, so a notice that crosses the user's own decision is shown as "Your decision was not applied".
+
+**Catch-all confirmation** — registering with no method, path, header, query parameter or cookie would create a `.*` matcher that pauses every request, so the Register Matcher button opens a confirmation dialog ("Pause every request?") first.
+
 **Empty-state guidance**: when there are no paused exchanges or stream frames yet, each tab shows a contextual prompt directing the user to the correct next step — e.g. "Register a breakpoint matcher (Matchers tab) to pause matching forwarded requests or responses." If the callback WebSocket is not yet `connected`, an info banner explains the state and tells the user that items will appear once the connection establishes and matchers are registered.
 
 See [docs/code/breakpoints.md](breakpoints.md) for the server-side architecture (`BreakpointRegistry`, `PausedExchange`, phases) and the callback-WebSocket resolution protocol.

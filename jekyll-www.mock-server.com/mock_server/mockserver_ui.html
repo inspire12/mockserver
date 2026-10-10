@@ -460,12 +460,14 @@ sitemap:
 <p>The view has three tabs:</p>
 
 <ul>
-    <li><strong>Matchers</strong> — register a new breakpoint matcher (method, path regex, headers, query parameters, cookies) and choose which phases to pause on (<strong>Request</strong>, <strong>Response</strong>, <strong>Response stream frames</strong>, <strong>Inbound stream frames</strong>). A table of registered matchers shows each matcher's id, pattern, active phases, owner, and a remove action.</li>
+    <li><strong>Matchers</strong> — register a new breakpoint matcher (method, path regex, headers, query parameters, cookies) and choose which phases to pause on (<strong>Request</strong>, <strong>Response</strong>, <strong>Response stream frames</strong>, <strong>Inbound stream frames</strong>). A matcher with none of these fields set would pause every request, so the dashboard asks you to confirm it first. A table of registered matchers shows each matcher's id, pattern, active phases, owner, and a remove action.</li>
     <li><strong>Live Exchanges</strong> — request and response exchanges currently paused at a breakpoint, awaiting a decision.</li>
     <li><strong>Live Streams</strong> — paused streaming frames (SSE, gRPC, WebSocket, GraphQL subscription), one row per frame.</li>
 </ul>
 
 <p>The Live Exchanges and Live Streams tabs list all currently paused exchanges and stream frames. Live Streams shows one row per paused frame with its direction (INBOUND/OUTBOUND), stream id, sequence number within the stream, the request method and path, and a preview of the frame body; frames from the same stream share a stream id. Actions available on each paused item: <strong>Continue</strong> (release unchanged), <strong>Modify</strong> (replace the body), <strong>Drop</strong> (discard), <strong>Inject</strong> (continue and add a new frame after it), or <strong>Close</strong> (terminate the stream). Request and response breakpoints show the full request or response for inspection and allow modification or abort before the exchange is forwarded.</p>
+
+<p>If you do not act on a paused item within the breakpoint timeout (<span class="inline_code">breakpointTimeoutMillis</span>, 30 seconds by default), MockServer continues it unchanged; the dashboard then removes it from the list and shows a notice saying so. If you had already clicked an action just as the timeout passed, the notice tells you that your decision was not applied.</p>
 
 <p>See <a href="/mock_server/interactive_breakpoints.html">Interactive Breakpoints</a> for the full matcher API reference, callback WebSocket protocol, and configuration details.</p>
 

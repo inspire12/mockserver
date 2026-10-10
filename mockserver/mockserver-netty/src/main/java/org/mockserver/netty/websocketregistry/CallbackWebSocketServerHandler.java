@@ -25,6 +25,9 @@ import org.mockserver.netty.unification.Http2StreamFaults;
 import org.mockserver.uuid.UUIDService;
 import org.slf4j.event.Level;
 
+import java.util.Arrays;
+import java.util.List;
+
 import static com.google.common.net.HttpHeaders.HOST;
 import static org.mockserver.closurecallback.websocketclient.WebSocketClient.CLIENT_REGISTRATION_ID_HEADER;
 import static org.mockserver.exception.ExceptionHandling.boundedFault;
@@ -50,6 +53,9 @@ public class CallbackWebSocketServerHandler extends ChannelInboundHandlerAdapter
     // clobber each other's handshake state, so it lives on the channel instead.
     private static final AttributeKey<WebSocketServerHandshaker> HANDSHAKER = AttributeKey.valueOf("CALLBACK_WEB_SOCKET_HANDSHAKER");
     private static final String UPGRADE_CHANNEL_FOR_CALLBACK_WEB_SOCKET_URI = "/_mockserver_callback_websocket";
+    private static final String CAPABILITIES_PARAMETER = "capabilities";
+    private static final String CAPABILITIES_HEADER = "X-MockServer-Capabilities";
+    private static final String BREAKPOINT_RELEASED_CAPABILITY = "breakpointReleased";
     private final MockServerLogger mockServerLogger;
     private final WebSocketClientRegistry webSocketClientRegistry;
 
@@ -62,7 +68,7 @@ public class CallbackWebSocketServerHandler extends ChannelInboundHandlerAdapter
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         boolean release = true;
         try {
-            if (msg instanceof FullHttpRequest && ((FullHttpRequest) msg).uri().equals(UPGRADE_CHANNEL_FOR_CALLBACK_WEB_SOCKET_URI)) {
+            if (msg instanceof FullHttpRequest && new QueryStringDecoder(((FullHttpRequest) msg).uri()).path().equals(UPGRADE_CHANNEL_FOR_CALLBACK_WEB_SOCKET_URI)) {
                 if (isHttp2Enabled(ctx.channel())) {
                     if (mockServerLogger.isEnabledForInstance(Level.TRACE)) {
                         mockServerLogger.logEvent(
@@ -141,7 +147,7 @@ public class CallbackWebSocketServerHandler extends ChannelInboundHandlerAdapter
                                     .setMessageFormat("registering client " + clientId)
                             );
                         }
-                        webSocketClientRegistry.registerClient(clientId, ctx);
+                        webSocketClientRegistry.registerClient(clientId, ctx, acceptsBreakpointReleased(httpRequest));
                         future.channel().closeFuture().addListener((ChannelFutureListener) closeFuture -> {
                             if (mockServerLogger.isEnabledForInstance(Level.TRACE)) {
                                 mockServerLogger.logEvent(
@@ -155,6 +161,24 @@ public class CallbackWebSocketServerHandler extends ChannelInboundHandlerAdapter
                     });
             }
         }
+    }
+
+    /**
+     * Whether the client asked to be sent {@code BreakpointReleasedDTO} notices, with an
+     * {@code X-MockServer-Capabilities: breakpointReleased} header (language clients) or a
+     * {@code ?capabilities=breakpointReleased} query parameter (browsers, which cannot set headers).
+     * Clients that do not ask (older clients, which log an unknown message type as an error) are
+     * never sent them.
+     */
+    static boolean acceptsBreakpointReleased(FullHttpRequest httpRequest) {
+        List<String> capabilities = new java.util.ArrayList<>(httpRequest.headers().getAll(CAPABILITIES_HEADER));
+        List<String> fromQuery = new QueryStringDecoder(httpRequest.uri()).parameters().get(CAPABILITIES_PARAMETER);
+        if (fromQuery != null) {
+            capabilities.addAll(fromQuery);
+        }
+        return capabilities.stream()
+            .flatMap(value -> Arrays.stream(value.split(",")))
+            .anyMatch(capability -> BREAKPOINT_RELEASED_CAPABILITY.equals(capability.trim()));
     }
 
     private void handleWebSocketFrame(final ChannelHandlerContext ctx, WebSocketFrame frame) {

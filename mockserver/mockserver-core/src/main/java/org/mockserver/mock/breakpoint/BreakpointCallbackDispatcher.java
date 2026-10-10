@@ -7,6 +7,7 @@ import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpResponse;
+import org.mockserver.serialization.model.BreakpointReleasedDTO;
 import org.mockserver.uuid.UUIDService;
 
 import java.util.Map;
@@ -178,11 +179,14 @@ public class BreakpointCallbackDispatcher {
         // Schedule timeout auto-continue
         long timeoutMillis = configuration.breakpointTimeoutMillis();
         ScheduledFuture<?> timeoutHandle = TIMEOUT_SCHEDULER.schedule(() -> {
-            if (future.complete(BreakpointDecision.continueOriginal()) && logger != null && logger.isEnabledForInstance(INFO)) {
-                logger.logEvent(new LogEntry().setLogLevel(INFO)
-                    .setHttpRequest(request)
-                    .setMessageFormat("breakpoint WS dispatch auto-continued (timeout {}ms) for request:{}")
-                    .setArguments(timeoutMillis, request));
+            if (future.complete(BreakpointDecision.continueOriginal())) {
+                notifyTimedOut(webSocketClientRegistry, clientId, correlationId, "request", timeoutMillis);
+                if (logger != null && logger.isEnabledForInstance(INFO)) {
+                    logger.logEvent(new LogEntry().setLogLevel(INFO)
+                        .setHttpRequest(request)
+                        .setMessageFormat("breakpoint WS dispatch auto-continued (timeout {}ms) for request:{}")
+                        .setArguments(timeoutMillis, request));
+                }
             }
         }, timeoutMillis, TimeUnit.MILLISECONDS);
 
@@ -293,11 +297,14 @@ public class BreakpointCallbackDispatcher {
         // Schedule timeout auto-continue
         long timeoutMillis = configuration.breakpointTimeoutMillis();
         ScheduledFuture<?> timeoutHandle = TIMEOUT_SCHEDULER.schedule(() -> {
-            if (future.complete(BreakpointDecision.continueOriginal()) && logger != null && logger.isEnabledForInstance(INFO)) {
-                logger.logEvent(new LogEntry().setLogLevel(INFO)
-                    .setHttpRequest(request)
-                    .setMessageFormat("breakpoint WS dispatch auto-continued (timeout {}ms) for response to request:{}")
-                    .setArguments(timeoutMillis, request));
+            if (future.complete(BreakpointDecision.continueOriginal())) {
+                notifyTimedOut(webSocketClientRegistry, clientId, correlationId, "response", timeoutMillis);
+                if (logger != null && logger.isEnabledForInstance(INFO)) {
+                    logger.logEvent(new LogEntry().setLogLevel(INFO)
+                        .setHttpRequest(request)
+                        .setMessageFormat("breakpoint WS dispatch auto-continued (timeout {}ms) for response to request:{}")
+                        .setArguments(timeoutMillis, request));
+                }
             }
         }, timeoutMillis, TimeUnit.MILLISECONDS);
 
@@ -385,6 +392,13 @@ public class BreakpointCallbackDispatcher {
         for (InFlightDispatch dispatch : snapshot) {
             dispatch.future.complete(BreakpointDecision.continueOriginal());
         }
+    }
+
+    private static void notifyTimedOut(WebSocketClientRegistry registry, String clientId, String correlationId, String what, long timeoutMillis) {
+        registry.sendBreakpointReleased(clientId, new BreakpointReleasedDTO()
+            .setCorrelationId(correlationId)
+            .setReason(BreakpointReleasedDTO.REASON_TIMEOUT)
+            .setMessage("The paused " + what + " was not resolved within the breakpoint timeout (" + timeoutMillis + " ms), so MockServer continued it unchanged."));
     }
 
     private void cleanup(String correlationId, WebSocketClientRegistry registry) {

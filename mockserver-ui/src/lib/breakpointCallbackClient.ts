@@ -10,12 +10,14 @@
  * `CallbackWebSocketServerHandler.upgradeChannel`).
  *
  * Messages from the server use the `{type, value}` envelope where `value` is a
- * double-encoded JSON string (the same as language clients). Three server message
+ * double-encoded JSON string (the same as language clients). Four server message
  * types are handled:
  *
  * 1. `org.mockserver.model.HttpRequest` (REQUEST phase breakpoint)
  * 2. `org.mockserver.model.HttpRequestAndHttpResponse` (RESPONSE phase breakpoint)
  * 3. `org.mockserver.serialization.model.PausedStreamFrameDTO` (FRAME phase breakpoint)
+ * 4. `org.mockserver.serialization.model.BreakpointReleasedDTO` (the server resolved a
+ *    paused item itself, e.g. after the breakpoint timeout, so it is no longer paused)
  *
  * The client dispatches each message to a registered handler by breakpoint id
  * (extracted from `X-MockServer-BreakpointId` header for request/response, or from
@@ -85,6 +87,14 @@ export interface StreamFrameDecision {
 
 export type BreakpointPhase = 'REQUEST' | 'RESPONSE' | 'RESPONSE_STREAM' | 'INBOUND_STREAM';
 
+/** Server notice that it resolved a paused item itself, so the item is no longer paused. */
+export interface BreakpointReleasedDTO {
+  correlationId: string;
+  /** `TIMEOUT` (continued after the breakpoint timeout) or `STREAM_ENDED` (frame dropped). */
+  reason: string;
+  message?: string | null;
+}
+
 /**
  * Discriminated union for items pushed to the UI from the callback WS.
  * The `phase` field lets consumers determine what kind of item they're resolving.
@@ -108,6 +118,27 @@ export type StoredPausedItem = PausedItem & { key: number; receivedAt: number };
 /** Listener for changes to the accumulated paused-item store. */
 export type PausedItemsListener = (items: StoredPausedItem[]) => void;
 
+/**
+ * What the dashboard learns from a {@link BreakpointReleasedDTO}: either a paused item it
+ * still listed has gone (`item` set), or a decision the user already sent arrived after the
+ * server had resolved the item itself and so was ignored (`actionIgnored`).
+ */
+export interface BreakpointReleaseNotice {
+  correlationId: string;
+  reason: string;
+  message: string;
+  item: StoredPausedItem | null;
+  actionIgnored: boolean;
+}
+
+/** Listener for release notices. */
+export type ReleaseNoticeListener = (notice: BreakpointReleaseNotice) => void;
+
+/** The correlation id a paused item is resolved by. */
+export function correlationIdOf(item: PausedItem): string {
+  return item.phase === 'REQUEST' || item.phase === 'RESPONSE' ? item.correlationId : item.frame.correlationId;
+}
+
 /** Connection state. */
 export type CallbackClientState = 'disconnected' | 'connecting' | 'connected';
 
@@ -124,6 +155,7 @@ const TYPE_REQUEST_AND_RESPONSE = 'org.mockserver.model.HttpRequestAndHttpRespon
 const TYPE_CLIENT_ID = 'org.mockserver.serialization.model.WebSocketClientIdDTO';
 const TYPE_PAUSED_FRAME = 'org.mockserver.serialization.model.PausedStreamFrameDTO';
 const TYPE_FRAME_DECISION = 'org.mockserver.serialization.model.StreamFrameDecisionDTO';
+const TYPE_BREAKPOINT_RELEASED = 'org.mockserver.serialization.model.BreakpointReleasedDTO';
 
 const BREAKPOINT_ID_HEADER = 'X-MockServer-BreakpointId';
 const CORRELATION_ID_HEADER = 'WebSocketCorrelationId';
@@ -216,6 +248,10 @@ const RECONNECT_DELAY_MS = 3000;
 // the server's breakpoint timeout).
 const MAX_PAUSED_ITEMS = 500;
 
+// How many of the user's own decisions to remember, so a release notice that crosses one
+// on the wire can report the decision as not applied.
+const MAX_RECENTLY_RESOLVED = 200;
+
 export class BreakpointCallbackClient {
   private ws: WebSocket | null = null;
   private _clientId: string | null = null;
@@ -235,6 +271,8 @@ export class BreakpointCallbackClient {
   private pausedItems: StoredPausedItem[] = [];
   private pausedItemsListeners = new Set<PausedItemsListener>();
   private nextItemKey = 0;
+  private releaseNoticeListeners = new Set<ReleaseNoticeListener>();
+  private recentlyResolved = new Set<string>();
 
   /** The server-assigned clientId; null until connected. */
   get clientId(): string | null { return this._clientId; }
@@ -269,6 +307,22 @@ export class BreakpointCallbackClient {
   /** Current snapshot of accumulated paused items. */
   getPausedItems(): StoredPausedItem[] {
     return this.pausedItems;
+  }
+
+  /**
+   * Subscribe to release notices: the server resolved a paused item itself (for example
+   * after the breakpoint timeout). Returns an unsubscribe function.
+   */
+  subscribeReleaseNotices(listener: ReleaseNoticeListener): () => void {
+    this.releaseNoticeListeners.add(listener);
+    return () => {
+      this.releaseNoticeListeners.delete(listener);
+    };
+  }
+
+  /** Whether the item with this correlation id is still held (listed) by the dashboard. */
+  isPaused(correlationId: string): boolean {
+    return this.pausedItems.some((item) => correlationIdOf(item) === correlationId);
   }
 
   /** Remove a paused item from the store by its stable key (e.g. after resolving it). */
@@ -337,6 +391,7 @@ export class BreakpointCallbackClient {
     const type = isResponse ? TYPE_HTTP_RESPONSE : TYPE_HTTP_REQUEST;
     // Copy (never mutate) the held item's headers when echoing the correlation id.
     const payload = { ...result, headers: headersWithCorrelationId(result.headers, correlationId) };
+    this.rememberResolved(correlationId);
     this.send({ type, value: JSON.stringify(payload) });
   }
 
@@ -349,6 +404,7 @@ export class BreakpointCallbackClient {
   resolveResponse(correlationId: string, httpResponse: Record<string, unknown>): void {
     // Copy (never mutate) the held item's headers when echoing the correlation id.
     const payload = { ...httpResponse, headers: headersWithCorrelationId(httpResponse.headers, correlationId) };
+    this.rememberResolved(correlationId);
     this.send({ type: TYPE_HTTP_RESPONSE, value: JSON.stringify(payload) });
   }
 
@@ -356,6 +412,7 @@ export class BreakpointCallbackClient {
    * Send a FRAME-phase resolution over the WS.
    */
   resolveFrame(decision: StreamFrameDecision): void {
+    this.rememberResolved(decision.correlationId);
     this.send({ type: TYPE_FRAME_DECISION, value: JSON.stringify(decision) });
   }
 
@@ -367,7 +424,8 @@ export class BreakpointCallbackClient {
     if (!this.connectionParams) return;
     const params = this.connectionParams;
     const protocol = params.secure ? 'wss' : 'ws';
-    const url = `${protocol}://${params.host}:${params.port}${params.basePath ?? ''}/_mockserver_callback_websocket`;
+    // The capability asks the server for BreakpointReleasedDTO notices, which it sends only to clients that ask.
+    const url = `${protocol}://${params.host}:${params.port}${params.basePath ?? ''}/_mockserver_callback_websocket?capabilities=breakpointReleased`;
 
     this.setState('connecting');
     const ws = new WebSocket(url);
@@ -457,7 +515,47 @@ export class BreakpointCallbackClient {
       return;
     }
 
+    if (type === TYPE_BREAKPOINT_RELEASED) {
+      this.handleReleased(JSON.parse(value) as BreakpointReleasedDTO);
+      return;
+    }
+
     // Unknown type — ignore
+  }
+
+  /**
+   * The server resolved a paused item itself. Drop it from the store so it can no longer be
+   * acted on, and tell listeners — including when the user's own decision for it crossed
+   * the notice on the wire and was therefore ignored by the server.
+   */
+  private handleReleased(dto: BreakpointReleasedDTO): void {
+    if (!dto.correlationId) return;
+    const message = dto.message || 'MockServer resolved this paused item itself.';
+    const item = this.pausedItems.find((candidate) => correlationIdOf(candidate) === dto.correlationId) ?? null;
+    if (item) {
+      this.pausedItems = this.pausedItems.filter((candidate) => candidate !== item);
+      this.notifyPausedItems();
+    } else if (!this.recentlyResolved.has(dto.correlationId)) {
+      return;
+    }
+    const notice: BreakpointReleaseNotice = {
+      correlationId: dto.correlationId,
+      reason: dto.reason,
+      message,
+      item,
+      actionIgnored: item === null,
+    };
+    for (const listener of this.releaseNoticeListeners) {
+      listener(notice);
+    }
+  }
+
+  private rememberResolved(correlationId: string): void {
+    this.recentlyResolved.add(correlationId);
+    if (this.recentlyResolved.size > MAX_RECENTLY_RESOLVED) {
+      const oldest = this.recentlyResolved.values().next().value;
+      if (oldest !== undefined) this.recentlyResolved.delete(oldest);
+    }
   }
 
   /**

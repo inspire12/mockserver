@@ -47,6 +47,7 @@ import {
 } from '../lib/breakpoints';
 import {
   getBreakpointCallbackClient,
+  correlationIdOf,
   utf8ToBase64,
   base64ToUtf8,
   type PausedItem,
@@ -54,6 +55,7 @@ import {
   type CallbackClientState,
   type PausedStreamFrame,
   type StreamFrameDecision,
+  type BreakpointReleaseNotice,
 } from '../lib/breakpointCallbackClient';
 import { MultiValueField, SingleValueField } from './FilterPanel';
 import OperatorSearchField from './OperatorSearchField';
@@ -89,6 +91,25 @@ const ALL_PHASES: { value: MatcherPhase; label: string }[] = [
   { value: 'RESPONSE_STREAM', label: 'Response stream frames' },
   { value: 'INBOUND_STREAM', label: 'Inbound stream frames' },
 ];
+
+/** A short description of a paused item for messages, e.g. "Request GET /api". */
+function describePausedItem(item: PausedItem): string {
+  if (item.phase === 'REQUEST' || item.phase === 'RESPONSE') {
+    const target = `${item.request.method ?? ''} ${item.request.path ?? ''}`.trim();
+    return item.phase === 'REQUEST' ? `Request ${target}` : `Response to ${target}`;
+  }
+  const target = `${item.frame.requestMethod ?? ''} ${item.frame.requestPath ?? ''}`.trim();
+  return `Frame #${item.frame.sequenceNumber}${target ? ` of ${target}` : ''}`;
+}
+
+/** What to tell the user about a paused item MockServer resolved itself. */
+function releaseNoticeText(notice: BreakpointReleaseNotice): string {
+  return notice.item
+    ? `${describePausedItem(notice.item)} is no longer paused. ${notice.message}`
+    : `Your decision was not applied: ${notice.message}`;
+}
+
+const GONE_FROM_DIALOG = 'This item is no longer paused, so the change cannot be applied.';
 
 function phaseChipColor(phase: string): 'default' | 'primary' | 'secondary' | 'info' | 'warning' {
   switch (phase) {
@@ -145,6 +166,11 @@ export default function BreakpointsPanel({ connectionParams }: BreakpointsPanelP
 
   // Confirmation dialog for destructive actions
   const [confirmOpen, setConfirmOpen] = useState(false);
+  // Confirmation for a matcher with no request fields, which pauses every request
+  const [catchAllConfirmOpen, setCatchAllConfirmOpen] = useState(false);
+
+  // The latest paused item MockServer resolved itself (e.g. the breakpoint timeout)
+  const [releaseNotice, setReleaseNotice] = useState<BreakpointReleaseNotice | null>(null);
 
   // -- Modify dialogs --
   const [modifyTarget, setModifyTarget] = useState<(PausedItem & { key: number }) | null>(null);
@@ -180,6 +206,7 @@ export default function BreakpointsPanel({ connectionParams }: BreakpointsPanelP
     // every push/removal. Unsubscribe on unmount so the stale setState is not
     // invoked, but leave the store (and its accumulation) intact.
     const unsubscribePausedItems = client.subscribePausedItems(setPausedItems);
+    const unsubscribeReleaseNotices = client.subscribeReleaseNotices(setReleaseNotice);
 
     // Seed from the singleton so a re-mount after a tab change immediately
     // reflects the live connection + clientId (connect() below is idempotent and
@@ -193,9 +220,24 @@ export default function BreakpointsPanel({ connectionParams }: BreakpointsPanelP
     // app-lifetime singleton. Keeping it open across tab changes preserves the
     // server clientId and the breakpoint matchers registered under it, so
     // breakpoints stay active and registered when navigating away from and back
-    // to this tab. Only the store subscription is torn down.
-    return unsubscribePausedItems;
+    // to this tab. Only the store subscriptions are torn down.
+    return () => {
+      unsubscribePausedItems();
+      unsubscribeReleaseNotices();
+    };
   }, [connectionParams]);
+
+  // An open Modify / Inject dialog whose item MockServer has just resolved says so at once.
+  // Syncing dialog state from the external WS notice is the case the effect rule exempts.
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (!releaseNotice?.item) return;
+    const gone = releaseNotice.correlationId;
+    if (modifyTarget && correlationIdOf(modifyTarget) === gone) setModifyError(GONE_FROM_DIALOG);
+    if (frameModifyTarget && correlationIdOf(frameModifyTarget) === gone) setFrameModifyError(GONE_FROM_DIALOG);
+    if (frameInjectTarget && correlationIdOf(frameInjectTarget) === gone) setFrameInjectError(GONE_FROM_DIALOG);
+  }, [releaseNotice, modifyTarget, frameModifyTarget, frameInjectTarget]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // -------------------------------------------------------------------------
   // Matchers polling (auto-refresh the read-only registered-matcher list)
@@ -278,7 +320,7 @@ export default function BreakpointsPanel({ connectionParams }: BreakpointsPanelP
     setScopeTerm('');
   }, [parsedScope]);
 
-  const handleRegister = useCallback(async () => {
+  const handleRegister = useCallback(async (confirmedCatchAll = false) => {
     if (!clientId) {
       setFormError('Callback WebSocket not connected. Wait for the connection to establish.');
       return;
@@ -300,8 +342,13 @@ export default function BreakpointsPanel({ connectionParams }: BreakpointsPanelP
     if (validParams.length > 0) httpRequest.queryStringParameters = validParams;
     const validCookies = formCookies.filter((c) => c.name && c.value);
     if (validCookies.length > 0) httpRequest.cookies = validCookies;
-    // If no fields specified, it matches everything
+    // No fields matches everything, which pauses all traffic, so it must be confirmed
     if (Object.keys(httpRequest).length === 0) {
+      if (!confirmedCatchAll) {
+        setFormError(null);
+        setCatchAllConfirmOpen(true);
+        return;
+      }
       httpRequest.path = '.*';
     }
 
@@ -433,6 +480,10 @@ export default function BreakpointsPanel({ connectionParams }: BreakpointsPanelP
       return;
     }
     const client = clientRef.current;
+    if (!client.isPaused(correlationIdOf(modifyTarget))) {
+      setModifyError(GONE_FROM_DIALOG);
+      return;
+    }
     if (modifyTarget.phase === 'REQUEST') {
       client.resolveRequest(modifyTarget.correlationId, parsed);
     } else if (modifyTarget.phase === 'RESPONSE') {
@@ -487,6 +538,10 @@ export default function BreakpointsPanel({ connectionParams }: BreakpointsPanelP
       return;
     }
     if (frameModifyTarget.phase !== 'RESPONSE_STREAM' && frameModifyTarget.phase !== 'INBOUND_STREAM') return;
+    if (!clientRef.current.isPaused(frameModifyTarget.frame.correlationId)) {
+      setFrameModifyError(GONE_FROM_DIALOG);
+      return;
+    }
     // UTF-8-safe encode inside try/catch: surface any encoding failure in the
     // dialog rather than throwing out of the onClick and leaving it silently open.
     let encoded: string;
@@ -517,6 +572,10 @@ export default function BreakpointsPanel({ connectionParams }: BreakpointsPanelP
       return;
     }
     if (frameInjectTarget.phase !== 'RESPONSE_STREAM' && frameInjectTarget.phase !== 'INBOUND_STREAM') return;
+    if (!clientRef.current.isPaused(frameInjectTarget.frame.correlationId)) {
+      setFrameInjectError(GONE_FROM_DIALOG);
+      return;
+    }
     // UTF-8-safe encode inside try/catch: surface any encoding failure in the
     // dialog rather than throwing out of the onClick and leaving it silently open.
     let encoded: string;
@@ -614,6 +673,17 @@ export default function BreakpointsPanel({ connectionParams }: BreakpointsPanelP
       {actionError && (
         <Alert severity="warning" sx={{ mb: 1.5 }} onClose={() => setActionError(null)}>
           {actionError}
+        </Alert>
+      )}
+
+      {releaseNotice && (
+        <Alert
+          severity={releaseNotice.actionIgnored ? 'warning' : 'info'}
+          sx={{ mb: 1.5 }}
+          onClose={() => setReleaseNotice(null)}
+          data-testid="breakpoint-release-notice"
+        >
+          {releaseNoticeText(releaseNotice)}
         </Alert>
       )}
 
@@ -1215,6 +1285,15 @@ export default function BreakpointsPanel({ connectionParams }: BreakpointsPanelP
           </Button>
         </DialogActions>
       </Dialog>
+
+      <ConfirmDialog
+        open={catchAllConfirmOpen}
+        title="Pause every request?"
+        message="No method, path, header, query parameter or cookie is set, so this matcher matches every request MockServer receives and pauses all of them until each is resolved or times out."
+        confirmLabel="Pause every request"
+        onConfirm={() => void handleRegister(true)}
+        onClose={() => setCatchAllConfirmOpen(false)}
+      />
 
       <ConfirmDialog
         open={confirmOpen}

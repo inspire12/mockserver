@@ -34,6 +34,7 @@ import org.mockserver.model.HttpRequest;
 import org.mockserver.model.HttpRequestAndHttpResponse;
 import org.mockserver.model.HttpResponse;
 import org.mockserver.serialization.WebSocketMessageSerializer;
+import org.mockserver.serialization.model.BreakpointReleasedDTO;
 import org.mockserver.serialization.model.PausedStreamFrameDTO;
 import org.mockserver.serialization.model.StreamFrameDecisionDTO;
 import org.mockserver.serialization.model.WebSocketClientIdDTO;
@@ -83,6 +84,7 @@ import static org.slf4j.event.Level.WARN;
 class BreakpointWebSocketClient {
 
     static final String CLIENT_REGISTRATION_ID_HEADER = "X-CLIENT-REGISTRATION-ID";
+    static final String CAPABILITIES_HEADER = "X-MockServer-Capabilities";
     static final AttributeKey<CompletableFuture<String>> REGISTRATION_FUTURE = AttributeKey.valueOf("BP_REGISTRATION_FUTURE");
 
     private final MockServerLogger mockServerLogger;
@@ -206,31 +208,35 @@ class BreakpointWebSocketClient {
 
     void receivedTextWebSocketFrame(TextWebSocketFrame textWebSocketFrame) {
         try {
-            Object deserializedMessage = webSocketMessageSerializer.deserialize(textWebSocketFrame.text());
+            Object deserializedMessage;
+            try {
+                deserializedMessage = webSocketMessageSerializer.deserialize(textWebSocketFrame.text());
+            } catch (IllegalArgumentException e) {
+                if (e.getMessage() == null || !e.getMessage().startsWith("Unsupported WebSocket message type")) {
+                    throw e;
+                }
+                // a newer server may send message types this client does not know; none needs a reply
+                logIgnoredMessage(textWebSocketFrame.text());
+                return;
+            }
             if (deserializedMessage instanceof HttpRequest) {
                 handleRequestPhase((HttpRequest) deserializedMessage);
             } else if (deserializedMessage instanceof HttpRequestAndHttpResponse) {
                 handleResponsePhase((HttpRequestAndHttpResponse) deserializedMessage);
             } else if (deserializedMessage instanceof PausedStreamFrameDTO) {
                 handleStreamFrame((PausedStreamFrameDTO) deserializedMessage);
-            } else if (deserializedMessage instanceof WebSocketClientIdDTO) {
+            } else if (deserializedMessage instanceof WebSocketClientIdDTO || deserializedMessage instanceof BreakpointReleasedDTO) {
+                // a released notice needs no reply: the server already resolved the paused item itself
                 if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(TRACE)) {
                     mockServerLogger.logEvent(
                         new LogEntry()
                             .setLogLevel(TRACE)
-                            .setMessageFormat("breakpoint websocket client received client id{}")
+                            .setMessageFormat("breakpoint websocket client received{}")
                             .setArguments(deserializedMessage)
                     );
                 }
             } else {
-                if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(WARN)) {
-                    mockServerLogger.logEvent(
-                        new LogEntry()
-                            .setLogLevel(WARN)
-                            .setMessageFormat("breakpoint websocket client received unsupported message type{}")
-                            .setArguments(textWebSocketFrame.text())
-                    );
-                }
+                logIgnoredMessage(textWebSocketFrame.text());
             }
         } catch (Exception e) {
             if (mockServerLogger != null) {
@@ -241,6 +247,17 @@ class BreakpointWebSocketClient {
                         .setThrowable(e)
                 );
             }
+        }
+    }
+
+    private void logIgnoredMessage(String message) {
+        if (mockServerLogger != null && mockServerLogger.isEnabledForInstance(DEBUG)) {
+            mockServerLogger.logEvent(
+                new LogEntry()
+                    .setLogLevel(DEBUG)
+                    .setMessageFormat("breakpoint websocket client ignored a message type it does not handle{}")
+                    .setArguments(message)
+            );
         }
     }
 
@@ -439,7 +456,7 @@ class BreakpointWebSocketClient {
     /**
      * Netty handler for the breakpoint WS handshake and message dispatch.
      */
-    private static class BreakpointWebSocketClientHandler extends SimpleChannelInboundHandler<Object> {
+    static class BreakpointWebSocketClientHandler extends SimpleChannelInboundHandler<Object> {
 
         private final BreakpointWebSocketClient webSocketClient;
         private final WebSocketClientHandshaker handshaker;
@@ -462,7 +479,11 @@ class BreakpointWebSocketClient {
                 WebSocketVersion.V13,
                 null,
                 false,
-                new DefaultHttpHeaders().add(CLIENT_REGISTRATION_ID_HEADER, clientId),
+                // the capability is a header, not a query parameter: servers up to 8.0.0 open the
+                // callback WebSocket only for the exact bare URI, and ignore headers they do not know
+                new DefaultHttpHeaders()
+                    .add(CLIENT_REGISTRATION_ID_HEADER, clientId)
+                    .add(CAPABILITIES_HEADER, "breakpointReleased"),
                 Integer.MAX_VALUE
             );
             this.webSocketClient = webSocketClient;

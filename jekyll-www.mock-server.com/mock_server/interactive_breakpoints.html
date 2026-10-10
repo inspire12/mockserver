@@ -365,6 +365,29 @@ curl -X PUT http://localhost:1080/mockserver/breakpoint/matcher \
     </tbody>
 </table>
 
+<h4>Server to client: BreakpointReleasedDTO</h4>
+
+<p>
+    When MockServer resolves a paused request, response or frame itself, it tells the owning client with a
+    <span class="inline_code">BreakpointReleasedDTO</span> so the client can stop offering it. A decision the
+    client sends for it afterwards is ignored. The notice is sent only to clients that ask for it when they open the
+    callback WebSocket, with an <span class="inline_code">X-MockServer-Capabilities: breakpointReleased</span>
+    header (as the Java client does) or, from a browser, a
+    <span class="inline_code">?capabilities=breakpointReleased</span> query parameter (as the dashboard does), so
+    older clients never receive a message they do not know.
+</p>
+
+<table class="table table-bordered table-striped">
+    <thead>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><span class="inline_code">correlationId</span></td><td>String</td><td>The correlation id of the paused request, response or frame</td></tr>
+        <tr><td><span class="inline_code">reason</span></td><td>String</td><td><span class="inline_code">TIMEOUT</span> (not resolved within <span class="inline_code">breakpointTimeoutMillis</span>, so it was continued unchanged) or <span class="inline_code">STREAM_ENDED</span> (the stream failed or its client went away, so the held frame was dropped)</td></tr>
+        <tr><td><span class="inline_code">message</span></td><td>String</td><td>A human-readable explanation</td></tr>
+    </tbody>
+</table>
+
 <p>
     <strong>gRPC framing note:</strong> for gRPC streams, replacement bytes for MODIFY and INJECT must be a
     valid gRPC length-prefixed frame (1-byte compressed flag + 4-byte big-endian message length + message bytes).
@@ -745,8 +768,8 @@ curl -v -X PUT "http://localhost:1080/mockserver/breakpoint/matcher/clear"</code
             <td><span class="inline_code">MOCKSERVER_BREAKPOINT_TIMEOUT_MILLIS</span></td>
             <td><span class="inline_code">30000</span></td>
             <td>Auto-continue timeout in milliseconds. A paused exchange or frame that is not resolved within
-                this period is automatically continued with the original request/response/frame. Shared across
-                all phases.</td>
+                this period is automatically continued with the original request/response/frame, and its
+                client is told (the dashboard removes it from its list). Shared across all phases.</td>
         </tr>
         <tr>
             <td><span class="inline_code">mockserver.breakpointMaxHeld</span></td>
@@ -762,12 +785,14 @@ curl -v -X PUT "http://localhost:1080/mockserver/breakpoint/matcher/clear"</code
 <ul>
     <li><strong>Non-blocking:</strong> the breakpoint mechanism is fully asynchronous. No Netty event-loop or
         scheduler thread is blocked while waiting for a decision.</li>
-    <li><strong>Stream-close eviction:</strong> when a stream completes or errors, all held frames for that
-        stream are automatically continued, preventing resource leaks and hanging futures.</li>
+    <li><strong>Stream completion:</strong> when a forwarded or mock SSE/chunked stream finishes while a
+        frame is held, the end of the response waits until that frame is decided, so the client still
+        receives it. When a stream fails, or its client goes away, held frames are dropped and their
+        callback client is told, preventing resource leaks and hanging futures.</li>
     <li><strong>Disconnect cleanup:</strong> when a callback-WebSocket client disconnects, the server removes
         all its breakpoint matchers and auto-continues any in-flight dispatches.</li>
-    <li><strong>Frame ordering:</strong> frames within a stream must be resolved in sequence — attempting to
-        resolve frame N before frame N-1 is rejected.</li>
+    <li><strong>Frame ordering:</strong> for SSE and chunked streams, frames reach the client in stream
+        order: a decision on frame N takes effect once frame N-1 has been decided.</li>
 </ul>
 
 <h2>Related Pages</h2>

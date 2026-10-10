@@ -24,6 +24,7 @@ import org.mockserver.mock.breakpoint.StreamFrameCallbackDispatcher;
 import org.mockserver.model.StreamingBody;
 import org.mockserver.scheduler.Scheduler;
 import org.mockserver.serialization.WebSocketMessageSerializer;
+import org.mockserver.serialization.model.BreakpointReleasedDTO;
 import org.mockserver.serialization.model.PausedStreamFrameDTO;
 import org.mockserver.serialization.model.StreamFrameDecisionDTO;
 
@@ -217,6 +218,86 @@ public class MockStreamBreakpointWritePathTest {
         });
     }
 
+    @Test
+    public void shouldDeliverAFrameStillHeldWhenTheStreamCompletesBeforeEndingTheResponse() throws Exception {
+        withStreamBreakpointFixture((data, ws, streamingBody) -> {
+            feedFrame(data, streamingBody, "last-frame");
+            PausedStreamFrameDTO paused = readPausedFrame(ws);
+
+            // when — the source completes while the frame is still held
+            data.eventLoop().execute(streamingBody::complete);
+            data.runPendingTasks();
+
+            // then — the response is not ended under the held frame
+            assertThat("the response must not end while a frame is held", data.readOutbound(), is(nullValue()));
+
+            // when — the frame is continued
+            deliverDecision(data, decision(paused, "CONTINUE", null));
+
+            // then — the frame is delivered, and only then does the response end
+            assertThat(readFrameBody(data), is("last-frame"));
+            assertThat(data.readOutbound(), is(instanceOf(LastHttpContent.class)));
+        });
+    }
+
+    @Test
+    public void shouldWriteHeldFramesInStreamOrderWhenALaterFrameIsDecidedFirst() throws Exception {
+        withStreamBreakpointFixture((data, ws, streamingBody) -> {
+            feedFrame(data, streamingBody, "frame-0");
+            PausedStreamFrameDTO first = readPausedFrame(ws);
+            feedFrame(data, streamingBody, "frame-1");
+            PausedStreamFrameDTO second = readPausedFrame(ws);
+
+            deliverDecision(data, decision(second, "CONTINUE", null));
+            assertThat("a frame waits for the frame before it", data.readOutbound(), is(nullValue()));
+
+            deliverDecision(data, decision(first, "MODIFY", "frame-0-modified".getBytes(StandardCharsets.UTF_8)));
+            assertThat(readFrameBody(data), is("frame-0-modified"));
+            assertThat(readFrameBody(data), is("frame-1"));
+        });
+    }
+
+    @Test
+    public void shouldDropAHeldFrameAndTellTheClientWhenTheStreamFails() throws Exception {
+        withStreamBreakpointFixture((data, ws, streamingBody) -> {
+            feedFrame(data, streamingBody, "never-delivered");
+            PausedStreamFrameDTO paused = readPausedFrame(ws);
+
+            // when — the source fails while the frame is held
+            data.eventLoop().execute(() -> streamingBody.error(new RuntimeException("upstream failed")));
+            data.runPendingTasks();
+
+            // then — the client is told the frame was dropped, and the response ends without it
+            TextWebSocketFrame frame = ws.readOutbound();
+            assertThat("the owning client is told the held frame was dropped", frame, is(notNullValue()));
+            Object message = serializer.deserialize(frame.text());
+            frame.release();
+            assertThat(message, is(instanceOf(BreakpointReleasedDTO.class)));
+            assertThat(((BreakpointReleasedDTO) message).getCorrelationId(), is(paused.getCorrelationId()));
+            assertThat(((BreakpointReleasedDTO) message).getReason(), is(BreakpointReleasedDTO.REASON_STREAM_ENDED));
+            assertThat(data.readOutbound(), is(instanceOf(LastHttpContent.class)));
+            assertThat(StreamFrameCallbackDispatcher.getInstance().inFlightCount(), is(0));
+        });
+    }
+
+    @Test
+    public void shouldDropAHeldFrameAndTellTheClientWhenTheClientConnectionCloses() throws Exception {
+        withStreamBreakpointFixture((data, ws, streamingBody) -> {
+            feedFrame(data, streamingBody, "never-delivered");
+            PausedStreamFrameDTO paused = readPausedFrame(ws);
+
+            data.close();
+            data.runPendingTasks();
+
+            TextWebSocketFrame frame = ws.readOutbound();
+            assertThat("the owning client is told the held frame was dropped", frame, is(notNullValue()));
+            Object message = serializer.deserialize(frame.text());
+            frame.release();
+            assertThat(((BreakpointReleasedDTO) message).getCorrelationId(), is(paused.getCorrelationId()));
+            assertThat(StreamFrameCallbackDispatcher.getInstance().inFlightCount(), is(0));
+        });
+    }
+
     private static String kibibyte(int i) {
         char[] body = new char[1024];
         Arrays.fill(body, (char) ('a' + i % 26));
@@ -250,7 +331,7 @@ public class MockStreamBreakpointWritePathTest {
         try {
             // callback-WS client registry + registered client whose channel captures dispatched frames
             WebSocketClientRegistry registry = new WebSocketClientRegistry(configuration, mockServerLogger);
-            registry.registerClient(CLIENT_ID, wsChannel.pipeline().firstContext());
+            registry.registerClient(CLIENT_ID, wsChannel.pipeline().firstContext(), true);
             // drain the WebSocketClientIdDTO frame the registry sends on registration
             drainOutbound(wsChannel);
             // expose the registry to the writer exactly as the real pipeline does

@@ -4,6 +4,7 @@ import org.mockserver.closurecallback.websocketregistry.WebSocketClientRegistry;
 import org.mockserver.configuration.Configuration;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
+import org.mockserver.serialization.model.BreakpointReleasedDTO;
 import org.mockserver.serialization.model.PausedStreamFrameDTO;
 import org.mockserver.serialization.model.StreamFrameDecisionDTO;
 import org.mockserver.uuid.UUIDService;
@@ -175,7 +176,7 @@ public class StreamFrameCallbackDispatcher {
 
         String correlationId = UUIDService.getUUID();
         CompletableFuture<StreamFrameDecision> future = new CompletableFuture<>();
-        InFlightStreamDispatch dispatch = new InFlightStreamDispatch(correlationId, clientId, future);
+        InFlightStreamDispatch dispatch = new InFlightStreamDispatch(correlationId, clientId, streamId, webSocketClientRegistry, future);
         inFlight.put(correlationId, dispatch);
 
         // Register the stream-frame decision callback handler
@@ -187,10 +188,14 @@ public class StreamFrameCallbackDispatcher {
         // Schedule timeout auto-continue
         long timeoutMillis = configuration.breakpointTimeoutMillis();
         ScheduledFuture<?> timeoutHandle = TIMEOUT_SCHEDULER.schedule(() -> {
-            if (future.complete(StreamFrameDecision.continueFrame()) && logger != null && logger.isEnabledForInstance(INFO)) {
-                logger.logEvent(new LogEntry().setLogLevel(INFO)
-                    .setMessageFormat("stream frame WS dispatch auto-continued (timeout {}ms) for stream={} seq={}")
-                    .setArguments(timeoutMillis, streamId, sequenceNumber));
+            if (future.complete(StreamFrameDecision.continueFrame())) {
+                notifyReleased(dispatch, BreakpointReleasedDTO.REASON_TIMEOUT,
+                    "The paused frame was not resolved within the breakpoint timeout (" + timeoutMillis + " ms), so MockServer continued it unchanged.");
+                if (logger != null && logger.isEnabledForInstance(INFO)) {
+                    logger.logEvent(new LogEntry().setLogLevel(INFO)
+                        .setMessageFormat("stream frame WS dispatch auto-continued (timeout {}ms) for stream={} seq={}")
+                        .setArguments(timeoutMillis, streamId, sequenceNumber));
+                }
             }
         }, timeoutMillis, TimeUnit.MILLISECONDS);
 
@@ -250,6 +255,36 @@ public class StreamFrameCallbackDispatcher {
             }
         }
         return count;
+    }
+
+    /**
+     * Drops every frame of the given stream that is still waiting for a decision, telling
+     * each owning client that the frame is no longer paused. Called when a stream ends
+     * without its held frames being deliverable (the client went away or the source failed).
+     *
+     * @param streamId the stream that ended
+     * @return the number of held frames dropped
+     */
+    public int releaseStream(String streamId) {
+        if (streamId == null) {
+            return 0;
+        }
+        int count = 0;
+        for (InFlightStreamDispatch dispatch : inFlight.values()) {
+            if (streamId.equals(dispatch.streamId) && dispatch.future.complete(StreamFrameDecision.drop())) {
+                notifyReleased(dispatch, BreakpointReleasedDTO.REASON_STREAM_ENDED,
+                    "The stream ended before the paused frame could be delivered, so MockServer dropped it.");
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static void notifyReleased(InFlightStreamDispatch dispatch, String reason, String message) {
+        dispatch.webSocketClientRegistry.sendBreakpointReleased(dispatch.clientId, new BreakpointReleasedDTO()
+            .setCorrelationId(dispatch.correlationId)
+            .setReason(reason)
+            .setMessage(message));
     }
 
     /**
@@ -393,11 +428,15 @@ public class StreamFrameCallbackDispatcher {
     private static class InFlightStreamDispatch {
         final String correlationId;
         final String clientId;
+        final String streamId;
+        final WebSocketClientRegistry webSocketClientRegistry;
         final CompletableFuture<StreamFrameDecision> future;
 
-        InFlightStreamDispatch(String correlationId, String clientId, CompletableFuture<StreamFrameDecision> future) {
+        InFlightStreamDispatch(String correlationId, String clientId, String streamId, WebSocketClientRegistry webSocketClientRegistry, CompletableFuture<StreamFrameDecision> future) {
             this.correlationId = correlationId;
             this.clientId = clientId;
+            this.streamId = streamId;
+            this.webSocketClientRegistry = webSocketClientRegistry;
             this.future = future;
         }
     }
