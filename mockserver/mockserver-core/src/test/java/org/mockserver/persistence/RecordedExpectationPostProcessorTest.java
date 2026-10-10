@@ -412,6 +412,26 @@ public class RecordedExpectationPostProcessorTest {
     }
 
     @Test
+    public void shouldStripHopByHopAndProxyHeadersTheHarSetDoesNotList() {
+        // given - a consolidated import (e.g. a HAR captured through a proxy) carrying Proxy-Connection and TE
+        List<Expectation> recorded = Collections.singletonList(recordedRequest(
+            request().withMethod("GET").withPath("/users/1")
+                .withHeader("Proxy-Connection", "Keep-Alive")
+                .withHeader("TE", "trailers")
+                .withHeader("X-Tenant", "acme"),
+            response().withStatusCode(200)));
+
+        // when
+        List<Expectation> result = RecordedExpectationPostProcessor.consolidate(recorded, false);
+
+        // then
+        org.mockserver.model.HttpRequest req = (org.mockserver.model.HttpRequest) result.get(0).getHttpRequest();
+        assertThat(req.getFirstHeader("Proxy-Connection"), is(""));
+        assertThat(req.getFirstHeader("TE"), is(""));
+        assertThat(req.getFirstHeader("X-Tenant"), is("acme"));
+    }
+
+    @Test
     public void shouldSequenceDifferingResponsesForSameRequestShape() {
         // given - same GET /users/1 returned two different bodies over time
         List<Expectation> recorded = Arrays.asList(

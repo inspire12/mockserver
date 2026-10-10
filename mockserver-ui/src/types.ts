@@ -83,6 +83,11 @@ export interface JsonListItem {
    * renumbers on every push and refers to nothing.
    */
   timestamp?: string;
+  /**
+   * The request's log correlation id, on the request sections. A received row and
+   * the proxied row of the same request share it (see combineTraffic).
+   */
+  correlationId?: string;
   /** The row's request or response bodies the server shortened; absent when both were sent whole. */
   truncatedBodies?: {
     httpRequest?: TruncatedBody;

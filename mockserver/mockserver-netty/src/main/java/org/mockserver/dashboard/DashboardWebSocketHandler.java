@@ -1370,6 +1370,7 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
                                 // renumbers on every push and corresponds to nothing the reader can
                                 // refer to. A timestamp is stable and comparable with the log panel.
                                 entry.put("timestamp", logEntryDTO.getTimestamp());
+                                putCorrelationId(entry, logEntryDTO);
                                 // the endpoint returns an entry's first request
                                 markTruncated(entry, "httpRequest", requestMessage, requestIndex == 0);
                                 markTruncated(entry, "httpResponse", responseMessage, true);
@@ -1396,6 +1397,7 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
                         entry.put("key", logEntryDTO.getId() + "_proxied");
                         if (!value.isEmpty() && budget.admitRow((requestMessage != null ? requestMessage.characters() : 0) + (responseMessage != null ? responseMessage.characters() : 0))) {
                             entry.put("timestamp", logEntryDTO.getTimestamp());
+                            putCorrelationId(entry, logEntryDTO);
                             markTruncated(entry, "httpRequest", requestMessage, true);
                             markTruncated(entry, "httpResponse", responseMessage, true);
                             proxiedRequests.add(entry);
@@ -1403,6 +1405,14 @@ public class DashboardWebSocketHandler extends ChannelInboundHandlerAdapter impl
                     }
                 }
             });
+    }
+
+    // A proxied request is in both request sections (received, and forwarded with its response); the shared
+    // correlation id lets a client that shows both as one list keep one row per request.
+    private static void putCorrelationId(Map<String, Object> entry, DashboardLogEntryDTO logEntryDTO) {
+        if (isNotBlank(logEntryDTO.getCorrelationId())) {
+            entry.put("correlationId", logEntryDTO.getCorrelationId());
+        }
     }
 
     // Lazily created, bounded by maxExpectations (one entry per live expectation).

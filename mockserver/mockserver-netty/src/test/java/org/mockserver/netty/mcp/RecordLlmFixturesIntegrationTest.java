@@ -156,6 +156,52 @@ public class RecordLlmFixturesIntegrationTest {
     }
 
     @Test
+    public void shouldRecordACassetteThatReplaysWithoutTheRecordingClientsConnectionHeaders() throws Exception {
+        // given -- traffic recorded through the proxy from a client that sent hop-by-hop and transport headers
+        HttpRequest recorded = request().withMethod("POST").withPath("/v1/messages")
+            .withHeader("Host", "127.0.0.1:1134")
+            .withHeader("Connection", "keep-alive")
+            .withHeader("Proxy-Connection", "Keep-Alive")
+            .withHeader("content-length", "2")
+            .withHeader("X-Api-Version", "2")
+            .withBody("{}");
+        httpState.log(new LogEntry()
+            .setType(FORWARDED_REQUEST)
+            .setLogLevel(org.slf4j.event.Level.INFO)
+            .setHttpRequest(recorded)
+            .setHttpResponse(response().withStatusCode(200).withBody("recorded"))
+            .setExpectation(recorded, response().withStatusCode(200).withBody("recorded"))
+            .setMessageFormat("returning response:{}for forwarded request")
+            .setArguments(response().withStatusCode(200))
+        );
+        pollUntilTrue(() -> retrieveRecordedExpectationCount() >= 1);
+
+        // when -- record, reset, load
+        File fixtureFile = new File(tempFolder.getRoot(), "transport-headers.json");
+        ObjectNode recordParams = objectMapper.createObjectNode();
+        recordParams.put("path", fixtureFile.getAbsolutePath());
+        assertThat(toolRegistry.callTool("record_llm_fixtures", recordParams).path("status").asText(), is("written"));
+        String fixtureContent = new String(Files.readAllBytes(fixtureFile.toPath()), StandardCharsets.UTF_8).toLowerCase(java.util.Locale.ROOT);
+        httpState.reset();
+        ObjectNode loadParams = objectMapper.createObjectNode();
+        loadParams.put("path", fixtureFile.getAbsolutePath());
+        assertThat(toolRegistry.callTool("load_expectations_from_file", loadParams).path("status").asText(), is("loaded"));
+
+        // then -- the cassette pins none of them (Host, which names the upstream, stays), and the same
+        // request from another client replays it
+        assertThat(fixtureContent, not(containsString("proxy-connection")));
+        assertThat(fixtureContent, containsString("\"host\""));
+        assertThat(fixtureContent, not(containsString("\"connection\"")));
+        assertThat(fixtureContent, not(containsString("content-length")));
+        assertThat(fixtureContent, containsString("x-api-version"));
+        HttpRequest otherClient = request().withMethod("POST").withPath("/v1/messages")
+            .withHeader("Host", "127.0.0.1:1134")
+            .withHeader("X-Api-Version", "2")
+            .withBody("{}");
+        assertThat(httpState.firstMatchingExpectation(otherClient), is(notNullValue()));
+    }
+
+    @Test
     public void shouldRecordAndReplaySseStreamingTraffic() throws Exception {
         // given -- simulate forwarded SSE streaming traffic (like Anthropic Claude)
         String sseBody =

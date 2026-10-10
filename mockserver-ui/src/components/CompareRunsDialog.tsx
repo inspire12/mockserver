@@ -35,6 +35,7 @@ import { diffRuns, type RunDiffResult, type RunDiffFilter } from '../lib/runDiff
 import { humanizeError, type HumanError } from '../lib/errorMessage';
 import HumanErrorAlert from './HumanErrorAlert';
 import { useHeldItems } from '../hooks/useHeldItems';
+import { combineTraffic } from '../lib/combineTraffic';
 
 // Stable key accessor for useHeldItems — module scope, so its identity never changes.
 const compareRequestKeyOf = (r: { key: string }) => r.key;
@@ -376,7 +377,7 @@ export function CompareRunsBody() {
   const [serverBusy, setServerBusy] = useState(false);
 
   const liveRequests = useMemo(
-    () => [...proxiedRequests, ...recordedRequests],
+    () => combineTraffic(proxiedRequests, recordedRequests),
     [proxiedRequests, recordedRequests],
   );
 

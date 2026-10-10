@@ -721,7 +721,7 @@ Every bound mock has a per-row **Edit** action, and each scenario has a scenario
 
 | Sub-tab | Content |
 |---------|---------|
-| **Cassettes** | List / Record / Load / Export sub-tabs for cassette files. Recording writes the current MockServer state to a JSON cassette file on the server filesystem via the `record_llm_fixtures` MCP tool. Loading reads one back via `load_expectations_from_file`. |
+| **Cassettes** | List / Record / Load / Export sub-tabs for cassette files. Recording writes the current MockServer state to a JSON cassette file on the server filesystem via the `record_llm_fixtures` MCP tool. Loading reads one back via `load_expectations_from_file`. A record that finds no traffic, or a load of a file with no expectations, shows a warning and lists nothing. The list keys each cassette by the absolute path the server resolved (the tool result's `file`; the server registry canonicalises every path the same way), so a relative and an absolute spelling of one file are one row. |
 | **Runs** | Pick two captured sessions (Run A / Run B) and see a side-by-side structural trajectory diff (tool-call chain + per-turn token usage table). |
 | **Export** | Single dropdown that crosses scope (registered expectations / recorded requests) with file format (MockServer JSON / HAR / OpenAPI 3 / Postman v2.1 / Bruno zip). Each option maps to a `PUT /mockserver/retrieve?type=ACTIVE_EXPECTATIONS\|REQUEST_RESPONSES&format=JSON\|HAR\|OPENAPI\|POSTMAN\|BRUNO` call. BRUNO returns `application/zip` since Bruno collections are multi-file (`.bru` per request + `bruno.json` manifest). Generation lives in `mockserver-core`'s `ExpectationExportSerializer` — best-effort for the non-MockServer formats (positive-string matchers round-trip, NottableString negation and dynamic actions appear as placeholders). |
 
@@ -1344,6 +1344,8 @@ Throttled: max 1/sec"]
 `DashboardWebSocketHandler` (lines 385–450) performs a single reverse-chronological pass over the log stream to pair `RECEIVED_REQUEST` entries with their matching `EXPECTATION_RESPONSE` or `NO_MATCH_RESPONSE` entries. Because the log is iterated in reverse order, responses appear before their corresponding requests. The handler stashes each response by `correlationId` in a temporary map, then when it encounters the `RECEIVED_REQUEST` with the matching `correlationId`, it attaches the stashed response as `httpResponse` in the emitted `recordedRequests` item.
 
 This means `recordedRequests` items are now `{ httpRequest, httpResponse }` objects — the same shape as `proxiedRequests` — allowing the Traffic, Sessions, and LLM Usage detail views to see mock-matched traffic with full request/response pairs, not just upstream-proxied traffic.
+
+A proxied request is in **both** sections: `recordedRequests` holds every received request (the Received Requests panel shows proxied ones too) and `proxiedRequests` holds the forwarded exchange. Each request-section item therefore carries the request's `correlationId`, and every view that shows the two as one list (Traffic, Sessions, Compare Runs, Optimise, MCP Server Health) goes through `combineTraffic` (`src/lib/combineTraffic.ts`): a received row whose `correlationId` matches a proxied row is dropped in favour of the proxied one, and the two newest-first lists are interleaved by `timestamp`. A received row with no proxied row yet (a request still in flight) stays.
 
 ### Dashboard Model Classes
 

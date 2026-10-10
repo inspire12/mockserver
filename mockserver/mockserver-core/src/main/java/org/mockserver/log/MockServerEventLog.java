@@ -5,6 +5,7 @@ import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.dsl.ProducerType;
 import org.mockserver.collections.CircularConcurrentLinkedDeque;
 import org.mockserver.configuration.Configuration;
+import org.mockserver.filters.TransportHeaderFilter;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.log.model.RequestAndExpectationId;
 import org.mockserver.logging.MockServerLogger;
@@ -143,6 +144,11 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
         -> !input.isDeleted() && input.getType() == EXPECTATION_RESPONSE;
     private static final Predicate<LogEntry> forwardedRequestLogPredicate = input
         -> !input.isDeleted() && input.getType() == FORWARDED_REQUEST;
+    // Every recorded-traffic-to-expectation surface (retrieve RECORDED_EXPECTATIONS in each format, promote,
+    // cassette record, persisted recorded expectations) reads through here, so one rule keeps hop-by-hop and
+    // transport headers out of all of them. The stored entry is never modified.
+    private static final Function<LogEntry, Expectation> logEntryToRecordedExpectation =
+        logEntry -> TransportHeaderFilter.withoutTransportHeaders(logEntry.getExpectation());
     // Redaction-aware getter: when mockserver.redactSecretsInLog is enabled it masks sensitive
     // headers / body fields on clones so retrieveRecordedRequests (and the JSON / HAR / cURL /
     // OpenAPI / Postman export formats derived from it) does not leak proxied credentials. When the
@@ -150,7 +156,6 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
     // and verification read the un-redacted fields directly elsewhere; this mapper is used only on the
     // request-retrieval / export surface (where the result is displayed/exported, or counted — and
     // redaction never adds/drops entries, so the verification count is unaffected).
-    private static final Function<LogEntry, Expectation> logEntryToExpectation = LogEntry::getExpectation;
     // Raw request/response pair — used by the response-aware verification DECISION path, which must
     // match against the original (un-redacted) content so enabling redaction never changes a
     // verification pass/fail result.
@@ -1290,7 +1295,7 @@ public class MockServerEventLog extends MockServerEventLogNotifier {
         retrieveLogEntries(
             requestDefinition,
             recordedExpectationLogPredicate,
-            logEntryToExpectation,
+            logEntryToRecordedExpectation,
             logEventStream -> listConsumer.accept(logEventStream.filter(Objects::nonNull).collect(Collectors.toList()))
         );
     }

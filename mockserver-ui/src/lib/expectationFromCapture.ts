@@ -431,16 +431,22 @@ function bodyToString(body: unknown): string {
   return JSON.stringify(body, null, 2);
 }
 
-/** Well-known hop-by-hop and infrastructure headers to exclude from captured expectations. */
+/**
+ * Well-known hop-by-hop and infrastructure headers to exclude from captured expectations
+ * (every `proxy-*` header too), matching the server's rule for recorded traffic.
+ */
 const EXCLUDED_HEADERS = new Set([
   'host', 'connection', 'content-length', 'transfer-encoding',
-  'accept-encoding', 'keep-alive', 'proxy-connection',
+  'accept-encoding', 'keep-alive', 'te', 'trailer', 'upgrade',
   'x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-host',
 ]);
 
 /** Filter out hop-by-hop and infrastructure headers. */
 function filterSignificantHeaders(headers: HeaderDraft[]): HeaderDraft[] {
-  return headers.filter((h) => !EXCLUDED_HEADERS.has(h.name.toLowerCase()));
+  return headers.filter((h) => {
+    const name = h.name.toLowerCase();
+    return !EXCLUDED_HEADERS.has(name) && !name.startsWith('proxy-');
+  });
 }
 
 /**

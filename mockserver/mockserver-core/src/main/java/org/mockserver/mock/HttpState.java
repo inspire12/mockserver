@@ -19,6 +19,7 @@ import org.mockserver.log.MockServerEventLog;
 import org.mockserver.mock.crud.CrudActionHandler;
 import org.mockserver.mock.crud.CrudDataStore;
 import org.mockserver.mock.crud.CrudDispatcher;
+import org.mockserver.filters.TransportHeaderFilter;
 import org.mockserver.log.model.LogEntry;
 import org.mockserver.logging.MockServerLogger;
 import org.mockserver.matchers.HttpRequestMatcher;
@@ -6960,6 +6961,11 @@ public class HttpState {
         // Redact BEFORE consolidation so promoted mocks never carry captured credentials and so
         // responses that differed only in a secret can collapse together.
         recorded = org.mockserver.imports.ImportRedaction.redact(recorded, redactionOptions != null ? redactionOptions : org.mockserver.imports.ImportRedaction.Options.enabled());
+        // A promoted mock serves applications that call MockServer directly, with their own Host, so it must
+        // not pin the upstream's Host (recordings and cassettes keep it to tell upstreams apart).
+        recorded = recorded.stream()
+            .map(recordedExpectation -> TransportHeaderFilter.withoutTransportHeaders(recordedExpectation, true))
+            .collect(Collectors.toList());
 
         List<Expectation> produced;
         if (consolidate) {

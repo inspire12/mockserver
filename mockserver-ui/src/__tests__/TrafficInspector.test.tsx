@@ -2053,3 +2053,42 @@ describe('TrafficInspector — "Create From This…" launchpad menu', () => {
     expect(req?.['path']).toBe('/api/orders');
   });
 });
+
+describe('TrafficInspector — one row per proxied request (E2E-LIB-5)', () => {
+  beforeEach(() => {
+    useDashboardStore.setState({
+      proxiedRequests: [
+        {
+          key: 'fwd_proxied',
+          correlationId: 'corr-proxied',
+          timestamp: '2026-10-10 10:00:01.000',
+          value: { httpRequest: { method: 'GET', path: '/api/proxied' }, httpResponse: { statusCode: 200 } },
+        },
+      ],
+      recordedRequests: [
+        {
+          key: 'mocked_request',
+          correlationId: 'corr-mocked',
+          timestamp: '2026-10-10 10:00:02.000',
+          value: { httpRequest: { method: 'GET', path: '/api/mocked' }, httpResponse: { statusCode: 201 } },
+        },
+        {
+          key: 'received_request',
+          correlationId: 'corr-proxied',
+          timestamp: '2026-10-10 10:00:00.900',
+          value: { httpRequest: { method: 'GET', path: '/api/proxied' } },
+        },
+      ],
+      activeExpectations: [],
+      trafficSearch: '',
+      selectedTrafficKey: null,
+    });
+  });
+
+  it('lists a proxied request once, with its upstream response, beside a mocked one', () => {
+    renderTrafficInspector();
+
+    expect(screen.getAllByText('/api/proxied')).toHaveLength(1);
+    expect(screen.getAllByText('/api/mocked')).toHaveLength(1);
+  });
+});

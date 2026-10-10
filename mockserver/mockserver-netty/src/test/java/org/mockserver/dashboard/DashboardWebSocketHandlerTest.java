@@ -2596,6 +2596,32 @@ public class DashboardWebSocketHandlerTest {
         assertThat("a limit above 100 admits more than 100 rows", recordedAbove100.size(), is(130));
     }
 
+    @Test
+    public void requestRowsCarryTheCorrelationIdTheReceivedAndProxiedRowsOfOneRequestShare() {
+        // A proxied request appears in both sections; the dashboard shows them as one list, and the
+        // shared correlation id is what lets it keep one row per request.
+        List<DashboardLogEntryDTO> reverse = List.of(
+            new DashboardLogEntryDTO(new LogEntry().setType(FORWARDED_REQUEST).setCorrelationId("proxied-1")
+                .setHttpRequest(request("/proxied")).setHttpResponse(response("upstream")).setMessageFormat("m"), configuration()),
+            new DashboardLogEntryDTO(new LogEntry().setType(RECEIVED_REQUEST).setCorrelationId("proxied-1")
+                .setHttpRequest(request("/proxied")).setMessageFormat("m"), configuration()),
+            logDto(RECEIVED_REQUEST, "/uncorrelated")
+        );
+
+        List<Map<String, Object>> recordedRequests = new LinkedList<>();
+        List<Map<String, Object>> proxiedRequests = new LinkedList<>();
+        DashboardWebSocketHandler.populateLogSections(
+            reverse.stream(), true, 10,
+            new LinkedList<>(), recordedRequests, proxiedRequests,
+            new DescriptionProcessor(configuration()), new DescriptionProcessor(configuration()), new DescriptionProcessor(configuration()));
+
+        assertThat(proxiedRequests.size(), is(1));
+        assertThat(proxiedRequests.get(0).get("correlationId"), is("proxied-1"));
+        assertThat(recordedRequests.size(), is(2));
+        assertThat(recordedRequests.get(0).get("correlationId"), is("proxied-1"));
+        assertThat("a row without a correlation id carries none", recordedRequests.get(1).containsKey("correlationId"), is(false));
+    }
+
     // =============================================================================================
     // Unit 1: short-circuit the reverse UI log walk once all three output categories (logMessages,
     // recordedRequests, proxiedRequests) have each reached UI_UPDATE_ITEM_LIMIT. The consumer used to

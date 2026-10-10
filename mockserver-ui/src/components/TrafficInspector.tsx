@@ -89,6 +89,7 @@ import { formatRowTime } from '../lib/logEntryTime';
 import type { ConnectionParams } from '../hooks/useConnectionParams';
 import { useFollow } from '../hooks/useFollow';
 import { useTailFollow } from '../hooks/useTailFollow';
+import { combineTraffic } from '../lib/combineTraffic';
 import {
   summarizeTraffic,
   extractBodyContent,
@@ -2413,21 +2414,22 @@ export default function TrafficInspector() {
     && (logLevel === 'WARN' || logLevel === 'ERROR' || logLevel === 'OFF')
     && recordedRequests.some((item) => !item.value['httpResponse']);
 
-  // Build summaries for every captured request (proxied + mocked).
+  // Build summaries for every captured request (proxied + mocked), one row per
+  // request, newest first.
   const allRequests = useMemo(
-    () => [...proxiedRequests, ...recordedRequests],
+    () => combineTraffic(proxiedRequests, recordedRequests),
     [proxiedRequests, recordedRequests],
   );
-  // Keep the proxied-then-recorded order (matching `allRequests`) and tag each row
-  // with whether it matched no expectation. Only recorded (non-proxied) requests
-  // can be "unmatched" — a proxied 404 comes from the real upstream, not MockServer.
-  const summaries = useMemo(
-    () => [
-      ...proxiedRequests.map((item) => ({ item, summary: cachedSummarize(item.value), unmatched: false })),
-      ...recordedRequests.map((item) => ({ item, summary: cachedSummarize(item.value), unmatched: isUnmatchedResponse(item.value) })),
-    ],
-    [proxiedRequests, recordedRequests],
-  );
+  // Tag each row with whether it matched no expectation. Only received (non-proxied)
+  // requests can be "unmatched" — a proxied 404 comes from the real upstream, not MockServer.
+  const summaries = useMemo(() => {
+    const proxiedKeys = new Set(proxiedRequests.map((item) => item.key));
+    return allRequests.map((item) => ({
+      item,
+      summary: cachedSummarize(item.value),
+      unmatched: !proxiedKeys.has(item.key) && isUnmatchedResponse(item.value),
+    }));
+  }, [allRequests, proxiedRequests]);
 
   // Count of captured requests that matched no expectation, surfaced as a header
   // badge that opens the Explain-Unmatched dialog.

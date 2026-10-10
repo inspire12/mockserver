@@ -224,6 +224,71 @@ describe('CassetteManager', () => {
     expect(args['path']).toBe('/tmp/fixture.json');
   });
 
+  function stubMcpToolResult(toolResult: Record<string, unknown>, serverCassettes: Record<string, unknown>[] = []) {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => Promise.resolve({
+      ok: true,
+      headers: { get: () => 'test-session' },
+      json: () => Promise.resolve(url.endsWith('/mockserver/cassettes')
+        ? { cassettes: serverCassettes }
+        : { jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: JSON.stringify(toolResult) }] } }),
+    })));
+  }
+
+  it('warns and lists no cassette when recording finds no traffic (E2E-LIB-10)', async () => {
+    const user = userEvent.setup();
+    stubMcpToolResult({ status: 'no_recorded_traffic', count: 0, message: 'No recorded traffic found matching the filter.' });
+    renderDialog();
+
+    await user.click(screen.getByRole('tab', { name: 'Record' }));
+    await user.type(screen.getByLabelText(/File path \(required\)/), '.tmp/empty.json');
+    await user.click(screen.getByRole('button', { name: 'Record' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('No recorded traffic found matching the filter.');
+    expect(alert.className).toContain('Warning');
+    expect(alert.className).not.toContain('Success');
+    await user.click(screen.getByRole('tab', { name: 'List' }));
+    expect(screen.getByText('No cassettes tracked yet')).toBeInTheDocument();
+  });
+
+  it('warns and lists no cassette when the loaded file holds no expectations', async () => {
+    const user = userEvent.setup();
+    stubMcpToolResult({ status: 'empty', count: 0, message: 'File contained no expectations.' });
+    renderDialog();
+
+    await user.click(screen.getByRole('tab', { name: 'Load' }));
+    await user.type(screen.getByLabelText(/File path \(required\)/), '.tmp/empty.json');
+    await user.click(screen.getByRole('button', { name: 'Load Expectations' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.className).toContain('Warning');
+    await user.click(screen.getByRole('tab', { name: 'List' }));
+    expect(screen.getByText('No cassettes tracked yet')).toBeInTheDocument();
+  });
+
+  it('lists a recorded then loaded cassette once, under the path the server resolved (E2E-LIB-12)', async () => {
+    const user = userEvent.setup();
+    renderDialog();
+
+    stubMcpToolResult({ status: 'written', count: 1, file: '/srv/mockserver/.tmp/c.json', message: 'Wrote 1 expectation(s)' });
+    await user.click(screen.getByRole('tab', { name: 'Record' }));
+    await user.type(screen.getByLabelText(/File path \(required\)/), '.tmp/c.json');
+    await user.click(screen.getByRole('button', { name: 'Record' }));
+    await screen.findByText('Wrote 1 expectation(s)');
+
+    // The server registers the file under the path it resolved, as the MCP tools do.
+    const registered = { path: '/srv/mockserver/.tmp/c.json', filename: 'c.json', expectationCount: 1, origin: 'loaded', lastUsed: 1 };
+    stubMcpToolResult({ status: 'loaded', count: 1, file: '/srv/mockserver/.tmp/c.json', message: 'Loaded 1 expectation(s)' }, [registered]);
+    await user.click(screen.getByRole('tab', { name: 'Load' }));
+    await user.type(screen.getByLabelText(/File path \(required\)/), '.tmp/c.json');
+    await user.click(screen.getByRole('button', { name: 'Load Expectations' }));
+    await screen.findByText('Loaded 1 expectation(s)');
+
+    await user.click(screen.getByRole('tab', { name: 'List' }));
+    expect(screen.getAllByRole('button', { name: 'Remove c.json' })).toHaveLength(1);
+    expect(screen.getByText('/srv/mockserver/.tmp/c.json')).toBeInTheDocument();
+  });
+
   it('removes a cassette from the list', async () => {
     const user = userEvent.setup();
 

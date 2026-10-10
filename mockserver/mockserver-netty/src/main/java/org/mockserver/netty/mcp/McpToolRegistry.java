@@ -32,6 +32,7 @@ import org.mockserver.matchers.MatchDifference;
 import org.mockserver.matchers.TimeToLive;
 import org.mockserver.matchers.Times;
 import org.mockserver.mock.CassetteRegistry;
+import org.mockserver.filters.TransportHeaderFilter;
 import org.mockserver.mock.Expectation;
 import org.mockserver.mock.HttpState;
 import org.mockserver.mock.MockMode;
@@ -1604,6 +1605,11 @@ public class McpToolRegistry {
                 resultNode.put("message", "No recorded traffic found matching the filter.");
                 resultNode.put("count", 0);
                 return resultNode;
+            }
+
+            // Like promote: these mocks serve applications that call MockServer directly, with their own Host.
+            for (int i = 0; i < recordedExpectations.length; i++) {
+                recordedExpectations[i] = TransportHeaderFilter.withoutTransportHeaders(recordedExpectations[i], true);
             }
 
             if (preview) {

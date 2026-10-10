@@ -147,6 +147,42 @@ public class CreateExpectationsFromRecordedTrafficIntegrationTest {
     }
 
     @Test
+    public void shouldCreateAndPreviewMocksThatMatchADirectRequestWithAnotherHost() throws Exception {
+        // given - traffic recorded through the proxy from curl -x, carrying the upstream's Host
+        org.mockserver.model.HttpRequest recorded = request().withMethod("GET").withPath("/api/direct")
+            .withHeader("Host", "127.0.0.1:1134")
+            .withHeader("Proxy-Connection", "Keep-Alive")
+            .withHeader("X-Api-Version", "2");
+        httpState.log(new LogEntry()
+            .setType(FORWARDED_REQUEST)
+            .setLogLevel(org.slf4j.event.Level.INFO)
+            .setHttpRequest(recorded)
+            .setHttpResponse(response().withStatusCode(200).withBody("direct"))
+            .setExpectation(recorded, response().withStatusCode(200).withBody("direct"))
+            .setMessageFormat("returning response:{}for forwarded request")
+            .setArguments(response().withStatusCode(200))
+        );
+        pollUntilTrue(() -> retrieveRecordedExpectationCount() >= 1);
+
+        // when - preview, then create
+        ObjectNode previewParams = objectMapper.createObjectNode();
+        previewParams.put("preview", true);
+        JsonNode preview = toolRegistry.callTool("create_expectations_from_recorded_traffic", previewParams);
+        JsonNode created = toolRegistry.callTool("create_expectations_from_recorded_traffic", objectMapper.createObjectNode());
+
+        // then - neither pins Host nor Proxy-Connection, and an application calling MockServer directly matches
+        String previewRequest = preview.path("expectations").get(0).path("httpRequest").toString().toLowerCase(java.util.Locale.ROOT);
+        assertThat(previewRequest, not(containsString("\"host\"")));
+        assertThat(previewRequest, not(containsString("proxy-connection")));
+        assertThat(previewRequest, containsString("x-api-version"));
+        assertThat(created.path("status").asText(), is("created"));
+        org.mockserver.model.HttpRequest direct = request().withMethod("GET").withPath("/api/direct")
+            .withHeader("Host", "localhost:1124")
+            .withHeader("X-Api-Version", "2");
+        assertThat(httpState.firstMatchingExpectation(direct), is(notNullValue()));
+    }
+
+    @Test
     public void shouldPreviewWithoutCreatingExpectations() throws Exception {
         // given - simulate forwarded traffic
         httpState.log(new LogEntry()

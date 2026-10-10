@@ -453,4 +453,24 @@ describe('standard HTTP capture → expectation JSON (WS5.2)', () => {
     // Host is filtered as a hop-by-hop/infra header; Content-Type survives.
     expect(httpRequest['headers']).toEqual([{ name: 'Content-Type', values: ['application/json'] }]);
   });
+
+  it('exact precision leaves out every proxy-* and hop-by-hop header a proxied client sent', () => {
+    const proxied = {
+      ...standardHttpItem,
+      httpRequest: {
+        ...standardHttpItem.httpRequest,
+        headers: [
+          { name: 'Proxy-Connection', values: ['Keep-Alive'] },
+          { name: 'Proxy-Authorization', values: ['Basic eDp5'] },
+          { name: 'TE', values: ['trailers'] },
+          { name: 'Upgrade', values: ['h2c'] },
+          { name: 'Content-Type', values: ['application/json'] },
+        ],
+      },
+    };
+    const draft = extractGenericExpectationFromCapture(proxied, 'exact');
+    const httpRequest = genericExpectationToJsonObject(draft)['httpRequest'] as Record<string, unknown>;
+
+    expect(httpRequest['headers']).toEqual([{ name: 'Content-Type', values: ['application/json'] }]);
+  });
 });

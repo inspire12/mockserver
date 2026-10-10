@@ -17,6 +17,7 @@ import {
   type McpServerHealth,
 } from '../lib/llmTraffic';
 import { monospaceFontFamily } from '../theme';
+import { combineTraffic } from '../lib/combineTraffic';
 
 // ---------------------------------------------------------------------------
 // MCP server health panel
@@ -98,7 +99,7 @@ export default function McpServerHealthPanel() {
   useAutoLoadLlmRows();
 
   const rows = useMemo(() => {
-    const values = [...proxiedRequests, ...recordedRequests].map((item) => item.value);
+    const values = combineTraffic(proxiedRequests, recordedRequests).map((item) => item.value);
     return aggregateMcpServerHealth(values);
   }, [proxiedRequests, recordedRequests]);
 

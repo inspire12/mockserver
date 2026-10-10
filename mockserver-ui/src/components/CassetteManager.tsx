@@ -52,6 +52,15 @@ interface CassetteManagerProps {
 // Tab panels
 // ---------------------------------------------------------------------------
 
+/**
+ * The cassette's path as the server resolved it (absolute), so the browser list and
+ * the server registry key it the same way; falls back to what was typed.
+ */
+function resolvedPath(result: Record<string, unknown>, typed: string): string {
+  const file = result['file'];
+  return typeof file === 'string' && file.trim() ? file : typed;
+}
+
 function ListTab({
   cassettes,
   onRefresh,
@@ -156,12 +165,14 @@ function RecordTab({
   const [host, setHost] = useState('');
   const [recording, setRecording] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
   const handleRecord = useCallback(async () => {
     if (!path.trim()) return;
     setRecording(true);
     setError(null);
+    setWarning(null);
     setSuccess(null);
     try {
       const baseUrl = buildBaseUrl(connectionParams);
@@ -173,12 +184,18 @@ function RecordTab({
         args['host'] = host.trim();
       }
       const result = await callMcpTool(baseUrl, 'record_llm_fixtures', args);
-      if (result.ok && result.result) {
+      if (result.ok && result.result && (result.result['status'] === 'no_recorded_traffic' || result.result['count'] === 0)) {
+        // Nothing was written, so there is no cassette to list.
+        setWarning(typeof result.result['message'] === 'string'
+          ? result.result['message']
+          : 'No recorded traffic found matching the filter, so no cassette was written.');
+      } else if (result.ok && result.result) {
         const count = typeof result.result['count'] === 'number' ? result.result['count'] : -1;
-        addCassette(path.trim(), count, 'recorded');
+        const cassettePath = resolvedPath(result.result, path.trim());
+        addCassette(cassettePath, count, 'recorded');
         // Mirror into the server-side registry so the cassette is visible after a reload and from
         // other browsers (best-effort — ignore failures on older servers without the endpoint).
-        void registerServerCassette(connectionParams, { path: path.trim(), expectationCount: count, origin: 'recorded' }).catch(() => undefined);
+        void registerServerCassette(connectionParams, { path: cassettePath, expectationCount: count, origin: 'recorded' }).catch(() => undefined);
         const msg = typeof result.result['message'] === 'string'
           ? result.result['message']
           : `Recorded ${count} expectation(s)`;
@@ -239,6 +256,7 @@ function RecordTab({
         {recording ? 'Recording...' : 'Record'}
       </Button>
       {error && <Alert severity="error">{error}</Alert>}
+      {warning && <Alert severity="warning">{warning}</Alert>}
       {success && <Alert severity="success">{success}</Alert>}
     </Box>
   );
@@ -254,23 +272,31 @@ function LoadTab({
   const [filePath, setFilePath] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
   const handleLoad = useCallback(async () => {
     if (!filePath.trim()) return;
     setLoading(true);
     setError(null);
+    setWarning(null);
     setSuccess(null);
     try {
       const baseUrl = buildBaseUrl(connectionParams);
       const result = await callMcpTool(baseUrl, 'load_expectations_from_file', {
         path: filePath.trim(),
       });
-      if (result.ok && result.result) {
+      if (result.ok && result.result && result.result['status'] === 'empty') {
+        // The file held no expectations, so nothing was loaded and there is no cassette to list.
+        setWarning(typeof result.result['message'] === 'string'
+          ? result.result['message']
+          : 'File contained no expectations.');
+      } else if (result.ok && result.result) {
         const count = typeof result.result['count'] === 'number' ? result.result['count'] : -1;
-        addCassette(filePath.trim(), count, 'loaded');
+        const cassettePath = resolvedPath(result.result, filePath.trim());
+        addCassette(cassettePath, count, 'loaded');
         // Mirror into the server-side registry (best-effort) so it persists across reloads/browsers.
-        void registerServerCassette(connectionParams, { path: filePath.trim(), expectationCount: count, origin: 'loaded' }).catch(() => undefined);
+        void registerServerCassette(connectionParams, { path: cassettePath, expectationCount: count, origin: 'loaded' }).catch(() => undefined);
         const msg = typeof result.result['message'] === 'string'
           ? result.result['message']
           : `Loaded ${count} expectation(s)`;
@@ -313,6 +339,7 @@ function LoadTab({
         {loading ? 'Loading…' : 'Load Expectations'}
       </Button>
       {error && <Alert severity="error">{error}</Alert>}
+      {warning && <Alert severity="warning">{warning}</Alert>}
       {success && <Alert severity="success">{success}</Alert>}
     </Box>
   );

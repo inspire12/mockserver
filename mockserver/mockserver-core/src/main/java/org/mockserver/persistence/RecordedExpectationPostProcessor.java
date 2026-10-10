@@ -2,6 +2,7 @@ package org.mockserver.persistence;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.mockserver.filters.TransportHeaderFilter;
 import org.mockserver.imports.HarImporter;
 import org.mockserver.matchers.TimeToLive;
 import org.mockserver.matchers.Times;
@@ -354,8 +355,9 @@ public class RecordedExpectationPostProcessor {
     }
 
     /**
-     * Remove volatile request headers from a generated matcher, reusing exactly the
-     * volatile-header set applied to HAR imports ({@link HarImporter#volatileRequestHeaders()}).
+     * Remove volatile request headers from a generated matcher: the volatile-header set applied
+     * to HAR imports ({@link HarImporter#volatileRequestHeaders()}) plus every hop-by-hop and
+     * transport header ({@link TransportHeaderFilter#isTransportHeader(String)}).
      */
     private static void stripVolatileHeaders(HttpRequest request) {
         Headers headers = request.getHeaders();
@@ -365,7 +367,7 @@ public class RecordedExpectationPostProcessor {
         Set<String> volatileHeaders = HarImporter.volatileRequestHeaders();
         for (Header entry : new ArrayList<>(headers.getEntries())) {
             String name = entry.getName() != null ? entry.getName().getValue() : null;
-            if (name != null && volatileHeaders.contains(name.toLowerCase(Locale.ROOT))) {
+            if (name != null && (volatileHeaders.contains(name.toLowerCase(Locale.ROOT)) || TransportHeaderFilter.isTransportHeader(name))) {
                 request.removeHeader(name);
             }
         }

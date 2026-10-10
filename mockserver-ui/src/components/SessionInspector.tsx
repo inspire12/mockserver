@@ -37,6 +37,7 @@ import AgentRunGraph from './AgentRunGraph';
 import { CompareRunsBody } from './CompareRunsDialog';
 import { monospaceFontFamily, transitions } from '../theme';
 import { useHeldItems } from '../hooks/useHeldItems';
+import { combineTraffic } from '../lib/combineTraffic';
 
 // Matches Panel's AT_TOP_THRESHOLD_PX: absorbs HiDPI sub-pixel offsets and a few
 // pixels of inertial overshoot, so a reader parked at the top stays recognised as
@@ -543,7 +544,7 @@ export default function SessionInspector({ connectionParams }: SessionInspectorP
   const [tab, setTab] = useState(0);
 
   const liveRequests = useMemo(
-    () => [...proxiedRequests, ...recordedRequests],
+    () => combineTraffic(proxiedRequests, recordedRequests),
     [proxiedRequests, recordedRequests],
   );
 

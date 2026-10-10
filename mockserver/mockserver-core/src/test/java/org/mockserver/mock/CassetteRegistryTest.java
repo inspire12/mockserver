@@ -2,6 +2,7 @@ package org.mockserver.mock;
 
 import org.junit.Test;
 
+import java.nio.file.Paths;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -54,6 +55,22 @@ public class CassetteRegistryTest {
         assertThat(updated.expectationCount, is(9));
         assertThat(updated.origin, is("recorded"));
         assertThat(updated.lastUsedEpochMillis, is(2000L));
+    }
+
+    @Test
+    public void shouldHoldARelativeAndAnAbsoluteSpellingOfOneFileAsOneCassette() {
+        CassetteRegistry registry = new CassetteRegistry(() -> 0L);
+        String absolute = Paths.get(".tmp/cassette.json").toAbsolutePath().normalize().toString();
+
+        registry.register(absolute, null, 2, "recorded");
+        registry.register(".tmp/cassette.json", null, 2, "loaded");
+        registry.register("./.tmp/../.tmp/cassette.json", null, 2, "loaded");
+
+        assertThat(registry.list().size(), is(1));
+        assertThat(registry.list().get(0).path, is(absolute));
+        assertThat(registry.list().get(0).origin, is("loaded"));
+        assertThat(registry.remove(".tmp/cassette.json"), is(true));
+        assertThat(registry.list().size(), is(0));
     }
 
     @Test

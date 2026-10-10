@@ -2,6 +2,8 @@ package org.mockserver.mock;
 
 import org.mockserver.time.TimeService;
 
+import java.nio.file.InvalidPathException;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -62,7 +64,7 @@ public class CassetteRegistry {
         if (path == null || path.trim().isEmpty()) {
             return null;
         }
-        String key = path.trim();
+        String key = canonicalPath(path);
         String name = (filename == null || filename.trim().isEmpty()) ? extractFilename(key) : filename.trim();
         String safeOrigin = "recorded".equals(origin) ? "recorded" : "loaded";
         Entry entry = new Entry(key, name, expectationCount, safeOrigin, clock.getAsLong());
@@ -72,7 +74,7 @@ public class CassetteRegistry {
 
     /** Remove a cassette by path. Returns true if one was removed. */
     public boolean remove(String path) {
-        return path != null && byPath.remove(path.trim()) != null;
+        return path != null && !path.trim().isEmpty() && byPath.remove(canonicalPath(path)) != null;
     }
 
     /** Snapshot of all registered cassettes, most-recently-used first. */
@@ -85,6 +87,20 @@ public class CassetteRegistry {
     /** Clear all cassettes. Called on server reset and for test isolation. */
     public void reset() {
         byPath.clear();
+    }
+
+    /**
+     * The key a cassette is held under: its path resolved against the server's working directory, which is
+     * how the MCP record and load tools resolve it, so a relative and an absolute spelling of one file are
+     * one cassette.
+     */
+    private static String canonicalPath(String path) {
+        String trimmed = path.trim();
+        try {
+            return Paths.get(trimmed).toAbsolutePath().normalize().toString();
+        } catch (InvalidPathException e) {
+            return trimmed;
+        }
     }
 
     private static String extractFilename(String path) {

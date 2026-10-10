@@ -39,6 +39,7 @@ import { humanizeError, type HumanError } from '../lib/errorMessage';
 import HumanErrorAlert from './HumanErrorAlert';
 import { monospaceFontFamily, transitions } from '../theme';
 import { trackFeature } from '../lib/analytics';
+import { combineTraffic } from '../lib/combineTraffic';
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -112,7 +113,7 @@ function useSessionOptions(): SessionOption[] {
   useAutoLoadLlmRows();
 
   return useMemo(() => {
-    const all = [...proxiedRequests, ...recordedRequests];
+    const all = combineTraffic(proxiedRequests, recordedRequests);
     const sessions = groupBySession(all, activeExpectations);
     const options: SessionOption[] = [{ value: ALL_SESSIONS, label: 'All captured LLM traffic' }];
     const seen = new Set<string>();
