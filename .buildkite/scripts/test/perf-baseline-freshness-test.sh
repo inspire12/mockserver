@@ -228,6 +228,56 @@ mb() {
 { b 654 schedule running 1; mb 660 passed 2 passed; b 653 schedule failed 5; } \
   | run "in-flight scheduled, measured manual newer than the failed one" 0 "last completed #660 passed, manual [perf-run]"
 
+echo "--- 7. a manual build whose perf-run step failed is a failed run; one that never measured is not"
+# ms(number, state, hours_ago, run, microbench, compare[, env_json]) -> a manual [perf-run]
+# build with each measurement step's job in its own state ("-" omits that job)
+ms() {
+  b "$1" api "$2" "$3" "[perf-run] after a fix" \
+    | jq -c --arg r "$4" --arg m "$5" --arg c "$6" --argjson env "${7:-"{}"}" '. + {env: $env,
+        jobs: ([{step_key: null, state: "passed"}]
+          + [ {step_key: "perf-run", state: $r}, {step_key: "perf-microbench", state: $m},
+              {step_key: "perf-compare", state: $c} ] | map(select(.state != "-")))}'
+}
+{ ms 661 failed 1 failed passed waiting_failed; b 653 schedule passed 5; } \
+  | run "newest manual: perf-run failed, compare skipped" 1 "NOT_PASSED (last completed manual [perf-run] run was 'failed')"
+if grep -qE "^- its .perf-run. measurement step failed, so compare never ran" "$WORK/last.out"; then
+  ok "  ... says the measurement failed"
+else
+  bad "failed measurement: message lacks the reason"
+fi
+{ ms 661 failed 1 timed_out canceled broken; b 653 schedule passed 5; } \
+  | run "newest manual: perf-run timed out" 1 "NOT_PASSED (last completed manual [perf-run] run was 'failed')"
+{ ms 661 canceled 1 failed canceled broken; b 653 schedule passed 5; } \
+  | run "newest manual: perf-run failed, rest cancelled" 1 "NOT_PASSED (last completed manual [perf-run] run was 'canceled')"
+{ ms 661 passed 1 failed passed broken; b 653 schedule passed 5; } \
+  | run "a failed perf-run never passes, whatever the build state" 1 "NOT_PASSED (last completed manual [perf-run] run was 'failed')"
+{ ms 661 canceled 1 canceled canceled broken; b 653 schedule passed 5; } \
+  | run "newest manual cancelled during perf-run is ignored" 0 "last completed #653 passed, scheduled"
+{ ms 661 failed 1 canceled failed broken; b 653 schedule passed 5; } \
+  | run "a failed microbench with perf-run cancelled is ignored" 0 "last completed #653 passed, scheduled"
+{ ms 661 canceled 1 - - -; b 653 schedule passed 5; } \
+  | run "newest manual cancelled before measuring is ignored" 0 "last completed #653 passed, scheduled"
+{ ms 661 canceled 1 broken broken broken; b 653 schedule passed 5; } \
+  | run "newest manual with measurement never started is ignored" 0 "last completed #653 passed, scheduled"
+{ b 661 api passed 1 "[perf-run] guard only"; b 653 schedule passed 5; } \
+  | run "newest manual guard-only (no measurement jobs) is ignored" 0 "last completed #653 passed, scheduled"
+{ ms 661 failed 1 failed passed waiting_failed '{"PERF_XL":"true"}'; b 653 schedule passed 5; } \
+  | run "a failed-measurement A/B build with env overrides is ignored" 0 "last completed #653 passed, scheduled"
+{ ms 661 failed 1 failed passed waiting_failed | jq -c '.message = "re-run without the tag"'; b 653 schedule passed 5; } \
+  | run "a failed-measurement untagged api build is ignored" 0 "last completed #653 passed, scheduled"
+{ ms 661 failed 1 failed passed waiting_failed | jq -c '.branch = "perf-experiment"'; b 653 schedule passed 5; } \
+  | run "a failed-measurement branch build is ignored" 0 "last completed #653 passed, scheduled"
+{ ms 661 failing 1 failed running waiting_failed; b 653 schedule passed 5; } \
+  | run "a failed-measurement build still running is ignored" 0 "last completed #653 passed, scheduled"
+{ b 662 schedule passed 1; ms 661 failed 2 failed passed waiting_failed; b 653 schedule passed 26; } \
+  | run "scheduled newest passed, older manual failed measurement" 0 "last completed #662 passed, scheduled"
+{ b 662 schedule failed 1; ms 661 failed 2 failed passed waiting_failed; b 653 schedule passed 26; } \
+  | run "scheduled newest failed, older manual failed measurement" 1 "NOT_PASSED (last completed scheduled run was 'failed')"
+{ ms 663 passed 1 passed passed passed; ms 661 failed 2 failed passed waiting_failed; b 653 schedule passed 5; } \
+  | run "a newer passing manual run clears an older failed measurement" 0 "last completed #663 passed, manual [perf-run]"
+{ ms 661 failed 1 failed passed waiting_failed; b 500 schedule passed 40; } \
+  | run "a failed measurement does not hide a stalled schedule" 1 "STALLED (no scheduled build within 30h)"
+
 FAILS=$(wc -l < "$WORK/fails" | tr -d ' ')
 [ "$FAILS" -eq 0 ] || { echo "FAILED: $FAILS check(s)" >&2; exit 1; }
 echo "OK: all perf-baseline-freshness checks passed"

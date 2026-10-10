@@ -64,9 +64,11 @@ the daily job is a no-op on unchanged code.
 `mockserver-infra`'s "assert perf baseline is fresh" step (`perf-baseline-freshness.sh`) reads
 this pipeline's builds. It fails when the daily schedule stops firing, or when the newest finished
 run did not pass. That run is either the last daily scheduled build or a newer manual
-`[perf-run]` build that ran the run, micro-benchmark and compare steps with no build env
-overrides. So a passing manual run clears a failed daily run without waiting for 04:00, but never
-stands in for a schedule that has stopped. A manual build that skipped measurement, or an A/B
+`[perf-run]` build with no build env overrides that either ran the run, micro-benchmark and compare
+steps, or whose run step ran and failed (compare is then skipped, and the build counts as a failed
+run). So a passing manual run clears a failed daily run without waiting for 04:00, and a failing one
+turns the check red, but a manual run never stands in for a schedule that has stopped. A manual
+build that never measured (a guard skip, or one cancelled before its run step finished), or an A/B
 build with env overrides, is ignored. The full rules are in
 [ci-cd.md](../infrastructure/ci-cd.md).
 

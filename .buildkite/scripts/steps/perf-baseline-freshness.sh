@@ -35,10 +35,12 @@ set -euo pipefail
 # recent COMPLETED run did not pass (NOT_PASSED — the run broke, or a gating
 # regression fired). "Run" is a daily scheduled build or a MEASURED manual build: a
 # non-scheduled build tagged [perf-run] (or started from the UI) with no build env
-# overrides, whose run, micro-benchmark and compare steps all executed. Whichever of
-# the two is newest gives the verdict, so a passing manual run can clear a failed
-# scheduled one. Only scheduled builds prove the cron is firing, so a manual run never
-# rescues STALLED, and a manual build that measured nothing is ignored.
+# overrides, whose run, micro-benchmark and compare steps all executed, or whose
+# perf-run step ran and failed (compare is then skipped; it counts as a failed run).
+# Whichever of the two is newest gives the verdict, so a passing manual run can clear a
+# failed scheduled one and a failing one turns the check red. Only scheduled builds
+# prove the cron is firing, so a manual run never rescues STALLED, and a manual build
+# that never measured (guard skip, cancelled before perf-run finished) is ignored.
 #
 # NOT DETECTED: a scheduled build that goes GREEN while writing no fresh baseline.
 # perf-test-compare.sh currently has two such paths — an invalid run annotates an
@@ -210,20 +212,23 @@ CURL_CFG="$WORK/curl.cfg"
 NOT_SOAK='((.message // "") | test("\\[perf-soak\\]") | not)'
 DAILY_SCHEDULED_SEL="(.source == \"schedule\" and ${NOT_SOAK})"
 # A measured manual build: the steps the guard dispatches for a full run all executed
-# (passed or failed; a skipped build shows them `broken` or omits them). Build env
+# (passed or failed; a skipped build shows them `broken` or omits them), or `perf-run`
+# itself ran and failed, which skips compare but is still a failed run. Build env
 # overrides mark an A/B experiment, not the default configuration the daily run measures.
 MEASURED_STEPS='["perf-run", "perf-microbench", "perf-compare"]'
+FULLY_MEASURED="((.jobs // []) as \$jobs | all(${MEASURED_STEPS}[]; . as \$k | any(\$jobs[]; .step_key == \$k and (.state == \"passed\" or .state == \"failed\"))))"
+MEASUREMENT_FAILED='any((.jobs // [])[]; .step_key == "perf-run" and (.state == "failed" or .state == "timed_out"))'
 MEASURED_MANUAL_SEL="(.source != \"schedule\" and ${NOT_SOAK}
   and (.source == \"ui\" or ((.message // \"\") | test(\"\\\\[perf-run\\\\]\")))
   and ((.env // {}) == {})
-  and ((.jobs // []) as \$jobs | all(${MEASURED_STEPS}[]; . as \$k | any(\$jobs[]; .step_key == \$k and (.state == \"passed\" or .state == \"failed\")))))"
+  and (${FULLY_MEASURED} or ${MEASUREMENT_FAILED}))"
 # A guard-skip (master unchanged) lands as `passed`: the producer working correctly.
 IS_TERMINAL='(.state | . == "passed" or . == "failed" or . == "canceled" or . == "skipped" or . == "not_run" or . == "blocked")'
 # Every scan keeps the daily scheduled builds and the finished measured manual builds,
 # each tagged with its kind and trimmed to the fields read below.
 KEEP="[ .[] | {number, source, state, created_at, web_url, message} as \$b
   | if ${DAILY_SCHEDULED_SEL} then \$b + {kind: \"scheduled\"}
-    elif (${MEASURED_MANUAL_SEL}) and ${IS_TERMINAL} then \$b + {kind: \"manual\"}
+    elif (${MEASURED_MANUAL_SEL}) and ${IS_TERMINAL} then \$b + {kind: \"manual\", compare_skipped: (${FULLY_MEASURED} | not)}
     else empty end ]"
 SCHEDULED_ONLY='[ .[] | select(.kind == "scheduled") ]'
 
@@ -399,7 +404,9 @@ SCHED_TERM_NUMBER="$(jq -r '.number' <<<"$TERMINAL")"
 VERDICT="$(jq -c --argjson n "$SCHED_TERM_NUMBER" \
   '[ .[] | select(.kind == "manual" or (.kind == "scheduled" and .number == $n)) ][0]' <<<"$WINDOW_ALL")"
 if [ "$(jq -r '.kind' <<<"$VERDICT")" = "manual" ]; then TERMINAL="$VERDICT"; fi
-TERM_STATE="$(jq -r '.state' <<<"$TERMINAL")"
+# A run whose perf-run step failed never passes, even if the build itself reads `passed`.
+TERM_STATE="$(jq -r 'if .compare_skipped == true and .state == "passed" then "failed" else .state end' <<<"$TERMINAL")"
+TERM_DETAIL="$(jq -r 'if .compare_skipped == true then "- its `perf-run` measurement step failed, so compare never ran and no baseline was written" else "" end' <<<"$TERMINAL")"
 TERM_NUMBER="$(jq -r '.number' <<<"$TERMINAL")"
 TERM_URL="$(jq -r '.web_url // ""' <<<"$TERMINAL")"
 TERM_CREATED="$(jq -r '.created_at' <<<"$TERMINAL")"
@@ -409,7 +416,8 @@ if [ "$TERM_STATE" != "passed" ]; then
   fail "NOT_PASSED (last completed ${TERM_KIND} run was '${TERM_STATE}')" \
     "The most recent COMPLETED ${TERM_KIND} build of \`${PRODUCER_PIPELINE}\` (#${TERM_NUMBER}, created \`${TERM_CREATED}\`) is **${TERM_STATE}**, not passed. The producer ran but did not succeed — it either broke or flagged a gating regression. Either way the freshest baseline cannot be trusted until a human looks.
 
-- build: ${TERM_URL:-#${TERM_NUMBER}}
+${TERM_DETAIL:+${TERM_DETAIL}
+}- build: ${TERM_URL:-#${TERM_NUMBER}}
 
 Investigate that build before relying on the perf regression comparison."
 fi

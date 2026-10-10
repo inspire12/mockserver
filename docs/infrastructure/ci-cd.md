@@ -196,13 +196,16 @@ non-scheduled build only if all of these hold:
 |---|---|
 | The message contains `[perf-run]`, or the build was started from the UI | Without either, the commit guard dispatches nothing |
 | No build env overrides (`env` is empty) | Overrides mark an A/B experiment, not the default configuration the daily run measures |
-| Its `perf-run`, `perf-microbench` and `perf-compare` steps all executed (`passed` or `failed`) | A build that skipped measurement shows them `broken` or not at all, and measured nothing |
+| Its `perf-run`, `perf-microbench` and `perf-compare` steps all executed (`passed` or `failed`), or its `perf-run` step ended `failed` or `timed_out` | A build that skipped measurement shows them `broken` or not at all, and measured nothing. A failed `perf-run` skips compare, but the build did measure, and failed |
 | It has finished | An in-flight build has no verdict yet |
 | No `[perf-soak]` in the message | The soak is not the baseline producer |
+| It is on `master` | The check queries only the producer's `master` builds |
 
 A counted manual build that failed fails the check (`NOT_PASSED`), the same as a failed
-scheduled one. Only scheduled builds prove the cron is firing, so a manual run never clears
-`STALLED` or `NO_SCHEDULE`.
+scheduled one. A build whose `perf-run` step failed always counts as not passed, and the
+annotation says compare never ran. A manual build cancelled before `perf-run` finished is
+ignored, so the previous run still decides. Only scheduled builds prove the cron is firing, so a
+manual run never clears `STALLED` or `NO_SCHEDULE`.
 
 ### Buildkite Pipelines
 
