@@ -10,12 +10,18 @@ import { defineConfig, devices, type PlaywrightTestConfig } from '@playwright/te
 //   http://${HOST}:${PORT}/mockserver/*            ← control plane (REST)
 //   ws://${HOST}:${PORT}/_mockserver_ui_websocket  ← live log feed
 //
-// Two ways the server is provided:
-//   • Local (default): Playwright boots the JAR itself via e2e/start-mockserver.mjs
-//     (the `webServer` block), on 127.0.0.1:1084.
-//   • CI (E2E_EXTERNAL_SERVER=1): the pipeline has already started MockServer in
-//     a separate container; point at it via E2E_MS_HOST/E2E_MS_PORT and skip the
-//     managed webServer.
+// Two servers, both booted from the JAR by e2e/start-mockserver.mjs (the
+// `webServer` entries) — locally and in CI alike:
+//   • main       127.0.0.1:1084 (E2E_MS_PORT): the server under test, at INFO,
+//                with load generation and SLO tracking on and metrics off.
+//   • secondary  127.0.0.1:1114 (E2E_UPSTREAM_PORT): the proxied upstream for the
+//                library / verify tests and the metrics-on server for the
+//                Metrics view.
+// The observe spec boots a third, short-lived server itself for its log-pressure
+// test (E2E_JAVA is the java it runs). With E2E_EXTERNAL_SERVER=1 nothing is
+// booted: point E2E_MS_HOST/E2E_MS_PORT (and E2E_UPSTREAM_HOST/E2E_UPSTREAM_PORT)
+// at servers started by hand. A test that needs a server or flag that is missing
+// skips with the reason locally, and fails in CI.
 
 const HOST = process.env.E2E_MS_HOST || '127.0.0.1';
 const PORT = process.env.E2E_MS_PORT || '1084';
@@ -25,14 +31,21 @@ const EXTERNAL_SERVER = process.env.E2E_EXTERNAL_SERVER === '1';
 const config: PlaywrightTestConfig = {
   testDir: '.',
   testMatch: '**/*.spec.ts',
-  // A single dashboard + one JVM: run serially so tests don't race on shared
-  // server state (expectations, the log ring buffer).
+  // Every spec resets and inspects the same two servers (expectations, the log
+  // ring buffer, server-wide chaos and load scenarios): run serially so tests
+  // never race on that shared state.
   fullyParallel: false,
   workers: 1,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI
-    ? [['list'], ['junit', { outputFile: 'test-reports/e2e-results.xml' }]]
+    ? [
+        ['list'],
+        // Relative to this config's directory (e2e/): the step's artifact glob and
+        // the junit-annotate step read mockserver-ui/test-reports/.
+        ['junit', { outputFile: '../test-reports/e2e-results.xml' }],
+        ['./no-silent-skip-reporter.ts'],
+      ]
     : [['list']],
   timeout: 60_000,
   expect: { timeout: 15_000 },
@@ -50,10 +63,9 @@ const config: PlaywrightTestConfig = {
       use: {
         ...devices['Desktop Chrome'],
         viewport: { width: 1600, height: 1000 },
-        // Normally Playwright's own bundled Chromium. Behind a TLS-inspection
-        // proxy `playwright install` cannot download it, so allow pointing at an
-        // installed browser instead (E2E_BROWSER_CHANNEL=chrome). Unset in CI,
-        // which uses the bundled build.
+        // Normally Playwright's own bundled Chromium (`npx playwright install
+        // chromium`). E2E_BROWSER_CHANNEL=chrome points at an installed Chrome
+        // instead, for a machine that cannot download it. Unset in CI.
         ...(process.env.E2E_BROWSER_CHANNEL
           ? { channel: process.env.E2E_BROWSER_CHANNEL }
           : {}),
@@ -63,20 +75,31 @@ const config: PlaywrightTestConfig = {
 };
 
 if (!EXTERNAL_SERVER) {
-  config.webServer = {
-    // cwd defaults to this config file's directory (e2e/), so the launcher is
-    // referenced by its bare name; it resolves all its own paths from __dirname.
-    command: 'node start-mockserver.mjs',
-    // Playwright polls this URL with GET until it answers 2xx/3xx; the dashboard
-    // GET is a good readiness signal for the whole server.
-    url: `${BASE_ORIGIN}/mockserver/dashboard/`,
-    // Generous: locally the JAR may need a Maven build on first run. In CI the
-    // pipeline builds it first, so boot is just a JVM start.
-    timeout: 300_000,
-    reuseExistingServer: !process.env.CI,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  };
+  const UPSTREAM_PORT = process.env.E2E_UPSTREAM_PORT || '1114';
+  // cwd defaults to this config file's directory (e2e/), so the launcher is
+  // referenced by its bare name; it resolves all its own paths from __dirname.
+  // Playwright starts these in order, polling each `url` with GET until it
+  // answers 2xx/3xx; the dashboard GET is a good readiness signal for a server.
+  config.webServer = [
+    {
+      command: 'node start-mockserver.mjs main',
+      url: `${BASE_ORIGIN}/mockserver/dashboard/`,
+      // Generous: locally the JAR may need a Maven build on first run. In CI the
+      // pipeline builds it first, so boot is just a JVM start.
+      timeout: 300_000,
+      reuseExistingServer: !process.env.CI,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+    {
+      command: 'node start-mockserver.mjs secondary',
+      url: `http://127.0.0.1:${UPSTREAM_PORT}/mockserver/dashboard/`,
+      timeout: 120_000,
+      reuseExistingServer: !process.env.CI,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+  ];
 }
 
 export default defineConfig(config);

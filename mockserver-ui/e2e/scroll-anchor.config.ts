@@ -14,7 +14,7 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: 0,
   reporter: process.env.CI
-    ? [['list'], ['junit', { outputFile: 'test-reports/e2e-anchor-results.xml' }]]
+    ? [['list'], ['junit', { outputFile: '../test-reports/e2e-anchor-results.xml' }]]
     : [['list']],
   timeout: 60_000,
   expect: { timeout: 15_000 },

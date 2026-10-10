@@ -115,6 +115,7 @@ indistinguishable from a pass, so these gates now fail loudly instead:
 | Go / .NET / PHP client integration | Skipped silently without `MOCKSERVER_URL` (never set in CI) | Dedicated steps run a live server built from HEAD (`with-mockserver.sh`); `MOCKSERVER_REQUIRE_SERVER=true` turns any skip into a hard failure |
 | Rust client integration | Entirely `#[ignore]`d; CI never passed `-- --ignored` | `rust-integration-test.sh` passes `-- --ignored` against a live server |
 | Node client tests | A hand-maintained 7-file list while the suite had 15 | Test files are **discovered by glob**, in CI, `npm test`, and `test:coverage` alike |
+| UI Playwright e2e (`ui-e2e.sh`) | Tests that need a second server or a server flag (`test.skip` when absent) would skip in a one-server topology and the step still passed | The Playwright config boots every server the specs need; in CI `requireOrSkip` turns a missing precondition into a failure, `no-silent-skip-reporter.ts` fails the run on any skip that is not a `test.fixme`, and the step asserts from the JUnit XML that every listed spec ran and the total meets a floor |
 | Go / .NET / Rust testcontainers | `soft_fail: true` made failures green | `soft_fail` removed |
 | Configuration call-site guard over `mockserver-maven-plugin` | The plugin ships but is outside the reactor, so the java build's guard never scanned it; it was scanned only on a machine that had built it locally | `maven-plugin-build.sh` re-runs the guard after the plugin's `verify` with `-Dguard.extraExpectedModules=mockserver-maven-plugin`, so a missing plugin `target/classes` fails the coverage check. The pipeline runs when the plugin, its pipeline or step, or `ConfigurationCallSiteGuardTest` changes; a server-only change that makes a plugin call site a violation surfaces on the next plugin build, not on its own |
 | Transparent-proxy end-to-end suites | Named `*EndToEndIT`, matching neither Surefire (`**/*Test.java`) nor Failsafe (`**/*IntegrationTest.java`), so `SoOriginalDstEndToEndIntegrationTest`, `TproxyEndToEndIntegrationTest` and `EbpfOriginalDestinationEndToEndIntegrationTest` never ran on any build | Renamed to `*EndToEndIntegrationTest` so Failsafe collects them; opt-in step (`java-transparent-proxy-test.sh`, `RUN_TRANSPARENT_PROXY_E2E=true`) runs them under the Docker socket and asserts via `assert-suite-ran.sh` that they executed — see below |
@@ -594,6 +595,33 @@ These pipelines run independently from the Java pipeline and do not have access 
 - **Helper:** `.buildkite/scripts/build-local-mockserver-image.sh` — builds the `mockserver-netty-docker` JAR (the shaded server jar with JNA unrelocated, which the published images ship) from the Maven reactor (skipped if the JAR already exists), copies it into `docker/local/`, and runs `docker build` to produce a local image tagged `mockserver-under-test:local` (configurable via `MOCKSERVER_IMAGE` env var).
 
 The test fixtures (`conftest.py` for Python, `integration_spec.rb` for Ruby) also respect the `MOCKSERVER_IMAGE` env var when launching a container in standalone/local mode.
+
+### UI End-to-End (Playwright) Step
+
+**Files:** `.buildkite/scripts/steps/ui-e2e.sh`, `mockserver-ui/e2e/playwright.config.ts`, `mockserver-ui/e2e/start-mockserver.mjs`
+
+The `:playwright: UI end-to-end (real browser)` step in `pipeline-ui.yml` drives the served dashboard in headless Chromium against real MockServers built from HEAD. It covers every dashboard area (one spec each for Mock, Observe, Verify, Resilience, Library / Inspect and the shell, plus the original dashboard, follow and live-scroll specs) and is a hard gate. CI runs exactly what `npm run test:e2e` runs locally.
+
+```mermaid
+flowchart LR
+    B["Maven CI image
+build runnable JAR"] --> J["Temurin 17 JRE (noble)
+copied into .tmp/ui-e2e-jre"]
+    J --> P["Playwright image
+npm ci, then test:e2e and test:e2e:anchor"]
+    P --> M["main MockServer :1084
+INFO, load generation, SLO"]
+    P --> S["secondary MockServer :1114
+upstream, metrics on"]
+    P --> L["log-pressure MockServer :1116
+booted by observe.spec.ts"]
+```
+
+- **One container, one loopback.** The Playwright config boots the servers itself (`webServer` entries running `start-mockserver.mjs main|secondary`), inside the Playwright container, with the JRE the step stages from the `eclipse-temurin:17-jre-noble` image (`E2E_JAVA`). Every server, the browser and the Node upstreams some specs start are on `127.0.0.1`, so a server can forward to a listener the test runner opened. The earlier topology (server in its own container on a Docker network) could not reach those listeners.
+- **Why two servers.** The main server keeps metrics off, because a test proves the dashboard never polls metrics on such a server; the Metrics view tests use the secondary server, which has them on. The secondary is also the proxied upstream for the record / replay, cassette, drift and contract tests, and the server without SLO tracking for the SLO 403 test.
+- **Serial, one worker.** Every spec resets and inspects the same servers (expectations, the event log, server-wide chaos and load scenarios), so tests run one at a time. Its 236 tests took 8.5 minutes on a developer Mac (three runs, October 2026); the step timeout is 40 minutes to cover the JAR build and `npm ci` as well.
+- **Fail-closed.** A test whose precondition the topology must provide calls `requireOrSkip` (`e2e/ci-guard.ts`): a skip locally, a failure when `CI` is set. In CI the `no-silent-skip-reporter.ts` reporter also fails the run if any test is skipped other than by `test.fixme`, which is kept only for a known open defect named by its id. After the run, `ui-e2e.sh` reads the JUnit XML and fails unless every spec it lists ran at least one test and the total that ran is at least `E2E_MIN_TESTS` (236), so a spec dropped from `testMatch`, renamed, or emptied by `test.fixme` cannot pass silently. Lower the floor or edit the list only when tests are removed on purpose.
+- **Artifacts.** JUnit XML (the configs write it to `../test-reports/`, because a reporter's `outputFile` is relative to the config's directory, `e2e/`) and each server's log (`mockserver-ui/test-reports/*.xml`, `*.log`; the servers log at INFO to a file, not the console), plus traces and screenshots of failed tests.
 
 ### Maven CI Image Push Pipeline
 

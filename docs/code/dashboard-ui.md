@@ -68,6 +68,16 @@ cd mockserver-ui && npx vite --port 3010   # MOCKSERVER_URL overrides the defaul
 Rebuild the jar only when something must be verified against the *served* artefact — the e2e suite
 does exactly this (`e2e/start-mockserver.mjs` boots the real jar).
 
+**The end-to-end suite** (`mockserver-ui/e2e/*.spec.ts`, `npm run test:e2e`) has one spec per
+dashboard area (`mock`, `observe`, `verify`, `resilience`, `library`, `shell`) plus the dashboard,
+follow and live-scroll specs. Its config boots two servers from the newest
+`mockserver-netty-no-dependencies` jar: the main one on 1084 (INFO, load generation and SLO tracking
+on, metrics off) and a secondary on 1114 (the proxied upstream, metrics on); `observe.spec.ts` boots a
+third for its log-pressure test. Set `E2E_JAVA` to choose the java executable; each server's output
+goes to `test-reports/mockserver-<role>.log`. Tests run serially against that shared state. A test
+for a known open defect is a `test.fixme` naming the defect id; any other skip fails the run in CI
+(see [ci-cd.md](../infrastructure/ci-cd.md#ui-end-to-end-playwright-step)).
+
 **Editors embed this dashboard, they do not ship it.** The JetBrains plugin's tool window is a
 `JBCefBrowser` and the VS Code docked view is a `WebviewView` iframe, both pointed at
 `http://localhost:<port>/mockserver/dashboard` (see

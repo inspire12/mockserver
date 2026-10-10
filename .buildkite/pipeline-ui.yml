@@ -113,16 +113,18 @@ steps:
           limit: 2
 
   - label: ":playwright: UI end-to-end (real browser)"
-    # Drives the served dashboard in headless Chromium against a live MockServer
-    # (real REST + real WebSocket). Builds the current runnable JAR, boots it,
-    # and runs the Playwright suite against it. Heavier than the jsdom tests
-    # (JAR build + browser image), so it is a longer-timeout step.
+    # Drives the served dashboard in headless Chromium against live MockServers
+    # (real REST + real WebSocket). Builds the current runnable JAR; the
+    # Playwright config boots it (main + secondary server) inside the Playwright
+    # container and runs every dashboard area's spec against it. Heavier than
+    # the jsdom tests (JAR build + browser image), so it is a longer-timeout step.
     command: ".buildkite/scripts/steps/ui-e2e.sh"
     artifact_paths:
       - "mockserver-ui/test-reports/*.xml"
+      - "mockserver-ui/test-reports/*.log"
       - "mockserver-ui/test-results/**/*"
       - "mockserver-ui/playwright-report/**/*"
-    timeout_in_minutes: 30
+    timeout_in_minutes: 40
     retry:
       automatic:
         - exit_status: -1   # agent lost (e.g. Spot reclamation)

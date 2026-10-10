@@ -82,10 +82,18 @@ test('creates an expectation in the composer, then streams the matching request 
   await page.evaluate(() => {
     window.location.hash = '#/dashboard';
   });
-  // The LogPanel content is a role="log" ARIA live region. It starts empty.
+  // The LogPanel content is a role="log" ARIA live region. At INFO it first shows
+  // the registration's entry, which proves the feed has caught up; only then is
+  // the absence of a response (and of the request in Received Requests) meaningful.
   const logRegion = page.getByRole('log').filter({ visible: true });
-  await expect(logRegion).toBeVisible();
-  await expect(logRegion).toContainText('No log messages yet');
+  await expect(logRegion.getByText('CREATED_EXPECTATION').first()).toBeVisible();
+  await expect(logRegion.getByText('EXPECTATION_RESPONSE')).toHaveCount(0);
+  const receivedRequests = page
+    .locator('.MuiPaper-root')
+    .filter({ has: page.locator('h6, .MuiTypography-subtitle2').getByText('Received Requests', { exact: true }) })
+    .filter({ visible: true });
+  await expect(receivedRequests).toBeVisible();
+  await expect(receivedRequests).not.toContainText(path);
 
   // Fire a MATCHING request over the wire. MockServer serves the mock (201) and
   // logs the received request — which it pushes to the open page via the WS.
@@ -95,14 +103,13 @@ test('creates an expectation in the composer, then streams the matching request 
   // A new log entry appears in the live region purely because the WebSocket
   // delivered it — no reload, no polling. The matched request logs an
   // EXPECTATION_RESPONSE. Playwright auto-retries until it arrives, proving the
-  // log panel streams live off the real WebSocket (it was empty a moment ago).
+  // log panel streams live off the real WebSocket (it had none a moment ago).
   await expect(logRegion.getByText('EXPECTATION_RESPONSE').first()).toBeVisible();
 
-  // Bind that live push to OUR request: the same WebSocket feed renders the
-  // received request in the dashboard as plain text. The path is uniquely
-  // timestamped, so a visible occurrence proves the exact request we fired
-  // streamed into the dashboard live (it cannot have come from anywhere else).
-  await expect(page.getByText(path, { exact: false }).filter({ visible: true }).first()).toBeVisible();
+  // Bind that live push to OUR request: the same WebSocket feed lists it in
+  // Received Requests, which did not hold the uniquely timestamped path above
+  // (the log's registration entry also names the path, so the log cannot prove it).
+  await expect(receivedRequests).toContainText(path);
 });
 
 // ---------------------------------------------------------------------------

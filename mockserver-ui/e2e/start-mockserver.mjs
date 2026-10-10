@@ -5,24 +5,39 @@
 // browser against a real server over real REST + WebSocket — no mocked fetch,
 // no jsdom.
 //
-// This is invoked by playwright.config.ts as its `webServer.command`. Playwright
-// waits for `webServer.url` (a GET of the dashboard) to answer before running
-// the tests, and sends SIGTERM to this process (and thus the JVM) on teardown.
+// This is invoked by playwright.config.ts as a `webServer.command`, once per
+// server role. Playwright waits for that entry's `url` (a GET of the dashboard)
+// to answer before running the tests, and sends SIGTERM to this process (and
+// thus the JVM) on teardown.
+//
+// Roles (first argument):
+//   main       the server under test (E2E_MS_PORT, default 1084). Logs at INFO
+//              (the log-panel assertions read received-request entries), with
+//              load generation and SLO tracking on; metrics stay OFF, because a
+//              test proves the dashboard never polls them on such a server.
+//   secondary  a second server (E2E_UPSTREAM_PORT, default 1114): the proxied
+//              "upstream" for the library / verify tests, a server without SLO
+//              tracking, and the server with metrics on for the Metrics view.
 //
 // The JAR is located newest-first under mockserver-netty-no-dependencies/target.
-// If none exists it is built with Maven (the `build-ui` profile bundles the
-// current UI source into the JAR). Building can take a few minutes, so the
-// Playwright `webServer.timeout` is set generously; in CI the JAR is built by
-// the pipeline step BEFORE Playwright runs, so this path only locates + execs.
+// If none exists the main role builds it with Maven (the `build-ui` profile
+// bundles the current UI source into the JAR); Playwright starts the web servers
+// in order, so the secondary role finds the jar the main role built. In CI the
+// JAR is built by the pipeline step BEFORE Playwright runs.
+//
+// Each JVM's output goes to test-reports/mockserver-<role>.log (a CI artifact),
+// not to the console: at INFO the main server logs every request.
 //
 // Env:
-//   E2E_MS_PORT   port MockServer listens on (default 1084 — deliberately not
-//                 the conventional 1080, so the suite never silently reuses a
-//                 hand-started demo server running a stale dashboard build).
-//   E2E_MS_JAR    explicit path to a runnable JAR (skips discovery/build).
+//   E2E_MS_PORT        main server port (default 1084 — deliberately not 1080, so
+//                      the suite never silently reuses a hand-started demo server
+//                      running a stale dashboard build).
+//   E2E_UPSTREAM_PORT  secondary server port (default 1114).
+//   E2E_MS_JAR         explicit path to a runnable JAR (skips discovery/build).
+//   E2E_JAVA           java executable (default `java` on the PATH).
 
 import { spawn, spawnSync } from 'node:child_process';
-import { readdirSync, statSync, existsSync, mkdtempSync } from 'node:fs';
+import { readdirSync, statSync, existsSync, mkdirSync, mkdtempSync, openSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
@@ -32,7 +47,30 @@ const uiDir = resolve(__dirname, '..');
 const repoRoot = resolve(uiDir, '..');
 const targetDir = join(repoRoot, 'mockserver', 'mockserver-netty-no-dependencies', 'target');
 
-const PORT = process.env.E2E_MS_PORT || '1084';
+const ROLES = {
+  main: {
+    port: process.env.E2E_MS_PORT || '1084',
+    jvmArgs: [
+      '-Xmx1g',
+      '-Dmockserver.maxLogEntries=20000',
+      '-Dmockserver.loadGenerationEnabled=true',
+      '-Dmockserver.sloTrackingEnabled=true',
+    ],
+    logLevel: 'INFO',
+  },
+  secondary: {
+    port: process.env.E2E_UPSTREAM_PORT || '1114',
+    jvmArgs: ['-Xmx512m', '-Dmockserver.maxLogEntries=5000', '-Dmockserver.metricsEnabled=true'],
+    logLevel: 'INFO',
+  },
+};
+
+const roleName = process.argv[2] || 'main';
+const role = ROLES[roleName];
+if (!role) {
+  console.error(`[e2e] unknown server role '${roleName}' (expected one of: ${Object.keys(ROLES).join(', ')})`);
+  process.exit(2);
+}
 
 function findJar() {
   if (process.env.E2E_MS_JAR) {
@@ -71,34 +109,30 @@ function buildJar() {
 }
 
 let jar = findJar();
-if (!jar) {
+if (!jar && roleName === 'main') {
   buildJar();
   jar = findJar();
 }
 if (!jar) {
-  console.error('[e2e] Could not locate a runnable MockServer JAR after build');
+  console.error('[e2e] Could not locate a runnable MockServer JAR');
   process.exit(1);
 }
 
-console.error(`[e2e] Booting MockServer on port ${PORT} from ${jar}`);
+const logDir = join(uiDir, 'test-reports');
+mkdirSync(logDir, { recursive: true });
+const logFile = join(logDir, `mockserver-${roleName}.log`);
+const out = openSync(logFile, 'w');
+console.error(`[e2e] Booting the ${roleName} MockServer on port ${role.port} from ${jar} (log: ${logFile})`);
 
-// Modest heap + capped log ring buffer: the suite fires only a handful of
-// requests, so it never needs the heap-scaled default (up to 250,000 entries).
+// Run in a throwaway temp dir so MockServer's startup artifacts (e.g. the
+// exported mockserver-ca.pem) and the cassette files the library tests write
+// (relative paths under .tmp/) never land in the source tree.
+const cwd = mkdtempSync(join(tmpdir(), `mockserver-e2e-${roleName}-`));
+mkdirSync(join(cwd, '.tmp'));
 const child = spawn(
-  'java',
-  [
-    '-Xmx512m',
-    '-Dmockserver.maxLogEntries=2000',
-    '-jar',
-    jar,
-    '-serverPort',
-    PORT,
-    '-logLevel',
-    'WARN',
-  ],
-  // Run in a throwaway temp dir so MockServer's startup artifacts (e.g. the
-  // exported mockserver-ca.pem) never land in the source tree.
-  { stdio: ['ignore', 'inherit', 'inherit'], cwd: mkdtempSync(join(tmpdir(), 'mockserver-e2e-')) },
+  process.env.E2E_JAVA || 'java',
+  [...role.jvmArgs, '-jar', jar, '-serverPort', role.port, '-logLevel', role.logLevel],
+  { stdio: ['ignore', out, out], cwd },
 );
 
 // Forward termination from Playwright (SIGTERM/SIGINT) to the JVM so no server
@@ -109,4 +143,7 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
     process.exit(0);
   });
 }
-child.on('exit', (code) => process.exit(code ?? 0));
+child.on('exit', (code) => {
+  console.error(`[e2e] the ${roleName} MockServer exited with code ${code} (log: ${logFile})`);
+  process.exit(code ?? 0);
+});
