@@ -63,12 +63,17 @@ Every released version is available under two equivalent tag forms — pick whic
 
 ### Registries
 
-Images are published to **Docker Hub** and mirrored to **AWS ECR Public**:
+Images are published to **Docker Hub** and copied to the **GitHub Container Registry (GHCR)** and **AWS ECR Public**:
 
 ```bash
 docker pull mockserver/mockserver:8.0.0
+docker pull ghcr.io/mock-server/mockserver:8.0.0
 docker pull public.ecr.aws/t2x9c0i6/mockserver:8.0.0
 ```
+
+Each tag has the **same image digest** on all three registries. Docker Hub limits anonymous pulls, so if your CI builds hit that limit, pull from GHCR or ECR Public instead; GHCR is the natural choice for GitHub Actions. The webhook image is at `ghcr.io/mock-server/mockserver-webhook` and `public.ecr.aws/t2x9c0i6/mockserver-webhook`.
+
+GHCR carries every release from 7.1.0 onwards, with the same tags as Docker Hub except the experimental `-aot` tags and the `snapshot`/`root` tags, which are not on GHCR.
 
 ## How to use
 
@@ -141,7 +146,7 @@ cosign verify \
   mockserver/mockserver:8.0.0
 ```
 
-The same key signs every image variant (`-graaljs`, `-http3`, `clustered-…`), the ECR Public mirror, and the Helm chart.
+The same key signs every image variant (`-graaljs`, `-http3`, `clustered-…`), the GHCR and ECR Public copies (for example `cosign verify --key https://www.mock-server.com/mockserver-cosign.pub ghcr.io/mock-server/mockserver:8.0.0`), and the Helm chart.
 
 ## More
 

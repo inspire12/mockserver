@@ -6,9 +6,10 @@
 # Javadoc unpublished while the Javadoc step reported "passed" in build #36.
 #
 # Hard checks (failure aborts the build):
-#   Maven Central core + plugin, brew-tar artifact, Docker Hub, npm × 2,
-#   PyPI, RubyGems, GitHub Release, Helm chart (tarball + index.yaml),
-#   Website, JSON Schema, Javadoc, SwaggerHub (version + default).
+#   Maven Central core + plugin, brew-tar artifact, Docker Hub, GHCR images
+#   (mockserver + mockserver-webhook, anonymous pull), npm × 2, PyPI,
+#   RubyGems, GitHub Release, Helm chart (tarball + index.yaml), Website,
+#   JSON Schema, Javadoc, SwaggerHub (version + default).
 #
 # Soft checks (warn, don't fail):
 #   Homebrew formula — bumped asynchronously by BrewTestBot, may not be
@@ -226,28 +227,43 @@ check_http "mockserver $V windows-x86_64 bundle" \
   "https://github.com/mock-server/mockserver-monorepo/releases/download/mockserver-$V/mockserver-$V-windows-x86_64.zip"
 
 log_info ""
-log_info "== GHCR mirror (soft — convenience mirror, not a release gate) =="
-# GHCR requires a bearer token even to read a public package, so fetch an
-# anonymous pull token first, then HEAD the manifest. Soft: the mirror is a
-# best-effort convenience surface (see docker.sh MIRROR_GHCR), never a gate.
-ghcr_token=$(curl -sS --retry 3 --max-time 20 \
-  "https://ghcr.io/token?service=ghcr.io&scope=repository:mock-server/mockserver:pull" 2>/dev/null \
-  | jq -r '.token // empty' 2>/dev/null)
-if [[ -n "$ghcr_token" ]]; then
-  ghcr_code=$(curl -sS --retry 3 -o /dev/null -w '%{http_code}' --max-time 20 \
-    -H "Authorization: Bearer $ghcr_token" \
-    -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json" \
-    "https://ghcr.io/v2/mock-server/mockserver/manifests/$V" 2>/dev/null)
-  if [[ "$ghcr_code" == "200" ]]; then
-    log_info "  PASS  ghcr.io/mock-server/mockserver:$V"
-  else
-    log_info "  WARN  ghcr.io/mock-server/mockserver:$V returned HTTP ${ghcr_code:-?} [soft] (mirror disabled, lagging, or token absent)"
-    SOFT_FAILS+=("GHCR mirror")
+log_info "== GHCR images (ghcr.io/mock-server — HARD, the documented Docker Hub alternative) =="
+# docker.sh mirrors the release tags to GHCR by digest and the docs offer GHCR to users who hit
+# Docker Hub's anonymous pull limit, so the logged-out pull those users make must work. GHCR needs
+# a bearer token even for a public package; its token endpoint answers UNAUTHORIZED for a PRIVATE
+# package and DENIED for a missing one, which the failure line reports. Retried with backoff so a
+# registry blip cannot fail a release that published correctly.
+ghcr_anonymous_manifest() {
+  local repo="$1" tag="$2" body token code
+  body=$(curl -sS --connect-timeout 10 --max-time 15 \
+    "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull" 2>/dev/null || true)
+  token=$(jq -r '.token // empty' <<<"$body" 2>/dev/null || true)
+  if [[ -z "$token" ]]; then
+    GHCR_FAIL_REASON=$(jq -r '.errors[0] // empty | "\(.code) \(.message)"' <<<"$body" 2>/dev/null || true)
+    GHCR_FAIL_REASON="no anonymous pull token (${GHCR_FAIL_REASON:-no response})"
+    return 1
   fi
-else
-  log_info "  WARN  could not obtain GHCR anonymous pull token [soft]"
-  SOFT_FAILS+=("GHCR mirror")
-fi
+  code=$(curl -sS --connect-timeout 10 --max-time 15 -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer $token" \
+    -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
+    "https://ghcr.io/v2/${repo}/manifests/${tag}" 2>/dev/null || true)
+  if [[ "$code" != "200" ]]; then
+    GHCR_FAIL_REASON="manifest HTTP ${code:-000}, expected 200"
+    return 1
+  fi
+}
+for ghcr_repo in mock-server/mockserver mock-server/mockserver-webhook; do
+  GHCR_FAIL_REASON=""
+  if retry 3 10 -- ghcr_anonymous_manifest "$ghcr_repo" "$V"; then
+    log_info "  PASS  ghcr.io/$ghcr_repo:$V  (anonymous pull)"
+  else
+    log_error "  FAIL  ghcr.io/$ghcr_repo:$V — $GHCR_FAIL_REASON"
+    if [[ "$GHCR_FAIL_REASON" == *UNAUTHORIZED* ]]; then
+      log_error "        the package is private: make it public in its GitHub package settings"
+    fi
+    HARD_FAILS+=("ghcr.io/$ghcr_repo:$V")
+  fi
+done
 
 log_info ""
 log_info "== Helm =="
@@ -310,12 +326,11 @@ else
 fi
 
 # == OCI chart publish (issue #2281 — HARD) ==
-# The image-mirror block above probes the container IMAGE (ghcr.io/mock-server/
-# mockserver). The Helm chart is a SEPARATE OCI artifact at a different repo —
-# ghcr.io/mock-server/charts/mockserver — pushed by helm.sh (fix 11bd3808a) and
-# never previously verified. Probe it the same way: an anonymous GHCR pull token
-# scoped to the chart repo, then HEAD the chart manifest by version tag. HARD:
-# unlike the convenience image mirror, the OCI chart is the documented install
+# The GHCR images block above probes the container IMAGES. The Helm chart is a
+# SEPARATE OCI artifact at a different repo — ghcr.io/mock-server/charts/mockserver
+# — pushed by helm.sh (fix 11bd3808a) and never previously verified. Probe it the
+# same way: an anonymous GHCR pull token scoped to the chart repo, then HEAD the
+# chart manifest by version tag. HARD: the OCI chart is the documented install
 # source (`helm pull oci://ghcr.io/mock-server/charts/mockserver`) and Artifact
 # Hub listing, so a missing publish is a release defect, not a lagging mirror.
 log_info ""

@@ -71,6 +71,7 @@ curl http://localhost:1080/pets
 | Channel | Command |
 |---------|---------|
 | Docker | `docker run -d --rm -p 1080:1080 mockserver/mockserver` |
+| Docker from GitHub Container Registry (avoids Docker Hub's pull limit) | `docker run -d --rm -p 1080:1080 ghcr.io/mock-server/mockserver` |
 | Homebrew (macOS/Linux) | `brew install mockserver` |
 | Helm ([chart guide](helm/mockserver/README.md)) | `helm upgrade --install --namespace mockserver mockserver oci://ghcr.io/mock-server/charts/mockserver` |
 | Maven Central [![mockserver](https://img.shields.io/maven-central/v/org.mock-server/mockserver-netty.svg)](https://central.sonatype.com/search?q=g:org.mock-server) | `org.mock-server:mockserver-netty-no-dependencies` — see [all Maven artifacts](https://www.mock-server.com/where/maven_central.html) (server, WARs, JUnit 4/5, Spring, Maven plugin) |

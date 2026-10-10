@@ -22,11 +22,23 @@ In addition it is possible to <a href="#docker_container_customization">customis
 
 <pre><code class="code">docker pull mockserver/mockserver</code></pre>
 
-<p>MockServer images are also available from <strong>AWS ECR Public</strong>, which avoids Docker Hub rate limits and provides lower latency for AWS-based CI/CD:</p>
-
-<pre><code class="code">docker pull public.ecr.aws/mockserver/mockserver</code></pre>
-
 <p>This is not strictly necessary as the image will be automatically pulled if it does not exist when the run command is used. However, using the pull command will ensure the latest version of the image is downloaded.</p>
+
+<p>Docker Hub limits how many images anonymous users can pull, which often hits CI builds that share an IP address. The same images are also published to two other registries, and pulls from them do not count against the Docker Hub limit:</p>
+
+<ul>
+    <li><strong>GitHub Container Registry (GHCR)</strong>, a good choice for CI and especially for GitHub Actions:
+<pre><code class="code">docker pull ghcr.io/mock-server/mockserver:{{ site.mockserver_version }}</code></pre></li>
+    <li><strong>AWS ECR Public</strong>, which gives lower latency for AWS-based CI/CD:
+<pre><code class="code">docker pull public.ecr.aws/t2x9c0i6/mockserver:{{ site.mockserver_version }}</code></pre></li>
+</ul>
+
+<p>GHCR and ECR Public carry the same tags as Docker Hub (for example <span class="inline_code">latest</span>, <span class="inline_code">{{ site.mockserver_version }}</span>, <span class="inline_code">mockserver-{{ site.mockserver_version }}</span>, <span class="inline_code">{{ site.mockserver_version }}-graaljs</span> and <span class="inline_code">clustered-{{ site.mockserver_version }}</span>) and each tag has the <strong>same image digest</strong> on every registry, so switching registry changes nothing but where the image comes from. The Kubernetes admission webhook image is at <span class="inline_code">ghcr.io/mock-server/mockserver-webhook</span> and <span class="inline_code">public.ecr.aws/t2x9c0i6/mockserver-webhook</span>. On GHCR:</p>
+
+<ul>
+    <li>releases from 7.1.0 onwards are available; earlier versions are not</li>
+    <li>the experimental <span class="inline_code">-aot</span> tags and the <span class="inline_code">snapshot</span> tags are not published to GHCR; pull them from Docker Hub or ECR Public</li>
+</ul>
 
 <a id="verify_docker_image_signature" class="anchor" href="#verify_docker_image_signature">&nbsp;</a>
 
@@ -36,7 +48,7 @@ In addition it is possible to <a href="#docker_container_customization">customis
 
 <pre class="prettyprint code"><code class="code">cosign verify --key https://www.mock-server.com/mockserver-cosign.pub mockserver/mockserver:{{ site.mockserver_version }}</code></pre>
 
-<p>A successful verification prints the signed payload and exits with status <span class="keyword">0</span>. The same key verifies the <span class="inline_code">-graaljs</span>, <span class="inline_code">-http3</span> and <span class="inline_code">clustered-</span> image variants and the ECR Public mirror. Image versions before {{ site.mockserver_version }} predate signing.</p>
+<p>A successful verification prints the signed payload and exits with status <span class="keyword">0</span>. The same key verifies the <span class="inline_code">-graaljs</span>, <span class="inline_code">-http3</span> and <span class="inline_code">clustered-</span> image variants and the GHCR and ECR Public copies, for example <span class="inline_code">cosign verify --key https://www.mock-server.com/mockserver-cosign.pub ghcr.io/mock-server/mockserver:{{ site.mockserver_version }}</span>. Image versions before {{ site.mockserver_version }} predate signing.</p>
 
 <a id="run_docker_container" class="anchor" href="#run_docker_container">&nbsp;</a>
 

@@ -63,16 +63,18 @@ grafana/k6"]
 
 ### Docker Registries
 
-Images are published to two registries:
+Images are published to three registries:
 
 | Registry | Image | Notes |
 |----------|-------|-------|
 | Docker Hub | `mockserver/mockserver` | Primary registry (main MockServer image) |
 | Docker Hub | `mockserver/mockserver-webhook` | Admission webhook image |
-| AWS ECR Public | `public.ecr.aws/mockserver/mockserver` | Avoids Docker Hub rate limits for AWS-based CI/CD |
-| AWS ECR Public | `public.ecr.aws/mockserver/mockserver-webhook` | Webhook image on ECR |
+| AWS ECR Public | `public.ecr.aws/t2x9c0i6/mockserver` | Avoids Docker Hub rate limits for AWS-based CI/CD. `t2x9c0i6` is the AWS-assigned registry alias; `public.ecr.aws/mockserver/...` does not exist |
+| AWS ECR Public | `public.ecr.aws/t2x9c0i6/mockserver-webhook` | Webhook image on ECR |
+| GHCR | `ghcr.io/mock-server/mockserver` | Release tags only, copied from ECR Public by digest (`docker buildx imagetools create`), from 7.1.0. Not mirrored: `-aot`, snapshot tags |
+| GHCR | `ghcr.io/mock-server/mockserver-webhook` | Webhook release tags |
 
-Both registries receive the same tags on every push. On each merge to `master`, the legacy Buildkite pipeline (`.buildkite/scripts/steps/java-docker-push-snapshot.sh`) pushes the `:snapshot`, `:mockserver-snapshot`, `-graaljs` and `-clustered` snapshot variants (plus `:snapshot` / `:mockserver-snapshot` for the webhook image), then, last, `snapshot-http3` / `mockserver-snapshot-http3` (a failure fails the step). During releases, the release pipeline (`scripts/release/components/docker.sh`) pushes `:latest`, `:X.Y.Z`, `:mockserver-X.Y.Z`, `-graaljs`, `clustered-*`, `-aot` (experimental, error-isolated), and webhook release variants, then — last, after those are mirrored and signed — `-http3`. The `:latest` tag is pushed only by the release pipeline, not by the per-merge snapshot step. The `:latest` tag always points to the most recent official release, not the development branch.
+Docker Hub and ECR Public receive the same tags on every push. On each merge to `master`, the legacy Buildkite pipeline (`.buildkite/scripts/steps/java-docker-push-snapshot.sh`) pushes the `:snapshot`, `:mockserver-snapshot`, `-graaljs` and `-clustered` snapshot variants (plus `:snapshot` / `:mockserver-snapshot` for the webhook image), then, last, `snapshot-http3` / `mockserver-snapshot-http3` (a failure fails the step). During releases, the release pipeline (`scripts/release/components/docker.sh`) pushes `:latest`, `:X.Y.Z`, `:mockserver-X.Y.Z`, `-graaljs`, `clustered-*`, `-aot` (experimental, error-isolated), and webhook release variants, then — last, after those are mirrored and signed — `-http3`. The `:latest` tag is pushed only by the release pipeline, not by the per-merge snapshot step. The `:latest` tag always points to the most recent official release, not the development branch.
 
 Release images are cosign-signed by digest after push (see below). Snapshot images are not signed.
 

@@ -153,7 +153,7 @@ keywords: sidecar proxy, transparent proxy, kubernetes sidecar, iptables redirec
 
 <h3>Enabling the webhook</h3>
 
-<p>The webhook Docker image (<code class="inline code">mockserver/mockserver-webhook</code>) is published to Docker Hub and ECR Public by the release pipeline alongside the main MockServer image. Install with the webhook enabled:</p>
+<p>The webhook Docker image (<code class="inline code">mockserver/mockserver-webhook</code>) is published to Docker Hub, GHCR (<code class="inline code">ghcr.io/mock-server/mockserver-webhook</code>) and ECR Public by the release pipeline alongside the main MockServer image. Install with the webhook enabled:</p>
 
 <pre class="prettyprint lang-sh code"><code class="code"># Install with the admission webhook enabled
 helm install mockserver oci://ghcr.io/mock-server/charts/mockserver \

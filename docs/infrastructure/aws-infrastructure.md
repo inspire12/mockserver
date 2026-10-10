@@ -233,7 +233,7 @@ rate 1 min"]
 
 | Resource | Purpose |
 |----------|---------|
-| ECR Public Repository (`mockserver`) | Public Docker image registry at `public.ecr.aws/mockserver/mockserver` — avoids Docker Hub rate limits for AWS-based CI/CD |
+| ECR Public Repository (`mockserver`) | Public Docker image registry at `public.ecr.aws/t2x9c0i6/mockserver` (`t2x9c0i6` is the AWS-assigned registry alias) — avoids Docker Hub rate limits for AWS-based CI/CD |
 | ECR Pull-Through Cache rules (`docker-hub`, `quay`) | Private regional cache (eu-west-2) for the Testcontainers backing images. CI pulls in-region; the upstreams (Docker Hub, quay.io) are contacted only on a first miss. **`mcr.microsoft.com` is NOT supported by ECR pull-through** (`UnsupportedUpstreamRegistryException`), so azurite pulls direct from Microsoft — the host pre-pull is its only guard. Applied 2026 (agent stack now elastic-ci-stack v6.71.3). Auto-created cache repos get AES256 + a 30-day expiry via a repository creation template |
 
 #### Secrets

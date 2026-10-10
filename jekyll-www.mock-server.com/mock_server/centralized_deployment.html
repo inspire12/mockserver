@@ -114,7 +114,7 @@ app:
 <pre class="prettyprint lang-bash code"><code class="code">docker pull mockserver/mockserver:clustered-{{ site.mockserver_version }}</code></pre>
 
 <p>
-    This image is published to Docker Hub and ECR Public alongside every release, built for both
+    This image is published to Docker Hub, GHCR (<code class="inline code">ghcr.io/mock-server/mockserver:clustered-{{ site.mockserver_version }}</code>) and ECR Public alongside every release, built for both
     <code class="inline code">linux/amd64</code> and <code class="inline code">linux/arm64</code>.
     It also includes <code class="inline code">netty-tcnative-boringssl-static</code> for native TLS performance,
     the same as the base image.

@@ -175,7 +175,9 @@ fi
 # ---- Auth (skipped in dry-run) --------------------------------------------
 # MIRROR_GHCR gates the GHCR image mirror (ghcr.io/mock-server/mockserver). It
 # is enabled only when a GHCR login succeeds, so a missing/expired token or a
-# GHCR outage degrades to "Docker Hub + ECR only" rather than aborting.
+# GHCR outage degrades to "Docker Hub + ECR only" rather than aborting here;
+# verify.sh then fails the release on the missing GHCR images, after every
+# other channel has published.
 MIRROR_GHCR=false
 if ! is_dry_run; then
   log_info "Login to Docker Hub + ECR Public"
@@ -186,8 +188,8 @@ if ! is_dry_run; then
 
   # GHCR mirror login. Reuses the same mockserver-release/ghcr-token secret the
   # Helm chart already pushes with (oci://ghcr.io/mock-server/charts), so the
-  # org packages + write scope already exist. Non-fatal: a GHCR mirror is a
-  # convenience surface, never a release gate.
+  # org packages + write scope already exist. Non-fatal here so the remaining
+  # channels still publish; verify.sh's GHCR check is the gate.
   if aws secretsmanager describe-secret --region "$REGION" \
        --secret-id mockserver-release/ghcr-token >/dev/null 2>&1; then
     log_info "Login to GHCR (ghcr.io/mock-server) for the image mirror"
@@ -206,8 +208,8 @@ if ! is_dry_run; then
   fi
 fi
 
-# GHCR image repository (mirror target). The manifests are copied from Docker
-# Hub with `docker buildx imagetools create` after the primary push, so the
+# GHCR image repository (mirror target). The manifests are copied from ECR
+# Public with `docker buildx imagetools create` after the primary push, so the
 # GHCR images share the exact same digest (and cosign signature) as Docker Hub.
 GHCR_REPO="ghcr.io/mock-server/mockserver"
 

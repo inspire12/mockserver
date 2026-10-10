@@ -654,6 +654,8 @@ linux/amd64 + linux/arm64"]
 
 The ECR repository URI is resolved at runtime via `aws ecr-public describe-repositories` rather than hardcoded — the registry alias is AWS-assigned and must not be hardcoded (`scripts/release/components/docker.sh`).
 
+The GHCR mirror runs only when the GHCR login succeeds, so the Docker step does not abort on a GHCR problem. The release **Verify** step (`scripts/release/components/verify.sh`) is the gate: it makes the anonymous pull a user would make (token from `ghcr.io/token?service=ghcr.io`, then the `X.Y.Z` manifest) for both `mock-server/mockserver` and `mock-server/mockserver-webhook`, retried with backoff, and fails the release if either is missing or the package is private (GHCR's token endpoint answers `UNAUTHORIZED` for a private package and `DENIED` for a missing one).
+
 ### Release Preflight Credential Gate
 
 **A dead or under-scoped publishing credential fails the release *before* it starts, not half-way through.** The release preflight pipeline (`.buildkite/release-preflight-pipeline.yml`) runs `scripts/release/check-release-credentials.sh` as a hard gate on the **release queue**, dispatched by `.buildkite/scripts/release-runner.sh check-credentials`. This closes the gap that half-published 8.0.0: an npm token that still *existed* (the old presence check passed) but could no longer authenticate, so `npm publish` 401'd after the version bumps had already been pushed.
